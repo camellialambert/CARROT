@@ -731,7 +731,7 @@ server <- function(input, output, session) {
     req(r_df_mono(), r_df_ech())
     withProgress(message = "Instanciation de la classe R6 & Lecture FCS...", value = 0.5, {
       tryCatch({
-        obj <- EchantillonCompense$new(r_df_mono(), r_df_ech())
+        obj <- CARROT$new(r_df_mono(), r_df_ech())
         obj$charger_fcs()
         r_df_ech(obj$chemins_echantillons)
         r_obj_R6(obj)

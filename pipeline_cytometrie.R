@@ -920,7 +920,7 @@ CARROT <- R6Class(
         return(self$post_retrait_bordures) # Renvoie en priorité absolue les données ayant subi l'intégralité du pipeline de nettoyage (niveau maximal)
       } 
       if (!is.null(self$post_PeacoQC) && length(self$post_PeacoQC) > 0) { # Évalue si la liste issue de l'algorithme d'isolation des pics de densité de flux PeacoQC est disponible
-        return(self$post_post_PeacoQC) # Renvoie les données nettoyées par PeacoQC à défaut d'avoir appliqué le retrait des bordures
+        return(self$post_PeacoQ) # Renvoie les données nettoyées par PeacoQC à défaut d'avoir appliqué le retrait des bordures
       }
       if (!is.null(self$post_flowAI) && length(self$post_flowAI) > 0) { # Évalue si la liste issue du contrôle de régularité du débit et du signal flowAI est disponible
         return(self$post_flowAI) # Renvoie les données corrigées par flowAI à défaut d'étapes de nettoyage ultérieures
@@ -1045,7 +1045,7 @@ CARROT <- R6Class(
       } 
       
       if (is.null(liste_source) || length(liste_source) == 0) { # Si la structure de nettoyage demandée est introuvable ou si les étapes amont n'ont pas été lancées
-        if (source_nettoyage == "peacoqc" || source_nettoyage == "flowai") { # Sécurité stricte sans %in% : vérifie si l'utilisateur visait un pipeline de qualité spécifique
+        if (source_nettoyage == "peacoqc" || source_nettoyage == "flowai") { # vérifie si l'utilisateur visait un pipeline de qualité spécifique
           message("Source '", source_nettoyage, "' introuvable ou vide. Repli sur les données compensées brutes.") # Émet un avertissement pour notifier le contournement et le repli algorithmique
         } 
         liste_source <- if (length(self$echantillons_traites) > 0) self$echantillons_traites else self$fcs_compenses # Système de repli dynamique : charge la liste d'échantillons traités ou compenses disponible
