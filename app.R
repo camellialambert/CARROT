@@ -7,6 +7,7 @@ library(grid)
 library(gridExtra)
 
 source("pipeline_cytometrie.R")
+options(shiny.maxRequestSize = 1024 * 1024 * 1024)
 
 # Base initiale du dictionnaire de canaux connus
 if (!exists("global_canaux")) {

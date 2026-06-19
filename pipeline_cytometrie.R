@@ -254,7 +254,7 @@ CARROT <- R6Class(
       names(plots) <- canaux_a_generer # Assigne le nom technique des canaux respectifs aux éléments graphiques de la liste produite
       if (!is.null(nom_canal)) return(plots[[nom_canal]]) # Si un canal unique a été ciblé en entrée, extrait et retourne directement sa figure associée
       return(plots) # Sinon, retourne la liste complète des figures générées pour tous les canaux
-    } 
+    }, 
     
     calculer_spillover = function() { # Méthode calculant la matrice de spillover (compensation) à partir des médianes de fluorescence
       nombre_canaux <- length(self$canaux) # Évalue le nombre total de canaux d'acquisition actifs dans l'expérience
@@ -276,7 +276,7 @@ CARROT <- R6Class(
       } 
       self$S_matrix <- S # Enregistre la matrice de spillover globale finalisée dans l'objet R6
       return(self$S_matrix) # Renvoie la matrice calculée pour pouvoir l'exploiter ou l'afficher dans Shiny
-    } 
+    }, 
     
     modifier_spillover = function(nom_echantillon, canal1, canal2, valeur) { # Méthode permettant d'ajuster manuellement un coefficient de compensation spécifique pour un échantillon donné
       if (canal1 == canal2) { # Si l'utilisateur tente de modifier le croisement d'un canal avec lui-même
