@@ -66,10 +66,11 @@ server <- function(input, output, session) {
   
   import_data_server("mon_module_import",
                      pipeline         = my_pipeline,
-                     pipeline_version = my_pipeline_version)
+                     pipeline_version = my_pipeline_version,
+                     canaux    = CANAUX_CONNUS)
   
   compensation_server("mon_module_comp",
-                      pipeline         = my_pipeline,
+                      pipeline = my_pipeline,
                       pipeline_version = my_pipeline_version)
 }
 

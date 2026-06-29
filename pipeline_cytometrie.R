@@ -1035,127 +1035,79 @@ CARROT <- R6Class(
       if (!is.null(self$update_pipeline)) self$update_pipeline("flowAI") # Met à jour le registre d'état ou l'interface UI Shiny pour acter la complétion de cette étape qualité
     },
 
-  retirer_les_bordures = function(canal1, canal2, nom_echantillon = NULL) { # Méthode éliminant les événements cellulaires saturant les limites électroniques minimales et maximales (bordures) de deux canaux cibles
-    self$canaux_bordures <- c(canal1, canal2) # Enregistre le couple de canaux morphologiques ou de fluorescence choisis pour le filtrage dans l'objet R6
-    liste_source <- self$get_derniere_source() # Récupère automatiquement la structure de données la plus avancée du pipeline grâce au système de repli (fallback) pyramidal
-    noms_a_traiter <- if (is.null(nom_echantillon)) names(liste_source) else nom_echantillon # Sélectionne la totalité de la cohorte si aucun fichier n'est spécifié, sinon cible l'échantillon unique fourni
+  retirer_les_bordures = function(canal1, canal2, nom_echantillon = NULL) {
+    self$canaux_bordures <- c(canal1, canal2)
+    liste_source <- self$get_derniere_source()
+    noms_a_traiter <- if (is.null(nom_echantillon)) names(liste_source) else nom_echantillon
     
-<<<<<<< Updated upstream
-    if (is.null(self$post_retrait_bordures)) self$post_retrait_bordures <- list()
-=======
-    retirer_les_debris = function(matrice_points, canal_x, canal_y, nom_echantillon = NULL, source_nettoyage = "brutes") { # Méthode isolant les cellules intactes en éliminant les débris et bruits électroniques à l'aide d'une fenêtre polygonale (PolygonGate)
-      if (is.null(matrice_points)) stop("Aucune coordonnée de gate fournie.") # bloque le script si la structure contenant les coordonnées du polygone est absente
-      if (!is.matrix(matrice_points) && !is.data.frame(matrice_points)) { # valide que le format du tableau contenant les points géométriques est bien bidimensionnel
-        stop("La structure de la gate doit être une matrice ou un data.frame.") # interrompt l'exécution si la structure de données transmise est incompatible
-      }
-      if (nrow(matrice_points) < 3) stop("Un polygone de filtrage nécessite au moins 3 points.") # Sécurité mathématique : exige au moins trois sommets pour fermer l'aire géométrique bidimensionnelle
-      
-      liste_source <- NULL # Initialise à vide la variable destinée à recevoir les données cellulaires de départ
-      if (source_nettoyage == "peacoqc") { # Si l'utilisateur demande explicitement la source issue du contrôle qualité PeacoQC
-        liste_source <- self$post_PeacoQC # Oriente le flux vers les données épurées des instabilités fluidiques par PeacoQC
-      } else if (source_nettoyage == "flowai") { # Sinon, si l'utilisateur spécifie la source en provenance du nettoyage flowAI
-        liste_source <- self$post_flowAI # Oriente le flux vers les données préalablement corrigées par la routine flowAI
-      } 
-      
-      if (is.null(liste_source) || length(liste_source) == 0) { # Si la structure de nettoyage demandée est introuvable ou si les étapes amont n'ont pas été lancées
-        if (source_nettoyage == "peacoqc" || source_nettoyage == "flowai") { # vérifie si l'utilisateur visait un pipeline de qualité spécifique
-          message("Source '", source_nettoyage, "' introuvable ou vide. Repli sur les données compensées brutes.") # Émet un avertissement pour notifier le contournement et le repli algorithmique
-        } 
-        liste_source <- if (length(self$echantillons_traites) > 0) self$echantillons_traites else self$echantillons # Système de repli dynamique : charge la liste d'échantillons traités ou compenses disponible
-      }
-      
-      if (is.null(liste_source) || length(liste_source) == 0) { # Si, après toutes les tentatives de secours, aucune donnée valide n'est localisée en mémoire
-        stop("Aucune donnée disponible (brute, PeacoQC ou flowAI) pour appliquer le filtre débris.") # Interrompt définitivement la méthode pour éviter une erreur fatale en cascade
-      } 
-      
-      matrice_points <- as.matrix(matrice_points[, 1:2]) # Force la conversion des deux premières colonnes en matrice R brute pour l'interface de flowCore
-      colnames(matrice_points) <- c(canal_x, canal_y) # Assigne explicitement les noms des canaux physiques (ex: FSC-A, SSC-A) aux colonnes pour le ciblage optique
-      polygone_debris <- flowCore::polygonGate(.gate = matrice_points, filterId = "Gate_Debris") # Construit l'objet formel polygonGate définissant l'aire géométrique d'inclusion des cellules saines
-      if (is.null(self$gate_debris)) self$gate_debris <- list() # Initialise la sous-liste de mémorisation des objets géométriques de fenêtrage si inexistante
-      if (is.null(self$post_debris)) self$post_debris <- list() # Initialise la sous-liste de stockage des flowFrames de cellules triées si inexistante
-      
-      appliquer_le_filtrage = function(nom) { # Sous-fonction encapsulant le calcul de tri topologique pour un fichier FCS individuel
-        flowframe_entree <- liste_source[[nom]] # Extrait l'objet flowFrame d'entrée correspondant à la clé courante de la cohorte
-        if (is.null(flowframe_entree)) return(NULL) # Quitte proprement la sous-routine si l'échantillon ciblé est introuvable
-        resultat_filtre <- flowCore::filter(flowframe_entree, polygone_debris) # Calcule l'appartenance de chaque événement cellulaire à l'intérieur du polygone (test du point dans un polygone)
-        self$gate_debris[[nom]] <- polygone_debris # Sauvegarde l'objet géométrique appliqué pour permettre des réaffichages graphiques ultérieurs
-        self$post_debris[[nom]] <- flowframe_entree[resultat_filtre@subSet, ] # Sous-échantillonne la matrice binaire en ne retenant que les événements de l'indice logique TRUE (cellules saines)
-      }
-      
-      noms_a_traiter <- if (is.null(nom_echantillon)) names(liste_source) else nom_echantillon # Cible l'ensemble du dossier si aucun nom n'est fourni, ou restreint le traitement à l'échantillon unique spécifié
-      for (nom in noms_a_traiter) { # Boucle itérative exécutant le processus sur chaque fichier sélectionné pour la cohorte active
-        appliquer_le_filtrage(nom) # Applique le fenêtrage géométrique sur l'échantillon de l'itération en cours
-      }
-      if (!is.null(self$update_pipeline)) { # Évalue si la méthode de mise à jour du graphe d'état du pipeline existe dans l'architecture R6
-        self$update_pipeline("debris", nom_echantillon) # Signale le succès de la filtration des débris à l'interface de gestion centrale
-      }
-      return(invisible(self)) # Renvoie l'objet R6 complet discrètement pour permettre le chaînage d'autres méthodes de l'environnement
-    },
->>>>>>> Stashed changes
+    if (is.null(noms_a_traiter) || length(noms_a_traiter) == 0) {
+      warning("Aucun échantillon trouvé à traiter pour le retrait des bordures.")
+      return(NULL)
+    }
     
-    if (is.null(noms_a_traiter) || length(noms_a_traiter) == 0) { # Détecte si la liste résultante des échantillons à analyser est totalement vide ou introuvable
-      warning("Aucun échantillon trouvé à traiter pour le retrait des bordures.") # Émet un avertissement non bloquant pour signaler l'anomalie de flux à l'utilisateur
-      return(NULL) # Interrompt proprement la fonction et retourne la valeur NULL sans altérer l'objet
-    } 
-    
-    for (nom in noms_a_traiter) { # Boucle itérative inspectant et traitant de manière isolée chaque fichier FCS de la cohorte définie
-      if (!is.null(liste_source[[nom]])) { # Vérifie que l'échantillon extrait de la liste source est bien modélisé et présent en mémoire vive
-        message("Retrait des bordures (Margins) sur : ", nom) # Affiche une notification de suivi textuelle en temps réel au sein de la console R
-        self$post_retrait_bordures[[nom]] <- PeacoQC::RemoveMargins( # Déclenche la routine mathématique d'exclusion des événements de saturation du package PeacoQC
-          ff       = liste_source[[nom]], # Transmet l'objet flowFrame (la matrice d'expression cellulaire active) destiné à être purgé
-          channels = self$canaux_bordures # Injecte le vecteur contenant les labels des canaux sur lesquels appliquer le filtrage des valeurs extrêmes
-        ) 
-      } 
-    } 
-    
-    self$update_pipeline("bordures", nom_echantillon) # Met à jour le registre d'état du pipeline ou réactive l'interface UI Shiny pour valider cette étape
+    for (nom in noms_a_traiter) {
+      if (!is.null(liste_source[[nom]])) {
+        message("Retrait des bordures (Margins) sur : ", nom)
+        self$post_retrait_bordures[[nom]] <- PeacoQC::RemoveMargins(
+          ff       = liste_source[[nom]], 
+          channels = self$canaux_bordures
+        )
+      }
+    }
+    if (!is.null(self$update_pipeline)) self$update_pipeline("bordures", nom_echantillon)
   },
-    
-  retirer_les_debris = function(matrice_points, canal_x, canal_y, nom_echantillon = NULL, source_nettoyage = "brutes") { # Méthode isolant les cellules intactes en éliminant les débris et bruits électroniques à l'aide d'une fenêtre polygonale (PolygonGate)
-    if (is.null(matrice_points)) stop("Aucune coordonnée de gate fournie.") # bloque le script si la structure contenant les coordonnées du polygone est absente
-    if (!is.matrix(matrice_points) && !is.data.frame(matrice_points)) { # valide que le format du tableau contenant les points géométriques est bien bidimensionnel
-      stop("La structure de la gate doit être une matrice ou un data.frame.") # interrompt l'exécution si la structure de données transmise est incompatible
+  
+  retirer_les_debris = function(matrice_points, canal_x, canal_y, nom_echantillon = NULL, source_nettoyage = "brutes") {
+    if (is.null(matrice_points)) stop("Aucune coordonnée de gate fournie.")
+    if (!is.matrix(matrice_points) && !is.data.frame(matrice_points)) {
+      stop("La structure de la gate doit être une matrice ou un data.frame.")
     }
-    if (nrow(matrice_points) < 3) stop("Un polygone de filtrage nécessite au moins 3 points.") # Sécurité mathématique : exige au moins trois sommets pour fermer l'aire géométrique bidimensionnelle
+    if (nrow(matrice_points) < 3) stop("Un polygone de filtrage nécessite au moins 3 points.")
     
-    liste_source <- NULL # Initialise à vide la variable destinée à recevoir les données cellulaires de départ
-    if (source_nettoyage == "peacoqc") { # Si l'utilisateur demande explicitement la source issue du contrôle qualité PeacoQC
-      liste_source <- self$post_PeacoQC # Oriente le flux vers les données épurées des instabilités fluidiques par PeacoQC
-    } else if (source_nettoyage == "flowai") { # Sinon, si l'utilisateur spécifie la source en provenance du nettoyage flowAI
-      liste_source <- self$post_flowAI # Oriente le flux vers les données préalablement corrigées par la routine flowAI
-    } 
-    
-    if (is.null(liste_source) || length(liste_source) == 0) { # Si la structure de nettoyage demandée est introuvable ou si les étapes amont n'ont pas été lancées
-      if (source_nettoyage == "peacoqc" || source_nettoyage == "flowai") { # vérifie si l'utilisateur visait un pipeline de qualité spécifique
-        message("Source '", source_nettoyage, "' introuvable ou vide. Repli sur les données compensées / traitées disponibles.") # Émet un avertissement pour notifier le contournement et le repli algorithmique
-      } 
-      liste_source <- if (length(self$echantillons_traites) > 0) self$echantillons_traites else self$echantillons
-    }
-    if (is.null(liste_source) || length(liste_source) == 0) { # Si, après toutes les tentatives de secours, aucune donnée valide n'est localisée en mémoire
-      stop("Aucune donnée disponible (brute ou traitée) pour appliquer le filtre débris.") # Interrompt définitivement la méthode pour éviter une erreur fatale en cascade
-    } 
-    
-    matrice_points <- as.matrix(matrice_points[, 1:2]) # Force la conversion des deux premières colonnes en matrice R brute pour l'interface de flowCore
-    colnames(matrice_points) <- c(canal_x, canal_y) # Assigne explicitement les noms des canaux physiques (ex: FSC-A, SSC-A) aux colonnes pour le ciblage optique
-    polygone_debris <- flowCore::polygonGate(.gate = matrice_points, filterId = "Gate_Debris") # Construit l'objet formel polygonGate définissant l'aire géométrique d'inclusion des cellules saines
-    if (is.null(self$gate_debris)) self$gate_debris <- list() # Initialise la sous-liste de mémorisation des objets géométriques de fenêtrage si inexistante
-    if (is.null(self$post_debris)) self$post_debris <- list() # Initialise la sous-liste de stockage des flowFrames de cellules triées si inexistante
-    
-    appliquer_le_filtrage = function(nom) { # Sous-fonction encapsulant le calcul de tri topologique pour un fichier FCS individuel
-      flowframe_entree <- liste_source[[nom]] # Extrait l'objet flowFrame d'entrée correspondant à la clé courante de la cohorte
-      if (is.null(flowframe_entree)) return(NULL) # Quitte proprement la sous-routine si l'échantillon ciblé est introuvable
-      resultat_filtre <- flowCore::filter(flowframe_entree, polygone_debris) # Calcule l'appartenance de chaque événement cellulaire à l'intérieur du polygone (test du point dans un polygone)
-      self$gate_debris[[nom]] <- polygone_debris # Sauvegarde l'objet géométrique appliqué pour permettre des réaffichages graphiques ultérieurs
-      self$post_debris[[nom]] <- flowframe_entree[resultat_filtre@subSet, ] # Sous-échantillonne la matrice binaire en ne retenant que les événements de l'indice logique TRUE (cellules saines)
+    liste_source <- NULL
+    if (source_nettoyage == "peacoqc") {
+      liste_source <- self$post_PeacoQC
+    } else if (source_nettoyage == "flowai") {
+      liste_source <- self$post_flowAI
     }
     
-    noms_a_traiter <- if (is.null(nom_echantillon)) names(liste_source) else nom_echantillon # Cible l'ensemble du dossier si aucun nom n'est fourni, ou restreint le traitement à l'échantillon unique spécifié
-    for (nom in noms_a_traiter) { # Boucle itérative exécutant le processus sur chaque fichier sélectionné pour la cohorte active
-      appliquer_le_filtrage(nom) # Applique le fenêtrage géométrique sur l'échantillon de l'itération en cours
+    if (is.null(liste_source) || length(liste_source) == 0) {
+      if (source_nettoyage %in% c("peacoqc", "flowai")) {
+        message("⚠️ [Warning] Source '", source_nettoyage, "' introuvable ou vide. Repli sur les données compensées brutes.")
+      }
+      liste_source <- if (length(self$echantillons_traites) > 0) self$echantillons_traites else self$fcs_compenses
     }
     
-    self$update_pipeline("debris", nom_echantillon) # Signale directement le succès de la filtration des débris
-    return(invisible(self)) # Renvoie l'objet R6 complet discrètement pour permettre le chaînage d'autres méthodes de l'environnement
+    if (is.null(liste_source) || length(liste_source) == 0) {
+      stop("Aucune donnée disponible (brute, PeacoQC ou flowAI) pour appliquer le filtre débris.")
+    }
+    
+    matrice_points <- as.matrix(matrice_points[, 1:2])
+    colnames(matrice_points) <- c(canal_x, canal_y)
+    polygone_debris <- flowCore::polygonGate(.gate = matrice_points, filterId = "Gate_Debris")
+    if (is.null(self$gate_debris)) self$gate_debris <- list()
+    if (is.null(self$post_debris)) self$post_debris <- list()
+    
+    appliquer_le_filtrage = function(nom) {
+      flowframe_entree <- liste_source[[nom]]
+      if (is.null(flowframe_entree)) return(NULL)
+      
+      message("Application du filtre Débris (PolygonGate) via source '", source_nettoyage, "' sur : ", nom)
+      resultat_filtre <- flowCore::filter(flowframe_entree, polygone_debris)
+      self$gate_debris[[nom]] <- polygone_debris
+      self$post_debris[[nom]] <- flowframe_entree[resultat_filtre@subSet, ]
+    }
+    
+    noms_a_traiter <- if (is.null(nom_echantillon)) names(liste_source) else nom_echantillon
+    for (nom in noms_a_traiter) { 
+      appliquer_le_filtrage(nom) 
+    }
+    
+    if (!is.null(self$update_pipeline)) {
+      self$update_pipeline("debris", nom_echantillon)
+    }
+    
+    return(invisible(self))
   },
     
   retirer_doublets_FSC = function(facteur_sensibilite = 4, axe_discrimination = "H_A", nom_echantillon = NULL) { # Méthode statistique éliminant les agrégats cellulaires (doublets) sur l'axe Forward Scatter (FSC) en évaluant la linéarité géométrique des signaux
