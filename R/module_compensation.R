@@ -164,26 +164,146 @@ compensation_ui <- function(id) {
       # MATRICE DE SPILLOVER
       # ───────────────────────────────────────────────
       
-      tabPanel(title = "Matrice de Spillover",
-               fluidRow(
-                 column(width = 4,
-                        wellPanel(
-                          h4("Configuration"),
-                          uiOutput(ns("ui_select_echantillon")),
-                          hr(),
-                          # Le bouton de calcul est maintenant ici
-                          uiOutput(ns("ui_btn_calculer_spillover")),
-                          hr(),
-                          actionButton(ns("btn_save_spillover"), "Valider et Enregistrer", 
-                                       class = "btn-success", icon = icon("save"))
-                        )
-                 ),
-                 column(width = 8,
-                        box(title = "Matrice de Spillover (%)", width = NULL, status = "info",
-                            DTOutput(ns("dt_spillover_matrix"))
-                        )
+      tabPanel(
+        title = "Matrice de Spillover",
+        fluidRow(
+          # --- Colonne de Gauche : Flux logique ---
+          column(width = 4,
+                 wellPanel(
+                   h4("Paramètres de Compensation"),
+                   
+                   # 1. Bouton de calcul en premier
+                   uiOutput(ns("ui_btn_calculer_spillover")),
+                   
+                   hr(),
+                   
+                   # 2. Sélecteur d'échantillon ensuite
+                   uiOutput(ns("ui_select_echantillon")),
+                   
+                   hr(),
+                   
+                   # 3. Boutons undo / redo
+                   fluidRow(
+                     column(6,
+                            actionButton(ns("btn_undo_spillover"), icon("undo"), " Annuler",
+                                         class = "btn-default", style = "width:100%;")
+                     ),
+                     column(6,
+                            actionButton(ns("btn_redo_spillover"), icon("redo"), " Rétablir",
+                                         class = "btn-default", style = "width:100%;")
+                     )
+                   ),
+                   br(),
+                   # 4. Bouton valider à la fin
+                   actionButton(ns("btn_save_spillover"), 
+                                "Valider et Enregistrer", 
+                                class = "btn-success", 
+                                icon = icon("save"),
+                                style = "font-weight:bold; width:100%;")
                  )
-               )
+          ),
+          # --- Colonne de Droite : Édition ---
+          column(width = 8,
+                 box(title = "Matrice de Spillover éditée (%)", 
+                     width = NULL, status = "info", solidHeader = TRUE,
+                     DTOutput(ns("dt_spillover_matrix"))
+                 )
+          )
+        )
+      ),
+      
+      # ══════════════════════════════════════════════════════════════════════
+      # BIPLOTS
+      # ══════════════════════════════════════════════════════════════════════
+      
+      tabPanel(
+        title = "Biplots de Compensation",
+        fluidRow(
+          # --- Colonne de Gauche : Contrôles ---
+          column(width = 3,
+                 wellPanel(
+                   h4("Paramètres de Visualisation"),
+                   actionButton(ns("btn_apply_compensation"), "Appliquer la compensation",
+                                class = "btn-warning", icon = icon("gears"), style = "width:100%"),
+                   hr(),
+                   uiOutput(ns("ui_select_echantillon_plot")),
+                   checkboxInput(ns("mode_ensemble"), "Vue d'ensemble (toutes combinaisons)", FALSE),
+                   conditionalPanel(
+                     condition = paste0("!input['", ns("mode_ensemble"), "']"),
+                     selectInput(ns("canal_x"), "Canal X :", choices = NULL),
+                     selectInput(ns("canal_y"), "Canal Y :", choices = NULL)
+                   ),
+                   radioButtons(ns("affichage_type"), "Type d'affichage :",
+                                choices = c("Both", "Before compensation only", "After compensation only"))
+                 )
+          ),
+          # --- Colonne de Droite : Visualisation ---
+          column(width = 9,
+                 box(title = "Contrôle Qualité Compensation", width = NULL, status = "primary",
+                     div(
+                       style = "max-height: 80vh; overflow-y: auto; overflow-x: hidden;",
+                       uiOutput(ns("ui_biplots_container"))
+                     )
+                 )
+          )
+        )
+      ),
+      
+      # ══════════════════════════════════════════════════════════════════════
+      # EXPORT
+      # ══════════════════════════════════════════════════════════════════════
+      
+      tabPanel(
+        title = tagList(icon("download"), " Export"),
+        fluidRow(
+          
+          # --- Colonne Gauche : FCS compensés ---
+          column(width = 6,
+                 box(title = tagList(icon("file-medical"), " Fichiers FCS compensés"),
+                     width = NULL, status = "primary", solidHeader = TRUE,
+                     
+                     p("Sélectionnez les échantillons à télécharger. Les fichiers seront exportés au format FCS avec la matrice de spillover intégrée dans les métadonnées.",
+                       style = "font-size:12px; color:#555;"),
+                     hr(),
+                     
+                     uiOutput(ns("ui_select_export_fcs")),
+                     
+                     fluidRow(
+                       column(6,
+                              actionButton(ns("btn_select_all_fcs"), "Tout sélectionner",
+                                           class = "btn-default btn-sm", style = "width:100%;")
+                       ),
+                       column(6,
+                              actionButton(ns("btn_deselect_all_fcs"), "Tout désélectionner",
+                                           class = "btn-default btn-sm", style = "width:100%;")
+                       )
+                     ),
+                     br(),
+                     
+                     uiOutput(ns("ui_download_fcs"))
+                 )
+          ),
+          
+          # --- Colonne Droite : Session RDS ---
+          column(width = 6,
+                 box(title = tagList(icon("box-archive"), " Session de compensation (RDS)"),
+                     width = NULL, status = "success", solidHeader = TRUE,
+                     
+                     p("Exportez l'intégralité des paramètres ayant servi à la compensation dans un fichier RDS : transformation Arcsinh, matrice de spillover, gates, et figures de contrôle qualité.",
+                       style = "font-size:12px; color:#555;"),
+                     hr(),
+                     
+                     textInput(ns("rds_filename"), "Nom du fichier :",
+                               value = "Compensation_Session_Complete.rds",
+                               placeholder = "nom_session.rds"),
+                     br(),
+                     
+                     div(style = "text-align:center;",
+                         uiOutput(ns("ui_download_rds"))
+                     )
+                 )
+          )
+        )
       )
       
     ) # /tabBox
@@ -715,35 +835,95 @@ compensation_server <- function(id, pipeline, pipeline_version) {
       showNotification("✔ Matrice de spillover calculée !")
     })
     
-    # 4. Mettez à jour le trigger lors de l'édition manuelle
-    # 1. Variable pour stocker les modifications temporaires
-    # (Cela permet à l'utilisateur de tester des valeurs sans écraser définitivement 
-    # la matrice interne tant qu'il n'a pas validé)
+    # ── Historique undo/redo par échantillon ────────────────────────────────
+    # Chaque entrée est une copie de la matrice (en fraction, pas en %)
+    historique      <- reactiveVal(list())   # pile des états passés
+    historique_redo <- reactiveVal(list())   # pile des états annulés (pour redo)
+    
+    # Capture l'état courant de la matrice de l'échantillon sélectionné
+    capturer_etat <- function(p, nom_ech) {
+      mat <- if (!is.null(p$S_matrices_par_echantillon[[nom_ech]])) {
+        p$S_matrices_par_echantillon[[nom_ech]]
+      } else {
+        p$S_matrix
+      }
+      mat
+    }
+    
+    # 4. Édition manuelle d'une cellule
     observeEvent(input$dt_spillover_matrix_cell_edit, {
       info <- input$dt_spillover_matrix_cell_edit
       valeur_coeff <- as.numeric(info$value) / 100
       
-      # 1. On récupère le pipeline
-      p <- pipeline()
-      canal1 <- rownames(p$S_matrix)[info$row]
-      canal2 <- colnames(p$S_matrix)[info$col]
+      p      <- pipeline()
+      nom    <- input$sel_echantillon
       
-      # 2. On modifie
-      p$modifier_spillover(input$sel_echantillon, canal1, canal2, valeur_coeff)
+      # Sauvegarder l'état AVANT modification dans la pile undo
+      etat_avant <- capturer_etat(p, nom)
+      historique(c(historique(), list(list(echantillon = nom, matrice = etat_avant))))
+      historique_redo(list())   # toute nouvelle édition efface le redo
       
-      # 3. LE POINT CLÉ : On ré-assigne l'objet dans le reactiveVal 
-      # pour forcer Shiny à recalculer tout ce qui dépend de pipeline()
-      pipeline(p) 
+      # Récupérer les noms de lignes/colonnes depuis la matrice affichée
+      mat_courante <- etat_avant
+      canal1 <- rownames(mat_courante)[info$row]
+      canal2 <- colnames(mat_courante)[info$col]
       
-      # 4. On déclenche le trigger visuel
+      p$modifier_spillover(nom, canal1, canal2, valeur_coeff)
+      pipeline(p)
       spillover_trigger(spillover_trigger() + 1)
     })
     
-    # 2. Bouton de validation finale
-    observeEvent(input$btn_save_spillover, {
-      # Ici, on déclenche une action de sauvegarde plus lourde si nécessaire
-      # (ex: écriture dans une base de données ou verrouillage du modèle)
+    # Annuler (undo)
+    observeEvent(input$btn_undo_spillover, {
+      hist <- historique()
+      if (length(hist) == 0) {
+        showNotification("Aucune action à annuler.", type = "warning")
+        return()
+      }
       
+      dernier        <- hist[[length(hist)]]
+      historique(hist[-length(hist)])
+      
+      p   <- pipeline()
+      nom <- dernier$echantillon
+      
+      # Sauvegarder l'état actuel dans redo avant d'écraser
+      etat_actuel <- capturer_etat(p, nom)
+      historique_redo(c(historique_redo(), list(list(echantillon = nom, matrice = etat_actuel))))
+      
+      # Restaurer la matrice
+      p$S_matrices_par_echantillon[[nom]] <- dernier$matrice
+      pipeline(p)
+      spillover_trigger(spillover_trigger() + 1)
+      showNotification("✔ Modification annulée.", type = "message")
+    })
+    
+    # Rétablir (redo)
+    observeEvent(input$btn_redo_spillover, {
+      redo <- historique_redo()
+      if (length(redo) == 0) {
+        showNotification("Aucune action à rétablir.", type = "warning")
+        return()
+      }
+      
+      prochain          <- redo[[length(redo)]]
+      historique_redo(redo[-length(redo)])
+      
+      p   <- pipeline()
+      nom <- prochain$echantillon
+      
+      # Sauvegarder l'état actuel dans undo avant d'écraser
+      etat_actuel <- capturer_etat(p, nom)
+      historique(c(historique(), list(list(echantillon = nom, matrice = etat_actuel))))
+      
+      p$S_matrices_par_echantillon[[nom]] <- prochain$matrice
+      pipeline(p)
+      spillover_trigger(spillover_trigger() + 1)
+      showNotification("✔ Modification rétablie.", type = "message")
+    })
+    
+    # Bouton de validation finale
+    observeEvent(input$btn_save_spillover, {
       showModal(modalDialog(
         title = "Succès",
         "La matrice de spillover pour l'échantillon a été validée et enregistrée avec succès.",
@@ -751,6 +931,316 @@ compensation_server <- function(id, pipeline, pipeline_version) {
         footer = modalButton("OK")
       ))
     })
+    
+    # ════════════════════════════════════════════════════════════════════════
+    # Compensation et biplots
+    # ════════════════════════════════════════════════════════════════════════
+    
+    # Trigger incrémenté après chaque compensation pour forcer le re-rendu
+    comp_trigger <- reactiveVal(0L)
+    
+    # 1. Mise à jour des sélecteurs de canaux
+    observe({
+      req(input$sel_echantillon_plot)
+      p <- pipeline()
+      fcs <- p$echantillons[[input$sel_echantillon_plot]]
+      req(!is.null(fcs))
+      
+      all_cols    <- flowCore::colnames(fcs)
+      canaux_fluo <- all_cols[!grepl("FSC|SSC|Time", all_cols, ignore.case = TRUE)]
+      req(length(canaux_fluo) > 0)
+      
+      choices_list <- setNames(canaux_fluo, sapply(canaux_fluo, function(c) p$get_label(fcs, c)))
+      
+      updateSelectInput(session, "canal_x", choices = choices_list)
+      updateSelectInput(session, "canal_y", choices = choices_list,
+                        selected = choices_list[min(2, length(choices_list))])
+    })
+    
+    output$ui_select_echantillon_plot <- renderUI({
+      p <- pipeline()
+      req(length(p$echantillons) > 0)
+      selectInput(ns("sel_echantillon_plot"), "Sélectionner l'échantillon :", 
+                  choices = names(p$echantillons))
+    })
+    
+    # 2. Application de la compensation — utilise la matrice propre à chaque échantillon
+    observeEvent(input$btn_apply_compensation, {
+      p <- pipeline()
+      withProgress(message = "Compensation en cours...", value = 0.5, {
+        tryCatch({
+          p$compenser()   # compenser() utilise déjà S_matrices_par_echantillon si disponible
+          pipeline(p)
+          comp_trigger(comp_trigger() + 1L)
+          showNotification("✔ Compensation appliquée à la cohorte.", type = "message")
+        }, error = function(e) {
+          showNotification(paste("Erreur :", conditionMessage(e)), type = "error")
+        })
+      })
+    })
+    
+    # 3. Calcul réactif du résultat de visualisation
+    res_biplots <- reactive({
+      comp_trigger()
+      p <- pipeline()
+      req(input$sel_echantillon_plot, input$affichage_type)
+      
+      canal_x <- if (isTRUE(input$mode_ensemble)) "ALL" else {
+        req(input$canal_x); input$canal_x
+      }
+      canal_y <- if (isTRUE(input$mode_ensemble)) "ALL" else {
+        req(input$canal_y); input$canal_y
+      }
+      
+      need_apres <- input$affichage_type %in% c("Both", "After compensation only")
+      if (need_apres && length(p$echantillons_traites) == 0) {
+        validate("Cliquez sur 'Appliquer la compensation' pour afficher les données compensées.")
+      }
+      
+      tryCatch(
+        p$visualiser_compensation(
+          nom_echantillon = input$sel_echantillon_plot,
+          canal_x         = canal_x,
+          canal_y         = canal_y,
+          affichage       = input$affichage_type
+        ),
+        error = function(e) {
+          showNotification(paste("Erreur visualisation :", conditionMessage(e)), type = "error")
+          NULL
+        }
+      )
+    })
+    
+    # 4. Conteneur UI : mode ALL → N plotOutputs dans un div scrollable
+    #                   mode simple → un seul plotOutput
+    output$ui_biplots_container <- renderUI({
+      res <- res_biplots()
+      
+      if (is.null(res)) {
+        return(div(style = "padding:40px; text-align:center; color:grey;",
+                   "Aucune donnée à afficher. Vérifiez la sélection ou appliquez la compensation."))
+      }
+      
+      if (inherits(res, "carrot_plots_list")) {
+        # Mode ALL : on crée une ligne de plotOutputs par paire de plots
+        n <- length(res)
+        # On groupe par 2 (2 plots par ligne)
+        n_lignes <- ceiling(n / 2)
+        hauteur_plot <- 400   # px par plot individuel
+        
+        lignes <- lapply(seq_len(n_lignes), function(i) {
+          idx_gauche <- (i - 1) * 2 + 1
+          idx_droite <- idx_gauche + 1
+          
+          id_g <- paste0("biplot_", idx_gauche)
+          id_d <- if (idx_droite <= n) paste0("biplot_", idx_droite) else NULL
+          
+          fluidRow(
+            column(6, plotOutput(ns(id_g), width = "100%", height = paste0(hauteur_plot, "px"))),
+            if (!is.null(id_d))
+              column(6, plotOutput(ns(id_d), width = "100%", height = paste0(hauteur_plot, "px")))
+          )
+        })
+        
+        do.call(tagList, lignes)
+        
+      } else {
+        # Mode simple : un seul plotOutput
+        plotOutput(ns("biplot_single"), width = "100%", height = "600px")
+      }
+    })
+    
+    # 5. Observateur : branche les renderPlot sur les outputs créés dynamiquement
+    observe({
+      res <- res_biplots()
+      req(!is.null(res))
+      
+      if (inherits(res, "carrot_plots_list")) {
+        for (i in seq_along(res)) {
+          local({
+            idx   <- i
+            plot_i <- res[[idx]]
+            id    <- paste0("biplot_", idx)
+            output[[id]] <- renderPlot({
+              if (inherits(plot_i, c("gtable", "grob"))) {
+                grid::grid.newpage(); grid::grid.draw(plot_i)
+              } else {
+                print(plot_i)
+              }
+            })
+          })
+        }
+      } else {
+        output$biplot_single <- renderPlot({
+          if (is.null(res)) {
+            plot.new()
+            text(0.5, 0.5, "Aucune donnée.", cex = 1.1, col = "grey40")
+            return()
+          }
+          if (inherits(res, c("gtable", "grob"))) {
+            grid::grid.newpage(); grid::grid.draw(res)
+          } else {
+            print(res)
+          }
+        })
+      }
+    })
+    
+    # ════════════════════════════════════════════════════════════════════════
+    # SECTION EXPORT
+    # ════════════════════════════════════════════════════════════════════════
+    
+    observeEvent(comp_trigger(), {
+      p <- pipeline()
+      noms <- names(p$echantillons_traites)
+      
+      # On met à jour les choix tout en préservant la sélection précédente si possible
+      updateCheckboxGroupInput(session, "sel_export_fcs",
+                               choices = noms,
+                               selected = if (is.null(input$sel_export_fcs)) noms else input$sel_export_fcs)
+    }, ignoreInit = FALSE)
+    
+    # ── Sélecteur multi-échantillons ─────────────────────────────────────────
+    output$ui_select_export_fcs <- renderUI({
+      p <- pipeline()
+      noms <- names(p$echantillons_traites)
+      
+      if (length(noms) == 0) {
+        return(div(class = "alert alert-warning", style = "font-size:12px; padding:8px;",
+                   icon("exclamation-triangle"),
+                   " Appliquez d'abord la compensation pour pouvoir exporter des fichiers FCS."))
+      }
+      
+      checkboxGroupInput(ns("sel_export_fcs"), "Échantillons à exporter :",
+                         choices  = noms,
+                         selected = noms)
+    })
+    
+    # Tout sélectionner / désélectionner
+    observeEvent(input$btn_select_all_fcs, {
+      p <- pipeline()
+      updateCheckboxGroupInput(session, "sel_export_fcs",
+                               selected = names(p$echantillons_traites))
+    })
+    observeEvent(input$btn_deselect_all_fcs, {
+      updateCheckboxGroupInput(session, "sel_export_fcs", selected = character(0))
+    })
+    
+    # ── Bouton téléchargement FCS (affiché seulement si sélection non vide) ──
+    output$ui_download_fcs <- renderUI({
+      req(length(input$sel_export_fcs) > 0)
+      n <- length(input$sel_export_fcs)
+      downloadButton(ns("dl_fcs"),
+                     label = paste0("Télécharger ", n, " fichier(s) FCS"),
+                     class = "btn-primary",
+                     style = "width:100%; font-weight:bold;")
+    })
+    
+    output$dl_fcs <- downloadHandler(
+      filename = function() {
+        if (length(input$sel_export_fcs) == 1) {
+          paste0(gsub("[^a-zA-Z0-9_]", "_", input$sel_export_fcs), "_compense.fcs")
+        } else {
+          paste0("FCS_Compenses_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".zip")
+        }
+      },
+      content = function(file) {
+        p <- pipeline()
+        noms_sel <- input$sel_export_fcs
+        req(length(noms_sel) > 0)
+        
+        if (length(noms_sel) == 1) {
+          # Export direct d'un seul FCS
+          nom        <- noms_sel
+          fcs_obj    <- p$echantillons_traites[[nom]]
+          if (!is.null(p$S_matrix)) {
+            flowCore::keyword(fcs_obj)[["$SPILLOVER"]] <- p$S_matrix
+          }
+          flowCore::write.FCS(fcs_obj, filename = file)
+          
+        } else {
+          # Export multiple → ZIP
+          tmp_dir <- tempfile()
+          dir.create(tmp_dir)
+          on.exit(unlink(tmp_dir, recursive = TRUE))
+          
+          withProgress(message = "Préparation des fichiers FCS...", value = 0, {
+            for (i in seq_along(noms_sel)) {
+              nom     <- noms_sel[i]
+              fcs_obj <- p$echantillons_traites[[nom]]
+              if (is.null(fcs_obj)) next
+              
+              # Matrice spécifique à l'échantillon ou globale
+              mat <- if (!is.null(p$S_matrices_par_echantillon[[nom]])) {
+                p$S_matrices_par_echantillon[[nom]]
+              } else {
+                p$S_matrix
+              }
+              if (!is.null(mat)) flowCore::keyword(fcs_obj)[["$SPILLOVER"]] <- mat
+              
+              nom_fichier <- paste0(gsub("[^a-zA-Z0-9_]", "_", nom), "_compense.fcs")
+              flowCore::write.FCS(fcs_obj, filename = file.path(tmp_dir, nom_fichier))
+              incProgress(1 / length(noms_sel), detail = nom)
+            }
+          })
+          
+          fichiers <- list.files(tmp_dir, full.names = TRUE)
+          zip::zip(zipfile = file, files = fichiers, mode = "cherry-pick")
+        }
+      },
+      contentType = "application/octet-stream"
+    )
+    
+    # ── Bouton téléchargement RDS ────────────────────────────────────────────
+    output$ui_download_rds <- renderUI({
+      p <- pipeline()
+      # On désactive si rien n'a encore été fait
+      pret <- !is.null(p$S_matrix) || !is.null(p$trans_list)
+      if (!pret) {
+        return(div(class = "alert alert-warning", style = "font-size:12px; padding:8px;",
+                   icon("exclamation-triangle"),
+                   " Aucun paramètre de compensation disponible à exporter."))
+      }
+      downloadButton(ns("dl_rds"),
+                     label = "Télécharger la session RDS",
+                     class = "btn-success",
+                     style = "font-weight:bold; min-width:220px;")
+    })
+    
+    output$dl_rds <- downloadHandler(
+      filename = function() {
+        nm <- trimws(input$rds_filename)
+        if (nchar(nm) == 0) nm <- "Compensation_Session_Complete.rds"
+        if (!grepl("\\.rds$", nm, ignore.case = TRUE)) nm <- paste0(nm, ".rds")
+        nm
+      },
+      content = function(file) {
+        p <- pipeline()
+        withProgress(message = "Sérialisation de la session...", value = 0.5, {
+          sauvegarde <- list(
+            meta = list(
+              date_export     = Sys.time(),
+              canaux_utilises = p$canaux
+            ),
+            configuration_technique = list(
+              trans_list        = p$trans_list,
+              matrice_spillover = p$S_matrix,
+              matrices_par_echantillon = p$S_matrices_par_echantillon
+            ),
+            gating = list(
+              gates_positifs = p$gates_positifs,
+              gates_negatifs = p$gates_negatifs
+            ),
+            visualisations = list(
+              plots_gates        = p$plots_gates,
+              plots_compensation = p$plots_compensation
+            )
+          )
+          saveRDS(sauvegarde, file = file)
+        })
+      },
+      contentType = "application/octet-stream"
+    )
     
   })
 }

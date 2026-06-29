@@ -4,6 +4,7 @@ library(shinyjs)
 library(DT)
 library(plotly)
 
+options(shiny.maxRequestSize = 1000 * 1024^2) # 100 MB
 
 source("~/Desktop/Institut_Cochin/Code/CARROT/pipeline_cytometrie.R")
 source("~/Desktop/Institut_Cochin/Code/CARROT/R/module_import.R.R")
@@ -65,9 +66,9 @@ server <- function(input, output, session) {
   my_pipeline_version <- reactiveVal(0L)          # s'incrémente après charger_fcs()
   
   import_data_server("mon_module_import",
-                     pipeline         = my_pipeline,
+                     pipeline  = my_pipeline,
                      pipeline_version = my_pipeline_version,
-                     canaux    = CANAUX_CONNUS)
+                     canaux = CANAUX_CONNUS)
   
   compensation_server("mon_module_comp",
                       pipeline         = my_pipeline,
