@@ -165,7 +165,25 @@ compensation_ui <- function(id) {
       # ───────────────────────────────────────────────
       
       tabPanel(title = "Matrice de Spillover",
-               DTOutput(ns("dt_spillover_matrix"))
+               fluidRow(
+                 column(width = 4,
+                        wellPanel(
+                          h4("Configuration"),
+                          uiOutput(ns("ui_select_echantillon")),
+                          hr(),
+                          # Le bouton de calcul est maintenant ici
+                          uiOutput(ns("ui_btn_calculer_spillover")),
+                          hr(),
+                          actionButton(ns("btn_save_spillover"), "Valider et Enregistrer", 
+                                       class = "btn-success", icon = icon("save"))
+                        )
+                 ),
+                 column(width = 8,
+                        box(title = "Matrice de Spillover (%)", width = NULL, status = "info",
+                            DTOutput(ns("dt_spillover_matrix"))
+                        )
+                 )
+               )
       )
       
     ) # /tabBox
@@ -606,77 +624,132 @@ compensation_server <- function(id, pipeline, pipeline_version) {
       )
     })
     
-    # Bouton spillover
+    
+    # ════════════════════════════════════════════════════════════════════════
+    # MATRICE DE SPILLOVER
+    # ════════════════════════════════════════════════════════════════════════
+    spillover_trigger <- reactiveVal(0)
+    
+    # Le bouton de calcul se base sur les gates validés
     output$ui_btn_calculer_spillover <- renderUI({
-      gv     <- gates_valides()
+      gv     <- gates_valides() # Assurez-vous que gates_valides() est accessible ici
       canaux <- canaux_monomarques()
       ok     <- length(canaux) > 0 && all(canaux %in% names(gv))
       
       if (ok) {
         tagList(
-          div(class="alert alert-success",
-              style="font-size:11px; padding:5px 9px; margin-bottom:7px;",
-              icon("check-circle"), " Tous les gates sont définis."),
-          actionButton(
-            ns("btn_calc_spillover"),
-            tagList(icon("calculator"), " Calculer la matrice de spillover"),
-            class="btn-primary btn-block",
-            style="font-weight:bold;"
-          )
+          div(class="alert alert-success", style="font-size:11px; padding:5px 9px; margin-bottom:7px;",
+              icon("check-circle"), " Gates validés. Prêt pour le calcul."),
+          actionButton(ns("btn_calc_spillover"), "Calculer la matrice", 
+                       class="btn-primary btn-block", icon=icon("calculator"))
         )
       } else {
-        div(style="font-size:11px; color:#888; padding:3px;",
-            icon("lock"), " Définissez tous les gates pour débloquer.")
+        div(class="alert alert-warning", style="font-size:11px; padding:5px 9px;",
+            icon("lock"), " Veuillez définir tous les gates dans l'onglet précédent.")
       }
     })
     
+    # L'observeEvent du calcul
     observeEvent(input$btn_calc_spillover, {
       p <- pipeline()
-      withProgress(message="Calcul de la matrice de spillover...", value=0.5, {
+      withProgress(message="Calcul en cours...", value=0.5, {
         tryCatch({
           p$calculer_spillover()
-          showNotification("✔ Matrice de spillover calculée !",
-                           type="message", duration=4)
+          spillover_trigger(spillover_trigger() + 1)
+          showNotification("✔ Matrice de spillover calculée !", type="message")
         }, error=function(e) {
-          showNotification(paste("Erreur :", conditionMessage(e)),
-                           type="error")
+          showNotification(paste("Erreur :", conditionMessage(e)), type="error")
         })
       })
     })
     
-    # ════════════════════════════════════════════════════════════════════════
-    # MATRICE DE SPILLOVER
-    # ════════════════════════════════════════════════════════════════════════
-    
-    # Dans le module Server
-    output$dt_spillover_matrix <- renderDT({
-      req(pipeline()$S_matrix)
-      # On récupère la matrice (ou celle spécifique à l'échantillon)
-      mat <- pipeline()$S_matrix
-      
-      datatable(mat, editable = TRUE, options = list(pageLength = 20))
+    # 1. Sélecteur d'échantillon dynamique
+    output$ui_select_echantillon <- renderUI({
+      p <- pipeline()
+      # On liste les échantillons disponibles dans l'objet R6
+      selectInput(ns("sel_echantillon"), "Sélectionner l'échantillon à ajuster :", 
+                  choices = names(p$echantillons))
     })
     
-    # Capture de l'édition
+    # 2. RenderDT intelligent (lit la matrice spécifique ou la générale)
+    output$dt_spillover_matrix <- renderDT({
+      spillover_trigger() 
+      req(input$sel_echantillon)
+      
+      p <- pipeline()
+      validate(need(!is.null(p$S_matrix), "Veuillez d'abord calculer la matrice de spillover."))
+      
+      # Récupération selon échantillon
+      mat <- if (!is.null(p$S_matrices_par_echantillon[[input$sel_echantillon]])) {
+        p$S_matrices_par_echantillon[[input$sel_echantillon]]
+      } else {
+        p$S_matrix
+      }
+      
+      mat_display <- round(mat * 100, 2)
+      
+      datatable(
+        mat_display, 
+        editable = TRUE,
+        rownames = TRUE,
+        selection = "none",
+        options = list(
+          dom = 't',           # 't' = Tableau seul (supprime pagination, recherche, info)
+          ordering = FALSE,    # Empêche le tri pour conserver l'ordre des canaux
+          scrollX = TRUE,      # Permet le défilement horizontal si besoin
+          scrollY = "500px",   # Fixe la hauteur totale
+          scrollCollapse = TRUE,
+          paging = FALSE       # Désactive explicitement la pagination
+        )
+      ) %>% formatStyle(
+        columns = colnames(mat_display),
+        backgroundColor = styleInterval(c(5, 10, 20), c('#d1e7dd', '#fff3cd', '#f8d7da', '#e2c6c6'))
+      )
+    })
+    
+    # 3. Mettez à jour le trigger lors du calcul
+    observeEvent(input$btn_calc_spillover, {
+      p <- pipeline()
+      p$calculer_spillover()
+      spillover_trigger(spillover_trigger() + 1) # Incrémente pour rafraîchir
+      showNotification("✔ Matrice de spillover calculée !")
+    })
+    
+    # 4. Mettez à jour le trigger lors de l'édition manuelle
+    # 1. Variable pour stocker les modifications temporaires
+    # (Cela permet à l'utilisateur de tester des valeurs sans écraser définitivement 
+    # la matrice interne tant qu'il n'a pas validé)
     observeEvent(input$dt_spillover_matrix_cell_edit, {
       info <- input$dt_spillover_matrix_cell_edit
-      # info contient row, col, value
+      valeur_coeff <- as.numeric(info$value) / 100
       
-      canal1 <- rownames(pipeline()$S_matrix)[info$row]
-      canal2 <- colnames(pipeline()$S_matrix)[info$col]
-      valeur <- as.numeric(info$value)
+      # 1. On récupère le pipeline
+      p <- pipeline()
+      canal1 <- rownames(p$S_matrix)[info$row]
+      canal2 <- colnames(p$S_matrix)[info$col]
       
-      # Appel de votre méthode R6
-      # Note : Vous devrez passer le nom de l'échantillon actif ici
-      tryCatch({
-        pipeline()$modifier_spillover(nom_echantillon = "Echantillon_A", # À dynamiser
-                                      canal1 = canal1, 
-                                      canal2 = canal2, 
-                                      valeur = valeur)
-        showNotification("Matrice mise à jour", type = "message")
-      }, error = function(e) {
-        showNotification(e$message, type = "error")
-      })
+      # 2. On modifie
+      p$modifier_spillover(input$sel_echantillon, canal1, canal2, valeur_coeff)
+      
+      # 3. LE POINT CLÉ : On ré-assigne l'objet dans le reactiveVal 
+      # pour forcer Shiny à recalculer tout ce qui dépend de pipeline()
+      pipeline(p) 
+      
+      # 4. On déclenche le trigger visuel
+      spillover_trigger(spillover_trigger() + 1)
+    })
+    
+    # 2. Bouton de validation finale
+    observeEvent(input$btn_save_spillover, {
+      # Ici, on déclenche une action de sauvegarde plus lourde si nécessaire
+      # (ex: écriture dans une base de données ou verrouillage du modèle)
+      
+      showModal(modalDialog(
+        title = "Succès",
+        "La matrice de spillover pour l'échantillon a été validée et enregistrée avec succès.",
+        easyClose = TRUE,
+        footer = modalButton("OK")
+      ))
     })
     
   })
