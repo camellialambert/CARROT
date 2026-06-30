@@ -61,6 +61,7 @@ CARROT <- R6Class(
     
     # Variables de Visualisation
     plots_peacoqc = list(), # contient toutes les figures après application de PeacoQC
+    plots_peacoqc_natif = list(), # contient les chemins des PNG diagnostiques natifs générés par PeacoQC::PeacoQC (bins retirés par canal)
     plots_debris = list(), # contient toutes les figures après application du gate de débris
     plots_doublets = list(), # contient toutes les figures après application du gate de doublets
     plots_viabilite = list(), # contient toutes les figures après application du gate de viabilité
@@ -994,6 +995,10 @@ CARROT <- R6Class(
         vrai_canal_temps <- grep("time", colnames(ff_actuel), value = TRUE, ignore.case = TRUE)[1] # Détecte dynamiquement l'indice ou le libellé exact du paramètre temporel dans le fichier binaire (ex: "Time" ou "time")
         if (is.na(vrai_canal_temps)) vrai_canal_temps <- "Time" # Sécurité : attribue le nom standard par défaut si aucune chaîne similaire n'a été détectée
         
+        # Dossier temporaire dédié pour récupérer le PNG diagnostique natif de PeacoQC sans polluer le disque
+        dossier_temp_plot <- file.path(tempdir(), paste0("PeacoQC_", gsub("[^a-zA-Z0-9_]", "_", nom)))
+        if (!dir.exists(dossier_temp_plot)) dir.create(dossier_temp_plot, recursive = TRUE)
+        
         res <- PeacoQC::PeacoQC( # Déclenche la routine d'analyse mathématique de régularité fluidique du package PeacoQC
           ff                     = ff_actuel, # Transmet l'objet flowFrame contenant les expressions de la cellule active
           channels               = self$canaux, # Injecte la liste des canaux de fluorescence sur lesquels appliquer le contrôle qualité de signal
@@ -1011,9 +1016,16 @@ CARROT <- R6Class(
           force_IT               = config_qc$force_IT, # Applique une contrainte stricte sur le calcul de la distribution du débit
           peak_removal           = config_qc$peak_removal, # Fixe la fraction de tolérance pour l'isolement et la suppression des pics de bruit de fond
           min_nr_bins_peakdetection = config_qc$min_nr_bins_peakdetection, # Nombre minimal de bins requis pour valider mathématiquement un pic d'anomalie
-          plot                   = FALSE, # Désactive la création en arrière-plan d'images de contrôle pour gagner en vitesse de calcul
+          plot                   = TRUE, # Active la génération du rapport visuel natif PeacoQC (PNG des bins retirés par canal)
+          output_directory       = dossier_temp_plot, # Dirige l'écriture du PNG vers un dossier temporaire propre à cet échantillon
           report                 = FALSE # Désactive la génération automatique du fichier texte de rapport d'analyse
         ) 
+        
+        # Récupère le chemin du PNG généré par PeacoQC (cherché récursivement car PeacoQC crée un sous-dossier "PeacoQC_results")
+        pngs_generes <- list.files(dossier_temp_plot, pattern = "\\.png$", recursive = TRUE, full.names = TRUE)
+        if (is.null(self$plots_peacoqc_natif)) self$plots_peacoqc_natif <- list()
+        self$plots_peacoqc_natif[[nom]] <- if (length(pngs_generes) > 0) pngs_generes[1] else NULL
+        
         return(res$FinalFF) # Extrait et isole uniquement l'objet flowFrame purgé de ses anomalies de flux (événements conformes uniquement)
       }) 
       
