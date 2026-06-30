@@ -11,6 +11,7 @@ source("~/Desktop/Institut_Cochin/Code/CARROT/R/module_import.R.R")
 source("~/Desktop/Institut_Cochin/Code/CARROT/R/utils.R")
 source("~/Desktop/Institut_Cochin/Code/CARROT/R/module_compensation.R")
 source("~/Desktop/Institut_Cochin/Code/CARROT/R/module_qc.R")
+source("~/Desktop/Institut_Cochin/Code/CARROT/R/module_pretraitement.R")
 
 CANAUX_CONNUS <- c(
   "", "FITC-A", "Alexa Fluor 488-A", "Alexa Fluor 700-A",
@@ -30,6 +31,7 @@ ui <- dashboardPage(
       menuItem("Compensation",   tabName = "compensation_tab", icon = icon("calculator")),
       menuItem("Unmixing",       tabName = "unmixing_tab",     icon = icon("bolt")),
       menuItem("Quality Control",tabName = "nettoyage_tab",    icon = icon("broom")),
+      menuItem("Prétraitement",  tabName = "pretraitement_tab",icon = icon("filter")),
       menuItem("Analyses",       tabName = "analyses_tab",     icon = icon("chart-pie"))
     )
   ),
@@ -47,6 +49,8 @@ ui <- dashboardPage(
               compensation_ui("mon_module_comp")),
       tabItem(tabName = "nettoyage_tab",
               qc_ui("mon_module_qc")),
+      tabItem(tabName = "pretraitement_tab",
+              pretraitement_ui("mon_module_pretrait")),
       tabItem(tabName = "unmixing_tab",  "Module Spectral en attente."),
       tabItem(tabName = "analyses_tab",  "Analyses statistiques en attente.")
     )
@@ -71,6 +75,10 @@ server <- function(input, output, session) {
   qc_server("mon_module_qc",
             pipeline         = my_pipeline,
             pipeline_version = my_pipeline_version)
+  
+  pretraitement_server("mon_module_pretrait",
+                       pipeline         = my_pipeline,
+                       pipeline_version = my_pipeline_version)
 }
 
 shinyApp(ui, server)
