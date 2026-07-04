@@ -2,6 +2,7 @@ library(shiny)
 library(shinydashboard)
 library(shinyjs)
 library(plotly)
+library(ggplot2)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # UI
@@ -11,6 +12,13 @@ compensation_ui <- function(id) {
   ns <- NS(id)
   tagList(
     useShinyjs(),
+    
+    # jQuery UI (module "sortable") : requis par le plugin selectize "drag_drop" pour pouvoir
+    # glisser-déposer les canaux et réordonner la matrice de spillover. Shiny ne charge pas
+    # cette dépendance par défaut, il faut l'ajouter explicitement.
+    tags$head(
+      tags$script(src = "https://cdnjs.cloudflare.com/ajax/libs/jqueryui/1.13.2/jquery-ui.min.js")
+    ),
     
     # CSS pour le curseur drag sur les lignes de gate
     tags$style(HTML("
@@ -182,6 +190,26 @@ compensation_ui <- function(id) {
                    
                    hr(),
                    
+                   # 2 bis. Personnalisation de l'affichage (ordre des canaux / transposition)
+                   h5(tagList(icon("table"), " Personnaliser l'affichage"),
+                      style = "color:#605ca8;"),
+                   h5(tagList(icon("table"), " Personnaliser l'affichage"), style = "color:#605ca8;"),
+                   selectizeInput(
+                     ns("select_ordre_canaux"),
+                     "Glissez les canaux pour réordonner lignes/colonnes :",
+                     choices  = NULL, # Sera mis à jour via le serveur
+                     multiple = TRUE,
+                     options  = list(plugins = list("drag_drop"), placeholder = "En attente du calcul...")
+                   ),
+                   fluidRow(
+                     column(6, actionButton(ns("btn_inverser_ordre"), tagList(icon("exchange-alt"), " Inverser l'ordre"),
+                                            class = "btn-default", style = "width:100%; font-size:11px;")),
+                     column(6, actionButton(ns("btn_transposer_matrice"), tagList(icon("sync"), " Transposer L/C"),
+                                            class = "btn-default", style = "width:100%; font-size:11px;"))
+                   ),
+                   
+                   hr(),
+                   
                    # 3. Boutons undo / redo
                    fluidRow(
                      column(6,
@@ -206,7 +234,68 @@ compensation_ui <- function(id) {
           column(width = 8,
                  box(title = "Matrice de Spillover éditée (%)", 
                      width = NULL, status = "info", solidHeader = TRUE,
-                     DTOutput(ns("dt_spillover_matrix"))
+                     DTOutput(ns("dt_spillover_matrix")),
+                     hr(),
+                     div(style = "font-size:12px; color:#666; margin-bottom:6px;",
+                         icon("info-circle"),
+                         " Téléchargez la matrice telle qu'affichée (ordre et orientation courants) :"),
+                     fluidRow(
+                       column(6, downloadButton(ns("dl_matrix_png"), "Télécharger en PNG",
+                                                class = "btn-default", style = "width:100%;")),
+                       column(6, downloadButton(ns("dl_matrix_pdf"), "Télécharger en PDF",
+                                                class = "btn-default", style = "width:100%;"))
+                     )
+                 )
+          )
+        )
+      ),
+      
+      # ══════════════════════════════════════════════════════════════════════
+      # COMPARAISON DES MÉDIANES (AVANT / APRÈS COMPENSATION)
+      # ══════════════════════════════════════════════════════════════════════
+      
+      tabPanel(
+        title = tagList(icon("balance-scale"), " Comparaison des Médianes"),
+        fluidRow(
+          column(width = 4,
+                 wellPanel(
+                   h4("Comparaison Avant / Après Compensation"),
+                   p("Pour chaque canal, cette analyse compare le pourcentage de débordement (spillover) mesuré à partir des médianes des populations positives et négatives, avant et après application de la matrice de compensation.",
+                     style = "font-size:12px; color:#555;"),
+                   hr(),
+                   uiOutput(ns("ui_select_echantillon_medianes")),
+                   hr(),
+                   uiOutput(ns("ui_btn_comparer_medianes")),
+                   hr(),
+                   div(class = "gate-instructions",
+                       icon("info-circle"),
+                       " ", tags$b("Critère de bonne compensation :"),
+                       " la compensation est correcte quand la médiane de la population positive (compensée) devient égale à la médiane de la population négative, dans tous les canaux hors diagonale.",
+                       br(),
+                       "Les tableaux ", tags$b("« Écart de médianes »"), " ci-contre affichent directement cette différence brute : plus la valeur est proche de 0, meilleure est la compensation. La diagonale (canal principal) n'est pas concernée par ce test, car elle correspond au signal réel du marqueur."
+                   )
+                 )
+          ),
+          column(width = 8,
+                 box(title = tagList(icon("exclamation-triangle"), " Spillover mesuré AVANT compensation (%)"),
+                     width = NULL, status = "danger", solidHeader = TRUE,
+                     DTOutput(ns("dt_medianes_avant"))
+                 ),
+                 box(title = tagList(icon("check-circle"), " Spillover résiduel APRÈS compensation (%)"),
+                     width = NULL, status = "success", solidHeader = TRUE,
+                     DTOutput(ns("dt_medianes_apres"))
+                 ),
+                 box(title = tagList(icon("chart-line"), " Amélioration apportée (Avant − Après, en points de %)"),
+                     width = NULL, status = "info", solidHeader = TRUE,
+                     DTOutput(ns("dt_medianes_delta"))
+                 ),
+                 box(title = tagList(icon("not-equal"), " Écart de médianes AVANT compensation (Positif − Négatif)"),
+                     width = NULL, status = "warning", solidHeader = TRUE,
+                     DTOutput(ns("dt_medianes_ecart_avant"))
+                 ),
+                 box(title = tagList(icon("equals"), " Écart de médianes APRÈS compensation (Positif − Négatif) — doit tendre vers 0"),
+                     width = NULL, status = "primary", solidHeader = TRUE,
+                     DTOutput(ns("dt_medianes_ecart_apres"))
                  )
           )
         )
@@ -791,22 +880,89 @@ compensation_server <- function(id, pipeline, pipeline_version) {
                   choices = names(p$echantillons))
     })
     
-    # 2. RenderDT intelligent (lit la matrice spécifique ou la générale)
-    output$dt_spillover_matrix <- renderDT({
-      spillover_trigger() 
+    # ── Personnalisation dynamique de l'affichage (ordre des canaux + transposition) ──
+    # ── Personnalisation dynamique de l'affichage (ordre des canaux + transposition) ──
+    ordre_canaux_rv <- reactiveVal(NULL)    # ordre courant d'affichage des canaux
+    transpose_rv    <- reactiveVal(FALSE)   # inversion lignes / colonnes
+    
+    # Observateur pour initialiser/mettre à jour les choix du selectize quand la matrice change
+    observe({
+      spillover_trigger()
+      p <- pipeline()
+      req(!is.null(p$S_matrix))
+      canaux <- rownames(p$S_matrix)
+      
+      ordre_actuel <- ordre_canaux_rv()
+      # Si l'ordre interne est vide ou obsolète par rapport aux canaux réels, on le réinitialise
+      if (is.null(ordre_actuel) || !setequal(ordre_actuel, canaux)) {
+        ordre_canaux_rv(canaux)
+        ordre_actuel <- canaux
+      }
+      
+      updateSelectizeInput(
+        session, 
+        "select_ordre_canaux",
+        choices = canaux,
+        selected = ordre_actuel,
+        server = FALSE
+      )
+    })
+    
+    # Capture le changement d'ordre suite au Drag & Drop de l'utilisateur
+    observeEvent(input$select_ordre_canaux, {
+      p <- pipeline()
+      req(!is.null(p$S_matrix))
+      canaux_reels <- rownames(p$S_matrix)
+      
+      # Sécurité : On s'assure qu'on ne traite pas un vecteur vide ou incomplet pendant un drag
+      if (length(input$select_ordre_canaux) == length(canaux_reels) && 
+          setequal(input$select_ordre_canaux, canaux_reels)) {
+        ordre_canaux_rv(input$select_ordre_canaux)
+      }
+    }, ignoreNULL = TRUE)
+    
+    # Inversion de l'ordre
+    observeEvent(input$btn_inverser_ordre, {
+      ord <- ordre_canaux_rv()
+      req(!is.null(ord))
+      nouvel_ordre <- rev(ord)
+      ordre_canaux_rv(nouvel_ordre)
+      updateSelectizeInput(session, "select_ordre_canaux", selected = nouvel_ordre)
+    })
+    
+    # Transposition
+    observeEvent(input$btn_transposer_matrice, {
+      transpose_rv(!transpose_rv())
+    })
+    
+    # Matrice réellement affichée à l'écran
+    mat_affichee <- reactive({
+      spillover_trigger()
       req(input$sel_echantillon)
       
       p <- pipeline()
       validate(need(!is.null(p$S_matrix), "Veuillez d'abord calculer la matrice de spillover."))
       
-      # Récupération selon échantillon
-      mat <- if (!is.null(p$S_matrices_par_echantillon[[input$sel_echantillon]])) {
+      mat_brute <- if (!is.null(p$S_matrices_par_echantillon[[input$sel_echantillon]])) {
         p$S_matrices_par_echantillon[[input$sel_echantillon]]
       } else {
         p$S_matrix
       }
       
-      mat_display <- round(mat * 100, 2)
+      canaux <- rownames(mat_brute)
+      ordre  <- ordre_canaux_rv()
+      
+      # Fallback de sécurité au cas où l'ordre réactif n'est pas encore synchronisé
+      if (is.null(ordre) || !setequal(ordre, canaux)) ordre <- canaux
+      
+      m <- round(mat_brute[ordre, ordre, drop = FALSE] * 100, 2)
+      if (isTRUE(transpose_rv())) m <- t(m)
+      m
+    })
+    
+    # 2. RenderDT intelligent (lit la matrice spécifique ou la générale, avec ordre/orientation personnalisés)
+    output$dt_spillover_matrix <- renderDT({
+      mat_display <- mat_affichee()
       
       datatable(
         mat_display, 
@@ -826,6 +982,48 @@ compensation_server <- function(id, pipeline, pipeline_version) {
         backgroundColor = styleInterval(c(5, 10, 20), c('#d1e7dd', '#fff3cd', '#f8d7da', '#e2c6c6'))
       )
     })
+    
+    # ── Export de la matrice affichée (PNG / PDF) ───────────────────────────
+    generer_plot_matrice <- function(mat, titre = "Matrice de Spillover (%)") {
+      df <- as.data.frame(as.table(mat))
+      colnames(df) <- c("Ligne", "Colonne", "Valeur")
+      df$Ligne     <- factor(df$Ligne,   levels = rev(rownames(mat)))
+      df$Colonne   <- factor(df$Colonne, levels = colnames(mat))
+      df$categorie <- cut(df$Valeur, breaks = c(-Inf, 5, 10, 20, Inf),
+                          labels = c('#d1e7dd', '#fff3cd', '#f8d7da', '#e2c6c6'))
+      
+      ggplot(df, aes(x = Colonne, y = Ligne)) +
+        geom_tile(aes(fill = categorie), color = "white") +
+        scale_fill_identity() +
+        geom_text(aes(label = sprintf("%.2f", Valeur)), size = 3.2) +
+        labs(title = titre, x = "Canal secondaire (colonne)", y = "Canal principal (ligne)") +
+        theme_minimal(base_size = 12) +
+        theme(
+          axis.text.x = element_text(angle = 45, hjust = 1),
+          panel.grid  = element_blank(),
+          plot.title  = element_text(face = "bold")
+        )
+    }
+    
+    output$dl_matrix_png <- downloadHandler(
+      filename = function() {
+        paste0("matrice_spillover_", gsub("[^a-zA-Z0-9_]", "_", input$sel_echantillon), "_",
+               format(Sys.time(), "%Y%m%d_%H%M%S"), ".png")
+      },
+      content = function(file) {
+        ggsave(file, plot = generer_plot_matrice(mat_affichee()), width = 8, height = 6, dpi = 300, bg = "white")
+      }
+    )
+    
+    output$dl_matrix_pdf <- downloadHandler(
+      filename = function() {
+        paste0("matrice_spillover_", gsub("[^a-zA-Z0-9_]", "_", input$sel_echantillon), "_",
+               format(Sys.time(), "%Y%m%d_%H%M%S"), ".pdf")
+      },
+      content = function(file) {
+        ggsave(file, plot = generer_plot_matrice(mat_affichee()), width = 8, height = 6)
+      }
+    )
     
     # 3. Mettez à jour le trigger lors du calcul
     observeEvent(input$btn_calc_spillover, {
@@ -853,22 +1051,36 @@ compensation_server <- function(id, pipeline, pipeline_version) {
     # 4. Édition manuelle d'une cellule
     observeEvent(input$dt_spillover_matrix_cell_edit, {
       info <- input$dt_spillover_matrix_cell_edit
-      valeur_coeff <- as.numeric(info$value) / 100
       
-      p      <- pipeline()
-      nom    <- input$sel_echantillon
+      # Récupérer l'ordre actuel affiché à l'écran
+      ordre_actuel <- ordre_canaux_rv()
+      p <- pipeline()
+      req(!is.null(p$S_matrix), input$sel_echantillon)
       
-      # Sauvegarder l'état AVANT modification dans la pile undo
-      etat_avant <- capturer_etat(p, nom)
-      historique(c(historique(), list(list(echantillon = nom, matrice = etat_avant))))
-      historique_redo(list())   # toute nouvelle édition efface le redo
+      # Identifier les canaux modifiés grâce au nom (et non à l'index brut)
+      # info$row et info$col sont basés sur les lignes/colonnes affichées
+      nom_ligne <- ordre_actuel[info$row]
       
-      # Récupérer les noms de lignes/colonnes depuis la matrice affichée
-      mat_courante <- etat_avant
-      canal1 <- rownames(mat_courante)[info$row]
-      canal2 <- colnames(mat_courante)[info$col]
+      # Attention : si la matrice est transposée, les lignes deviennent les colonnes !
+      if (isTRUE(transpose_rv())) {
+        nom_colonne <- ordre_actuel[info$row]
+        nom_ligne   <- ordre_actuel[info$col]
+      } else {
+        nom_colonne <- ordre_actuel[info$col]
+      }
       
-      p$modifier_spillover(nom, canal1, canal2, valeur_coeff)
+      # Nouvelle valeur entrée par l'utilisateur (divisée par 100 car affichée en %)
+      nouvelle_valeur <- as.numeric(info$value) / 100
+      if (is.na(nouvelle_valeur)) return()
+      
+      # Déterminer quelle matrice modifier (spécifique à l'échantillon ou globale)
+      if (!is.null(p$S_matrices_par_echantillon[[input$sel_echantillon]])) {
+        p$S_matrices_par_echantillon[[input$sel_echantillon]][nom_ligne, nom_colonne] <- nouvelle_valeur
+      } else {
+        p$S_matrix[nom_ligne, nom_colonne] <- nouvelle_valeur
+      }
+      
+      # Déclencher la mise à jour du pipeline
       pipeline(p)
       spillover_trigger(spillover_trigger() + 1)
     })
@@ -930,6 +1142,109 @@ compensation_server <- function(id, pipeline, pipeline_version) {
         easyClose = TRUE,
         footer = modalButton("OK")
       ))
+    })
+    
+    # ════════════════════════════════════════════════════════════════════════
+    # COMPARAISON DES MÉDIANES (AVANT / APRÈS COMPENSATION)
+    # ════════════════════════════════════════════════════════════════════════
+    medianes_trigger <- reactiveVal(0)
+    
+    output$ui_select_echantillon_medianes <- renderUI({
+      p <- pipeline()
+      selectInput(ns("sel_echantillon_medianes"), "Échantillon (matrice de compensation utilisée) :",
+                  choices = names(p$echantillons))
+    })
+    
+    output$ui_btn_comparer_medianes <- renderUI({
+      spillover_trigger()
+      p <- pipeline()
+      if (is.null(p$S_matrix)) {
+        return(div(class = "alert alert-warning", style = "font-size:11px; padding:5px 9px;",
+                   icon("lock"), " Calculez d'abord la matrice de spillover dans l'onglet précédent."))
+      }
+      actionButton(ns("btn_comparer_medianes"), tagList(icon("balance-scale"), " Comparer les médianes"),
+                   class = "btn-primary btn-block")
+    })
+    
+    observeEvent(input$btn_comparer_medianes, {
+      p <- pipeline()
+      req(input$sel_echantillon_medianes)
+      withProgress(message = "Comparaison des médianes en cours...", value = 0.5, {
+        tryCatch({
+          p$comparer_medianes_spillover(nom_echantillon = input$sel_echantillon_medianes)
+          pipeline(p)
+          medianes_trigger(medianes_trigger() + 1)
+          showNotification("✔ Comparaison des médianes calculée !", type = "message")
+        }, error = function(e) {
+          showNotification(paste("Erreur :", conditionMessage(e)), type = "error")
+        })
+      })
+    })
+    
+    # Résultat courant (avant / après / delta) pour l'échantillon sélectionné
+    resultat_medianes <- reactive({
+      medianes_trigger()
+      req(input$sel_echantillon_medianes)
+      p   <- pipeline()
+      res <- p$comparaison_medianes[[input$sel_echantillon_medianes]]
+      validate(need(!is.null(res), "Cliquez sur 'Comparer les médianes' pour lancer le calcul."))
+      res
+    })
+    
+    afficher_matrice_medianes <- function(mat) {
+      datatable(
+        mat, rownames = TRUE, selection = "none",
+        options = list(dom = 't', ordering = FALSE, scrollX = TRUE, scrollY = "300px",
+                       scrollCollapse = TRUE, paging = FALSE)
+      ) %>% formatStyle(
+        columns = colnames(mat),
+        backgroundColor = styleInterval(c(5, 10, 20), c('#d1e7dd', '#fff3cd', '#f8d7da', '#e2c6c6'))
+      )
+    }
+    
+    output$dt_medianes_avant <- renderDT({
+      afficher_matrice_medianes(resultat_medianes()$avant)
+    })
+    
+    output$dt_medianes_apres <- renderDT({
+      afficher_matrice_medianes(resultat_medianes()$apres)
+    })
+    
+    output$dt_medianes_delta <- renderDT({
+      mat <- resultat_medianes()$delta
+      datatable(
+        mat, rownames = TRUE, selection = "none",
+        options = list(dom = 't', ordering = FALSE, scrollX = TRUE, scrollY = "300px",
+                       scrollCollapse = TRUE, paging = FALSE)
+      ) %>% formatStyle(
+        columns = colnames(mat),
+        # Vert si la compensation a bien réduit le spillover (delta positif), rouge sinon
+        backgroundColor = styleInterval(c(0), c('#f8d7da', '#d1e7dd'))
+      )
+    })
+    
+    # Tableaux "Écart de médianes" : vérifient directement le critère de bonne compensation
+    # (médiane positive == médiane négative, hors diagonale). La diagonale (NA) est affichée en gris neutre.
+    afficher_matrice_ecart <- function(mat) {
+      datatable(
+        mat, rownames = TRUE, selection = "none",
+        options = list(dom = 't', ordering = FALSE, scrollX = TRUE, scrollY = "300px",
+                       scrollCollapse = TRUE, paging = FALSE)
+      ) %>% formatStyle(
+        columns = colnames(mat),
+        backgroundColor = styleInterval(
+          c(-1, -0.2, 0.2, 1),
+          c('#f8d7da', '#fff3cd', '#d1e7dd', '#fff3cd', '#f8d7da')
+        )
+      )
+    }
+    
+    output$dt_medianes_ecart_avant <- renderDT({
+      afficher_matrice_ecart(resultat_medianes()$ecart_avant)
+    })
+    
+    output$dt_medianes_ecart_apres <- renderDT({
+      afficher_matrice_ecart(resultat_medianes()$ecart_apres)
     })
     
     # ════════════════════════════════════════════════════════════════════════

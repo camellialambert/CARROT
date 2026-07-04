@@ -13,12 +13,24 @@ pretraitement_ui <- function(id) {
     useShinyjs(),
     
     tags$style(HTML("
-      .pretrait-instructions {
+      .pretrait-instr {
         background:#eef6fb; border-left:3px solid #0077b6;
         padding:8px 12px; border-radius:4px;
-        font-size:12px; color:#444; margin-top:8px;
+        font-size:12px; color:#444; margin-top:6px;
       }
-      .pretrait-instructions b { color:#0077b6; }
+      .pretrait-instr b { color:#0077b6; }
+      .gate-chip {
+        display:inline-block; cursor:pointer;
+        background:#e3f2fd; border:1px solid #0077b6;
+        border-radius:12px; padding:3px 10px; margin:3px 2px;
+        font-size:12px; color:#0077b6; font-weight:600;
+      }
+      .gate-chip:hover { background:#bbdefb; }
+      .gate-chip.active { background:#0077b6; color:#fff; }
+      .recap-row { font-size:12px; margin-bottom:6px; padding:6px 8px;
+                   background:#f9f9f9; border-radius:4px; }
+      .recap-row .label { font-weight:bold; color:#333; }
+      .recap-row .value { float:right; }
     ")),
     
     tabBox(
@@ -26,94 +38,99 @@ pretraitement_ui <- function(id) {
       id = ns("pretrait_steps"), width = 12,
       
       # ══════════════════════════════════════════════════════════════════════
-      # ONGLET 1 — RETRAIT DES DÉBRIS (bordures + gate polygonal)
+      # ONGLET — RETRAIT DES DÉBRIS
       # ══════════════════════════════════════════════════════════════════════
       tabPanel(
         title = tagList(icon("broom"), " Retrait des Débris"),
         fluidRow(
-          # ───────────────────────────────────────────────
-          # COLONNE GAUCHE — Source + Paramètres
-          # ───────────────────────────────────────────────
+          
+          # ──────────────────────────────────────────────────────────────────
+          # COLONNE GAUCHE — Contrôles
+          # ──────────────────────────────────────────────────────────────────
           column(width = 3,
                  wellPanel(
                    h4("Source des données"),
-                   
-                   div(class = "pretrait-instructions",
-                       icon("info-circle"),
-                       " Choisissez la source à partir de laquelle effectuer le retrait des débris."),
-                   hr(),
-                   
-                   radioButtons(ns("source_debris"), "Données de départ :",
+                   radioButtons(ns("source_debris"), NULL,
                                 choices = c(
-                                  "Données compensées (brutes)" = "brutes",
-                                  "Après PeacoQC"               = "peacoqc",
-                                  "Après flowAI"                = "flowai"
+                                  "Compensées (brutes)" = "brutes",
+                                  "Après PeacoQC"       = "peacoqc",
+                                  "Après flowAI"        = "flowai"
                                 ),
                                 selected = "brutes"),
-                   hr(),
                    
-                   h4("Retrait des bordures (Margins)"),
-                   div(class = "pretrait-instructions",
+                   hr(),
+                   h4("Retrait des bordures"),
+                   div(class = "pretrait-instr",
                        icon("info-circle"),
-                       " Cette étape s'applique automatiquement sur la ",
-                       tags$b("dernière source disponible"),
-                       " du pipeline (PeacoQC > flowAI > compensées), indépendamment ",
-                       "du choix de source fait ci-dessous pour le gate de débris."),
-                   checkboxInput(ns("activer_bordures"), "Retirer les événements de bordure (margins)",
-                                 value = FALSE),
+                       " Utilise automatiquement la dernière étape du pipeline (PeacoQC > flowAI > compensées)."),
+                   checkboxInput(ns("activer_bordures"),
+                                 "Retirer les événements de bordure (margins)", FALSE),
                    conditionalPanel(
                      condition = paste0("input['", ns("activer_bordures"), "']"),
                      uiOutput(ns("ui_canaux_bordures")),
-                     actionButton(ns("btn_apply_bordures"), tagList(icon("play"), " Appliquer le retrait des bordures"),
-                                  class = "btn-info", style = "width:100%; font-weight:bold;")
+                     br(),
+                     actionButton(ns("btn_apply_bordures"),
+                                  tagList(icon("play"), " Appliquer les bordures"),
+                                  class = "btn-info btn-sm", style = "width:100%;")
                    ),
-                   hr(),
                    
-                   h4("Gate de débris (polygone)"),
+                   hr(),
+                   h4("Paramètres du gate"),
                    uiOutput(ns("ui_select_echantillon_debris")),
                    uiOutput(ns("ui_canal_x_debris")),
                    uiOutput(ns("ui_canal_y_debris")),
                    numericInput(ns("debris_max_points"), "Points affichés :",
                                 value = 10000, min = 1000, step = 1000),
-                   hr(),
                    
-                   actionButton(ns("btn_reset_gate_debris"), tagList(icon("eraser"), " Effacer la sélection"),
-                                class = "btn-default", style = "width:100%;"),
-                   br(), br(),
-                   actionButton(ns("btn_apply_debris"), tagList(icon("check-circle"), " Valider le gate de débris"),
+                   hr(),
+                   h4("Nommer et valider"),
+                   textInput(ns("nom_gate"), "Nom du gate :", value = "Débris",
+                             placeholder = "ex: Débris, Cellules vivantes..."),
+                   
+                   div(class = "pretrait-instr",
+                       icon("hand-pointer"),
+                       " Cliquez sur le graphique pour ajouter des sommets. ",
+                       tags$b("Double-clic"), " pour fermer le polygone."),
+                   br(),
+                   
+                   fluidRow(
+                     column(6, actionButton(ns("btn_undo_sommet"),
+                                            tagList(icon("undo"), " Annuler sommet"),
+                                            class = "btn-default btn-sm", style = "width:100%;")),
+                     column(6, actionButton(ns("btn_reset_gate"),
+                                            tagList(icon("eraser"), " Effacer"),
+                                            class = "btn-default btn-sm", style = "width:100%;"))
+                   ),
+                   br(),
+                   actionButton(ns("btn_save_gate"),
+                                tagList(icon("check-circle"), " Enregistrer le gate"),
                                 class = "btn-success", style = "width:100%; font-weight:bold;")
                  )
           ),
           
-          # ───────────────────────────────────────────────
-          # COLONNE CENTRALE — Graphique interactif
-          # ───────────────────────────────────────────────
+          # ──────────────────────────────────────────────────────────────────
+          # COLONNE CENTRALE — Graphiques
+          # ──────────────────────────────────────────────────────────────────
           column(width = 6,
-                 box(title = tagList(icon("draw-polygon"), " Sélection interactive du gate"),
+                 box(title = tagList(icon("draw-polygon"), " Dessin interactif du gate"),
                      width = NULL, status = "info", solidHeader = TRUE,
-                     
-                     plotlyOutput(ns("plot_debris_interactif"), height = "500px"),
-                     
-                     div(class = "pretrait-instructions",
-                         icon("hand-pointer"),
-                         " Utilisez l'outil de sélection ", tags$b("Lasso"),
-                         " (icône dans la barre d'outils en haut à droite du graphique) pour entourer ",
-                         "la population de cellules à ", tags$b("conserver"),
-                         ". Cliquez ensuite sur \"Valider le gate de débris\".")
+                     plotlyOutput(ns("plot_gate_dessin"), height = "480px")
                  ),
                  
-                 box(title = "Résultat après filtration", width = NULL,
+                 box(title = uiOutput(ns("titre_resultat")), width = NULL,
                      status = "success", solidHeader = TRUE,
-                     plotOutput(ns("plot_debris_resultat"), width = "100%", height = "450px")
+                     uiOutput(ns("ui_gate_chips")),
+                     plotOutput(ns("plot_gate_resultat"), width = "100%", height = "420px")
                  )
           ),
           
-          # ───────────────────────────────────────────────
-          # COLONNE DROITE — Récapitulatif
-          # ───────────────────────────────────────────────
+          # ──────────────────────────────────────────────────────────────────
+          # COLONNE DROITE — Résumé cumulatif
+          # ──────────────────────────────────────────────────────────────────
           column(width = 3,
-                 box(title = "Résumé", width = NULL, status = "success", solidHeader = TRUE,
-                     uiOutput(ns("ui_recap_debris"))
+                 box(title = "Résumé du pipeline", width = NULL,
+                     status = "warning", solidHeader = TRUE,
+                     uiOutput(ns("ui_recap_pipeline"))
                  )
           )
         )
@@ -131,296 +148,473 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
     
-    # ── Accès à l'objet CARROT ────────────────────────────────────────────────
+    # ── Accès réactif au pipeline ─────────────────────────────────────────────
     carrot_obj <- reactive({
       pipeline_version()
       pipeline()
     })
     
-    # ── Signaux locaux ────────────────────────────────────────────────────────
-    bordures_trigger <- reactiveVal(0L)   # incrémenté après retirer_les_bordures()
-    debris_trigger    <- reactiveVal(0L)  # incrémenté après retirer_les_debris()
-    selection_lasso   <- reactiveVal(NULL) # stocke le data.frame des points sélectionnés au lasso
+    # ── Signaux et état local ─────────────────────────────────────────────────
+    bordures_trigger  <- reactiveVal(0L)
+    gates_trigger     <- reactiveVal(0L)
+    
+    # Sommets du polygone en cours de dessin (liste de listes x/y)
+    sommets_rv        <- reactiveVal(list())
+    # Nom du gate actuellement affiché dans le panneau résultat
+    gate_actif_rv     <- reactiveVal(NULL)
     
     # ════════════════════════════════════════════════════════════════════════
-    # SOURCE DES DONNÉES — résolution selon le choix utilisateur
+    # RÉSOLUTION DE LA SOURCE
     # ════════════════════════════════════════════════════════════════════════
     
-    # Renvoie la liste nommée des flowFrame correspondant à la source choisie par l'utilisateur.
-    # Pour "peacoqc"/"flowai", utilise directement la liste demandée (avec repli sur la logique
-    # pyramidale du pipeline si elle est vide) ; pour "brutes", suit la même logique pyramidale
-    # que get_derniere_source() afin de refléter le retrait des bordures s'il a déjà été appliqué.
-    obtenir_source_active <- function(p, choix) {
+    obtenir_source <- function(p, choix) {
       if (choix == "peacoqc" && length(p$post_PeacoQC) > 0) return(p$post_PeacoQC)
       if (choix == "flowai"  && length(p$post_flowAI)  > 0) return(p$post_flowAI)
       return(p$get_derniere_source())
     }
     
     # ════════════════════════════════════════════════════════════════════════
-    # SECTION 1 — RETRAIT DES BORDURES (Margins)
+    # BORDURES (MARGINS)
     # ════════════════════════════════════════════════════════════════════════
     
     output$ui_canaux_bordures <- renderUI({
       p <- carrot_obj()
-      source_liste <- p$get_derniere_source()
-      req(length(source_liste) > 0)
-      
-      premier_fcs  <- source_liste[[1]]
-      tous_canaux  <- flowCore::colnames(premier_fcs)
-      
-      selectInput(ns("canaux_bordures_sel"), "Canaux à vérifier (bordures) :",
-                  choices  = tous_canaux,
-                  selected = tous_canaux,
-                  multiple = TRUE)
+      src <- p$get_derniere_source()
+      req(length(src) > 0)
+      cols <- flowCore::colnames(src[[1]])
+      selectInput(ns("canaux_bordures_sel"), "Canaux :", choices = cols,
+                  selected = cols, multiple = TRUE)
     })
     
     observeEvent(input$btn_apply_bordures, {
-      p <- carrot_obj()
-      req(input$canaux_bordures_sel)
-      
-      if (length(input$canaux_bordures_sel) < 1) {
-        showNotification("Veuillez sélectionner au moins un canal.", type = "error")
-        return(invisible(NULL))
-      }
-      
-      withProgress(message = "Retrait des événements de bordure...", value = 0.3, {
+      p  <- carrot_obj()
+      ch <- input$canaux_bordures_sel
+      req(length(ch) >= 1)
+      withProgress(message = "Retrait des bordures...", value = 0.4, {
         tryCatch({
-          # retirer_les_bordures() s'appuie en interne sur get_derniere_source() pour
-          # déterminer automatiquement la dernière étape valide du pipeline (PeacoQC > flowAI > brut)
-          if (length(input$canaux_bordures_sel) >= 2) {
-            p$retirer_les_bordures(
-              canal1 = input$canaux_bordures_sel[1],
-              canal2 = input$canaux_bordures_sel[2]
-            )
-          } else {
-            p$retirer_les_bordures(
-              canal1 = input$canaux_bordures_sel[1],
-              canal2 = input$canaux_bordures_sel[1]
-            )
-          }
+          p$retirer_les_bordures(
+            canal1 = ch[1],
+            canal2 = if (length(ch) >= 2) ch[2] else ch[1]
+          )
           pipeline(p)
           bordures_trigger(bordures_trigger() + 1L)
-          showNotification("✔ Retrait des bordures appliqué.", type = "message")
-        }, error = function(e) {
-          showNotification(paste("Erreur retrait des bordures :", conditionMessage(e)), type = "error")
-        })
+          showNotification("Bordures retirées.", type = "message")
+        }, error = function(e) showNotification(conditionMessage(e), type = "error"))
       })
     })
     
     # ════════════════════════════════════════════════════════════════════════
-    # SECTION 2 — GATE DE DÉBRIS (sélection polygonale interactive)
+    # SÉLECTEURS DYNAMIQUES
     # ════════════════════════════════════════════════════════════════════════
     
     output$ui_select_echantillon_debris <- renderUI({
-      p <- carrot_obj()
-      source_liste <- obtenir_source_active(p, input$source_debris %||% "brutes")
-      req(length(source_liste) > 0)
-      selectInput(ns("sel_echantillon_debris"), "Échantillon :",
-                  choices = names(source_liste))
+      bordures_trigger(); gates_trigger()
+      p  <- carrot_obj()
+      src <- obtenir_source(p, input$source_debris %||% "brutes")
+      req(length(src) > 0)
+      selectInput(ns("sel_ech_debris"), "Échantillon :", choices = names(src))
     })
     
     output$ui_canal_x_debris <- renderUI({
-      p <- carrot_obj()
-      source_liste <- obtenir_source_active(p, input$source_debris %||% "brutes")
-      req(length(source_liste) > 0, input$sel_echantillon_debris)
-      fcs <- source_liste[[input$sel_echantillon_debris]]
+      bordures_trigger()
+      p   <- carrot_obj()
+      src <- obtenir_source(p, input$source_debris %||% "brutes")
+      req(length(src) > 0, input$sel_ech_debris)
+      fcs <- src[[input$sel_ech_debris]]
       req(!is.null(fcs))
-      
-      tous_canaux <- flowCore::colnames(fcs)
-      defaut_fsc  <- grep("FSC", tous_canaux, value = TRUE, ignore.case = TRUE)[1]
-      
-      selectInput(ns("canal_x_debris"), "Canal X :",
-                  choices  = tous_canaux,
-                  selected = if (!is.na(defaut_fsc)) defaut_fsc else tous_canaux[1])
+      cols <- flowCore::colnames(fcs)
+      def  <- grep("FSC", cols, value = TRUE, ignore.case = TRUE)[1]
+      selectInput(ns("canal_x_debris"), "Canal X :", choices = cols,
+                  selected = if (!is.na(def)) def else cols[1])
     })
     
     output$ui_canal_y_debris <- renderUI({
-      p <- carrot_obj()
-      source_liste <- obtenir_source_active(p, input$source_debris %||% "brutes")
-      req(length(source_liste) > 0, input$sel_echantillon_debris)
-      fcs <- source_liste[[input$sel_echantillon_debris]]
+      bordures_trigger()
+      p   <- carrot_obj()
+      src <- obtenir_source(p, input$source_debris %||% "brutes")
+      req(length(src) > 0, input$sel_ech_debris)
+      fcs <- src[[input$sel_ech_debris]]
       req(!is.null(fcs))
-      
-      tous_canaux <- flowCore::colnames(fcs)
-      defaut_ssc  <- grep("SSC", tous_canaux, value = TRUE, ignore.case = TRUE)[1]
-      
-      selectInput(ns("canal_y_debris"), "Canal Y :",
-                  choices  = tous_canaux,
-                  selected = if (!is.na(defaut_ssc)) defaut_ssc else tous_canaux[min(2, length(tous_canaux))])
+      cols <- flowCore::colnames(fcs)
+      def  <- grep("SSC", cols, value = TRUE, ignore.case = TRUE)[1]
+      selectInput(ns("canal_y_debris"), "Canal Y :", choices = cols,
+                  selected = if (!is.na(def)) def else cols[min(2, length(cols))])
     })
     
-    # Données sous-échantillonnées du graphique interactif (réactif aux choix utilisateur)
-    donnees_debris_interactif <- reactive({
+    # ════════════════════════════════════════════════════════════════════════
+    # DONNÉES POUR LE GRAPHIQUE INTERACTIF
+    # ════════════════════════════════════════════════════════════════════════
+    
+    donnees_plot <- reactive({
       bordures_trigger()
       p <- carrot_obj()
-      req(input$sel_echantillon_debris, input$canal_x_debris, input$canal_y_debris)
-      
-      source_liste <- obtenir_source_active(p, input$source_debris %||% "brutes")
-      fcs <- source_liste[[input$sel_echantillon_debris]]
+      req(input$sel_ech_debris, input$canal_x_debris, input$canal_y_debris)
+      src <- obtenir_source(p, input$source_debris %||% "brutes")
+      fcs <- src[[input$sel_ech_debris]]
       req(!is.null(fcs))
-      
       cx <- input$canal_x_debris
       cy <- input$canal_y_debris
       req(cx %in% flowCore::colnames(fcs), cy %in% flowCore::colnames(fcs))
-      
-      mat   <- flowCore::exprs(fcs)[, c(cx, cy), drop = FALSE]
-      n_tot <- nrow(mat)
-      n_max <- input$debris_max_points %||% 10000
-      
+      mat <- flowCore::exprs(fcs)[, c(cx, cy), drop = FALSE]
+      n   <- nrow(mat)
+      nmax <- input$debris_max_points %||% 10000
       if (!is.null(p$seed)) set.seed(p$seed)
-      idx <- if (n_tot > n_max) sample(seq_len(n_tot), n_max) else seq_len(n_tot)
-      
-      df <- as.data.frame(mat[idx, , drop = FALSE])
+      idx <- if (n > nmax) sample(seq_len(n), nmax) else seq_len(n)
+      df  <- as.data.frame(mat[idx, , drop = FALSE])
       colnames(df) <- c("X", "Y")
-      df$key <- idx   # clé stable pour retrouver les points sélectionnés
       df
     })
     
-    # Réinitialise la sélection lasso quand l'utilisateur change d'échantillon/canaux/source
-    observeEvent(list(input$sel_echantillon_debris, input$canal_x_debris,
+    # Réinitialise le polygone si l'utilisateur change de canal/échantillon/source
+    observeEvent(list(input$sel_ech_debris, input$canal_x_debris,
                       input$canal_y_debris, input$source_debris), {
-                        selection_lasso(NULL)
+                        sommets_rv(list())
                       }, ignoreInit = TRUE)
     
-    observeEvent(input$btn_reset_gate_debris, {
-      selection_lasso(NULL)
-      showNotification("Sélection effacée.", type = "message")
+    # ════════════════════════════════════════════════════════════════════════
+    # GESTION DU POLYGONE — clic par clic + double-clic pour fermer
+    # ════════════════════════════════════════════════════════════════════════
+    
+    # Ajout d'un sommet via plotly_click
+    observeEvent(event_data("plotly_click", source = ns("plot_gate_dessin")), {
+      ev <- event_data("plotly_click", source = ns("plot_gate_dessin"))
+      req(ev)
+      soms <- sommets_rv()
+      soms[[length(soms) + 1]] <- list(x = ev$x, y = ev$y)
+      sommets_rv(soms)
     })
     
-    # Graphique interactif plotly — mode lasso pour entourer la population à conserver
-    output$plot_debris_interactif <- renderPlotly({
-      df <- donnees_debris_interactif()
+    # Fermeture du polygone via double-clic (ne rajoute pas de sommet)
+    observeEvent(event_data("plotly_doubleclick", source = ns("plot_gate_dessin")), {
+      soms <- sommets_rv()
+      if (length(soms) >= 3) {
+        showNotification(
+          paste0("Polygone fermé (", length(soms), " sommets). Vérifiez et enregistrez le gate."),
+          type = "message"
+        )
+      } else {
+        showNotification("Tracez au moins 3 sommets avant de fermer le polygone.", type = "warning")
+      }
+    })
+    
+    # Annuler le dernier sommet
+    observeEvent(input$btn_undo_sommet, {
+      soms <- sommets_rv()
+      if (length(soms) > 0) sommets_rv(soms[-length(soms)])
+    })
+    
+    # Effacer tout le polygone
+    observeEvent(input$btn_reset_gate, {
+      sommets_rv(list())
+    })
+    
+    # ════════════════════════════════════════════════════════════════════════
+    # GRAPHIQUE INTERACTIF — scatter + polygone en cours
+    # ════════════════════════════════════════════════════════════════════════
+    
+    output$plot_gate_dessin <- renderPlotly({
+      df   <- donnees_plot()
+      soms <- sommets_rv()
       req(nrow(df) > 0)
       
-      p <- carrot_obj()
-      source_liste <- obtenir_source_active(p, input$source_debris %||% "brutes")
-      fcs <- source_liste[[input$sel_echantillon_debris]]
-      lbl_x <- p$get_label(fcs, input$canal_x_debris)
-      lbl_y <- p$get_label(fcs, input$canal_y_debris)
+      p_obj <- carrot_obj()
+      src   <- obtenir_source(p_obj, input$source_debris %||% "brutes")
+      fcs   <- src[[input$sel_ech_debris]]
+      lbl_x <- p_obj$get_label(fcs, input$canal_x_debris)
+      lbl_y <- p_obj$get_label(fcs, input$canal_y_debris)
       
-      plot_ly(df, x = ~X, y = ~Y, key = ~key, type = "scatter", mode = "markers",
-              source = ns("plot_debris_interactif"),
-              marker = list(size = 3, color = "#0077b6", opacity = 0.45)) %>%
-        layout(
-          dragmode = "lasso",
-          xaxis = list(title = lbl_x),
-          yaxis = list(title = lbl_y)
-        ) %>%
-        event_register("plotly_selected")
+      # Scatter de base
+      fig <- plot_ly(source = ns("plot_gate_dessin"),
+                     type   = "scatter", mode = "markers") %>%
+        add_trace(data = df, x = ~X, y = ~Y, name = "Cellules",
+                  marker = list(size = 3, color = "#0077b6", opacity = 0.4),
+                  hoverinfo = "none") %>%
+        event_register("plotly_click") %>%
+        event_register("plotly_doubleclick")
+      
+      # Superposition du polygone si au moins 2 sommets
+      if (length(soms) >= 2) {
+        xs <- c(sapply(soms, `[[`, "x"), soms[[1]]$x)   # ferme visuellement
+        ys <- c(sapply(soms, `[[`, "y"), soms[[1]]$y)
+        
+        fig <- fig %>%
+          add_trace(x = xs, y = ys, type = "scatter", mode = "lines+markers",
+                    name = "Gate en cours",
+                    line   = list(color = "#e65100", width = 2, dash = "dot"),
+                    marker = list(size = 8, color = "#e65100", symbol = "circle"),
+                    hoverinfo = "x+y") %>%
+          # Shapes plotly éditables pour déplacer chaque sommet
+          layout(
+            shapes = lapply(seq_along(soms), function(i) {
+              list(type = "circle",
+                   x0 = soms[[i]]$x - 0.02 * diff(range(df$X)),
+                   x1 = soms[[i]]$x + 0.02 * diff(range(df$X)),
+                   y0 = soms[[i]]$y - 0.02 * diff(range(df$Y)),
+                   y1 = soms[[i]]$y + 0.02 * diff(range(df$Y)),
+                   xref = "x", yref = "y",
+                   fillcolor = "rgba(230,101,0,0.3)",
+                   line = list(color = "#e65100"))
+            })
+          ) %>%
+          config(editable = TRUE, displayModeBar = TRUE)
+      }
+      
+      fig %>% layout(
+        dragmode = "zoom",
+        xaxis = list(title = lbl_x),
+        yaxis = list(title = lbl_y),
+        legend = list(orientation = "h", y = -0.15),
+        margin = list(b = 60)
+      ) %>%
+        config(displayModeBar = TRUE,
+               modeBarButtonsToRemove = list("lasso2d", "select2d"),
+               displaylogo = FALSE)
     })
     
-    # Capture la sélection lasso et la conserve en mémoire (persiste tant que non réinitialisée)
-    observeEvent(event_data("plotly_selected", source = ns("plot_debris_interactif")), {
-      ev <- event_data("plotly_selected", source = ns("plot_debris_interactif"))
+    # Capture les déplacements de shapes (sommets éditables)
+    observeEvent(event_data("plotly_relayout", source = ns("plot_gate_dessin")), {
+      ev   <- event_data("plotly_relayout", source = ns("plot_gate_dessin"))
       req(ev)
-      if (nrow(ev) < 3) {
-        showNotification("Sélectionnez au moins 3 points pour former un polygone.", type = "warning")
+      soms <- sommets_rv()
+      
+      # Les shapes[i].x0 / shapes[i].y0 sont renvoyés quand on déplace un cercle
+      modifie <- FALSE
+      for (nm in names(ev)) {
+        m_idx <- regmatches(nm, regexpr("[0-9]+", nm))
+        if (length(m_idx) == 0) next
+        i <- as.integer(m_idx) + 1L   # 0-indexé en JS → 1-indexé en R
+        if (i < 1 || i > length(soms)) next
+        
+        if (grepl("\\.x0$", nm)) {
+          soms[[i]]$x <- ev[[nm]] + 0     # centrage : on récupère le bord gauche du cercle
+          modifie <- TRUE
+        }
+        if (grepl("\\.y0$", nm)) {
+          soms[[i]]$y <- ev[[nm]] + 0
+          modifie <- TRUE
+        }
+      }
+      if (modifie) sommets_rv(soms)
+    }, ignoreInit = TRUE)
+    
+    # ════════════════════════════════════════════════════════════════════════
+    # ENREGISTREMENT DU GATE
+    # ════════════════════════════════════════════════════════════════════════
+    
+    observeEvent(input$btn_save_gate, {
+      soms    <- sommets_rv()
+      nom_g   <- trimws(input$nom_gate %||% "")
+      
+      if (length(soms) < 3) {
+        showNotification("Tracez au moins 3 sommets pour définir un gate.", type = "error")
         return(invisible(NULL))
       }
-      selection_lasso(ev)
-    })
-    
-    # Validation du gate : calcule l'enveloppe convexe des points sélectionnés
-    # et l'envoie à retirer_les_debris()
-    observeEvent(input$btn_apply_debris, {
-      sel <- selection_lasso()
-      
-      if (is.null(sel) || nrow(sel) < 3) {
-        showNotification("Veuillez d'abord sélectionner une zone au lasso sur le graphique.", type = "error")
+      if (nchar(nom_g) == 0) {
+        showNotification("Donnez un nom au gate.", type = "error")
         return(invisible(NULL))
       }
       
       p <- carrot_obj()
       
-      # Enveloppe convexe des points sélectionnés → polygone exploitable par flowCore::polygonGate
-      idx_hull   <- grDevices::chull(sel$x, sel$y)
-      polygone   <- as.matrix(sel[idx_hull, c("x", "y")])
-      colnames(polygone) <- c(input$canal_x_debris, input$canal_y_debris)
+      # Construction de la matrice polygone à partir des sommets courants
+      xs <- sapply(soms, `[[`, "x")
+      ys <- sapply(soms, `[[`, "y")
+      cx <- input$canal_x_debris
+      cy <- input$canal_y_debris
       
-      withProgress(message = "Application du gate de débris...", value = 0.3, {
+      # Les shapes éditables décalent le centre d'un rayon → on utilise directement x0/y0
+      # (le centre réel est x0 + rayon, mais pour polygonGate on veut les vrais sommets)
+      # On calcule l'enveloppe convexe pour garantir un polygone propre
+      idx_hull <- grDevices::chull(xs, ys)
+      mat_poly <- cbind(xs[idx_hull], ys[idx_hull])
+      colnames(mat_poly) <- c(cx, cy)
+      
+      withProgress(message = paste0("Application du gate '", nom_g, "'..."), value = 0.4, {
         tryCatch({
-          p$retirer_les_debris(
-            matrice_points    = polygone,
-            canal_x           = input$canal_x_debris,
-            canal_y           = input$canal_y_debris,
-            source_nettoyage  = input$source_debris %||% "brutes"
+          p$appliquer_gate_nomme(
+            nom_gate       = nom_g,
+            matrice_points = mat_poly,
+            canal_x        = cx,
+            canal_y        = cy,
+            source_nettoyage = input$source_debris %||% "brutes"
           )
           pipeline(p)
-          debris_trigger(debris_trigger() + 1L)
-          showNotification("✔ Gate de débris appliqué à la cohorte.", type = "message")
-        }, error = function(e) {
-          showNotification(paste("Erreur retrait des débris :", conditionMessage(e)), type = "error")
-        })
+          gates_trigger(gates_trigger() + 1L)
+          gate_actif_rv(nom_g)
+          sommets_rv(list())   # remet à zéro pour le prochain gate
+          showNotification(paste0("Gate '", nom_g, "' enregistré."), type = "message")
+        }, error = function(e) showNotification(conditionMessage(e), type = "error"))
       })
     })
     
-    # ── Rendu du résultat après filtration (biplot avec contour du polygone) ──
-    output$plot_debris_resultat <- renderPlot({
-      debris_trigger()
-      p <- carrot_obj()
-      req(input$sel_echantillon_debris)
+    # ════════════════════════════════════════════════════════════════════════
+    # PANNEAU RÉSULTAT — chips de navigation + graphique
+    # ════════════════════════════════════════════════════════════════════════
+    
+    output$titre_resultat <- renderUI({
+      ga <- gate_actif_rv()
+      if (is.null(ga)) "Résultat après filtration"
+      else paste0("Résultat — gate : ", ga)
+    })
+    
+    # Chips cliquables (un bouton par gate nommé enregistré)
+    output$ui_gate_chips <- renderUI({
+      gates_trigger()
+      p  <- carrot_obj()
+      nms <- names(p$gates_history)
+      if (length(nms) == 0) return(NULL)
       
-      if (length(p$post_debris) == 0 || is.null(p$post_debris[[input$sel_echantillon_debris]])) {
-        validate("Cliquez sur 'Valider le gate de débris' pour afficher le résultat.")
+      ga <- gate_actif_rv()
+      
+      chips <- lapply(nms, function(nm) {
+        cls <- paste0("gate-chip", if (!is.null(ga) && ga == nm) " active" else "")
+        actionLink(ns(paste0("chip_", gsub("[^a-zA-Z0-9]", "_", nm))),
+                   label = nm,
+                   class = cls,
+                   onclick = paste0("Shiny.setInputValue('", ns("gate_chip_clicked"), "', '",
+                                    nm, "', {priority: 'event'})"))
+      })
+      
+      tagList(
+        div(style = "margin-bottom:8px; font-size:11px; color:#888;",
+            "Cliquer sur un gate pour l'afficher ou le modifier :"),
+        do.call(tagList, chips)
+      )
+    })
+    
+    # Réaction au clic sur un chip → charge le polygone pour réajustement
+    observeEvent(input$gate_chip_clicked, {
+      nm <- input$gate_chip_clicked
+      req(nchar(nm) > 0)
+      
+      p <- carrot_obj()
+      infos_gate <- p$gates_history[[nm]]
+      req(!is.null(infos_gate))
+      
+      # Prend les coordonnées du premier échantillon (référence)
+      premier_ech <- infos_gate[[input$sel_ech_debris %||% names(infos_gate)[1]]]
+      if (is.null(premier_ech)) premier_ech <- infos_gate[[1]]
+      req(!is.null(premier_ech))
+      
+      mat <- premier_ech$polygone
+      soms <- lapply(seq_len(nrow(mat)), function(i) {
+        list(x = mat[i, 1], y = mat[i, 2])
+      })
+      
+      sommets_rv(soms)
+      gate_actif_rv(nm)
+      updateTextInput(session, "nom_gate", value = nm)
+    }, ignoreInit = TRUE)
+    
+    # Graphique résultat (ggplot via visualiser_debris)
+    output$plot_gate_resultat <- renderPlot({
+      gates_trigger()
+      p  <- carrot_obj()
+      ga <- gate_actif_rv()
+      req(input$sel_ech_debris)
+      
+      if (is.null(ga) || length(p$gates_history) == 0) {
+        validate("Enregistrez un gate pour afficher le résultat.")
       }
       
+      # Assure que post_debris correspond au gate actif avant de visualiser
+      infos <- p$gates_history[[ga]]
+      req(!is.null(infos))
+      p$post_debris <- lapply(infos, function(r) r$post_data)
+      
       res <- tryCatch(
-        p$visualiser_debris(
-          nom_echantillon = input$sel_echantillon_debris,
-          max_points       = input$debris_max_points %||% 10000
-        ),
-        error = function(e) {
-          showNotification(paste("Erreur visualisation débris :", conditionMessage(e)), type = "error")
-          NULL
-        }
+        p$visualiser_debris(nom_echantillon = input$sel_ech_debris,
+                            max_points       = input$debris_max_points %||% 10000),
+        error = function(e) { showNotification(conditionMessage(e), type = "error"); NULL }
       )
       
       if (is.null(res)) {
-        plot.new()
-        text(0.5, 0.5, "Aucune donnée à afficher.", cex = 1.1, col = "grey40")
-        return()
+        plot.new(); text(0.5, 0.5, "Aucune donnée.", cex = 1.1, col = "grey40"); return()
       }
       print(res)
     })
     
-    # ── Récapitulatif des taux de conservation pour tous les échantillons traités ──
-    output$ui_recap_debris <- renderUI({
-      debris_trigger()
+    # ════════════════════════════════════════════════════════════════════════
+    # RÉSUMÉ CUMULATIF — toutes les étapes du pipeline
+    # ════════════════════════════════════════════════════════════════════════
+    
+    output$ui_recap_pipeline <- renderUI({
+      bordures_trigger(); gates_trigger()
       p <- carrot_obj()
+      req(input$sel_ech_debris)
+      nom <- input$sel_ech_debris
       
-      if (length(p$post_debris) == 0) {
-        return(div(class = "alert alert-warning", style = "font-size:12px; padding:8px;",
-                   icon("exclamation-triangle"), " Aucun résultat disponible."))
+      # Résolution du nombre de cellules à chaque étape
+      etapes <- list()
+      
+      # Compensées brutes
+      if (!is.null(p$echantillons_traites[[nom]])) {
+        n <- nrow(flowCore::exprs(p$echantillons_traites[[nom]]))
+        etapes[["Compensées"]] <- list(n = n, ref = n)
+      }
+      ref <- etapes[["Compensées"]]$n %||% NA
+      
+      if (!is.null(p$post_PeacoQC[[nom]])) {
+        n <- nrow(flowCore::exprs(p$post_PeacoQC[[nom]]))
+        etapes[["PeacoQC"]] <- list(n = n, ref = ref)
+      }
+      if (!is.null(p$post_flowAI[[nom]])) {
+        n <- nrow(flowCore::exprs(p$post_flowAI[[nom]]))
+        etapes[["flowAI"]] <- list(n = n, ref = ref)
+      }
+      if (!is.null(p$post_retrait_bordures[[nom]])) {
+        n <- nrow(flowCore::exprs(p$post_retrait_bordures[[nom]]))
+        etapes[["Bordures"]] <- list(n = n, ref = ref)
       }
       
-      source_liste <- obtenir_source_active(p, input$source_debris %||% "brutes")
+      # Gates nommés (empilés)
+      ref_gate <- if (length(etapes) > 0) etapes[[length(etapes)]]$n else ref
+      for (nm_gate in names(p$gates_history)) {
+        infos <- p$gates_history[[nm_gate]][[nom]]
+        if (!is.null(infos)) {
+          etapes[[nm_gate]] <- list(n = infos$n_apres, ref = infos$n_avant)
+          ref_gate <- infos$n_apres
+        }
+      }
       
-      lignes <- lapply(names(p$post_debris), function(nom) {
-        avant <- source_liste[[nom]]
-        apres <- p$post_debris[[nom]]
-        if (is.null(avant) || is.null(apres)) return(NULL)
+      if (length(etapes) == 0) {
+        return(div(class = "alert alert-warning", style = "font-size:12px; padding:8px;",
+                   icon("exclamation-triangle"), " Aucune étape réalisée."))
+      }
+      
+      lignes <- lapply(names(etapes), function(step) {
+        info <- etapes[[step]]
+        n    <- info$n
+        ref_n <- info$ref
+        pct  <- if (!is.null(ref_n) && !is.na(ref_n) && ref_n > 0)
+          round(n / ref_n * 100, 1) else NA
         
-        n_avant <- nrow(flowCore::exprs(avant))
-        n_apres <- nrow(flowCore::exprs(apres))
-        pct     <- if (n_avant > 0) round(n_apres / n_avant * 100, 1) else 0
+        couleur <- if (is.na(pct)) "#666"
+        else if (pct >= 90) "#2e7d32"
+        else if (pct >= 70) "#e65100"
+        else "#c62828"
         
-        couleur <- if (pct >= 90) "#2e7d32" else if (pct >= 70) "#e65100" else "#c62828"
-        
-        div(style = "margin-bottom:8px; font-size:12px;",
-            strong(nom), br(),
-            span(style = paste0("color:", couleur, ";"),
-                 format(n_apres, big.mark = " "), " / ", format(n_avant, big.mark = " "),
-                 " (", pct, "%)")
+        div(class = "recap-row",
+            span(class = "label", step), " : ",
+            span(class = "value",
+                 style = paste0("color:", couleur, "; font-weight:bold;"),
+                 format(n, big.mark = " "),
+                 if (!is.na(pct)) paste0(" (", pct, "%)") else ""
+            )
         )
       })
       
-      tagList(Filter(Negate(is.null), lignes))
+      tagList(
+        div(style = "font-size:11px; color:#888; margin-bottom:8px;",
+            icon("user"), " ", nom),
+        do.call(tagList, lignes)
+      )
     })
     
   })
 }
 
-# Opérateur null-coalescing utilitaire (présent aussi dans module_compensation.R et module_qc.R)
+# Opérateur null-coalescing utilitaire
 if (!exists("%||%")) {
   `%||%` <- function(a, b) if (!is.null(a)) a else b
 }

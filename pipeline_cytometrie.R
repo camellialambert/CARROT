@@ -27,6 +27,7 @@ CARROT <- R6Class(
     plots_gates = list(), # contient toutes les figures des gates (courbes de densité)
     S_matrix = NULL, # contient la matrice de spillover
     S_matrices_par_echantillon = list(), # contient les matrices de spillover par échantillon
+    comparaison_medianes = list(), # contient, par échantillon (ou "GLOBAL"), les matrices comparatives de spillover mesurées sur les médianes avant/après compensation
     plots_compensation = list(), # contient toutes les figures biplots, avant et/ou après compensation
     
     # Variable de l'unmixing
@@ -51,6 +52,7 @@ CARROT <- R6Class(
     post_retrait_bordures = list(), # Stocke la matrice d'expression des échantillons nettoyée des signaux saturés (valeurs maximales ou minimales des détecteurs)
     gate_debris = list(), # Contient les coordonnées et les structures géométriques des fenêtres (gates) de sélection des cellules (retrait des débris en FSC vs SSC)
     post_debris = list(), # Stocke les données des échantillons filtrées où seuls les événements correspondants aux cellules (hors débris) ont été conservés
+    gates_history = list(), # Historique ordonné des gates nommés appliqués : list(nom_gate -> list(nom_echantillon -> list(polygone, cx, cy, post_data, n_avant, n_apres)))
     gate_doublets_FSC = list(), # Contient les coordonnées du gate de discrimination des doublets basé sur les paramètres du Forward Scatter (ex: FSC-A vs FSC-H)
     gate_doublets_SSC = list(), # Contient les coordonnées du gate de discrimination des doublets basé sur les paramètres du Side Scatter (ex: SSC-A vs SSC-H)
     post_doublets_FSC = list(), # Stocke les données des échantillons après l'élimination des doublets par le filtre FSC
@@ -316,6 +318,74 @@ CARROT <- R6Class(
       return(self$S_matrices_par_echantillon[[nom_echantillon]]) # Renvoie la matrice de compensation individualisée et mise à jour pour cet échantillon
     }, 
     
+    comparer_medianes_spillover = function(nom_echantillon = NULL) { # Méthode comparant, canal par canal, le spillover (%) mesuré à partir des médianes AVANT et APRÈS application de la matrice de compensation
+      matrice_utilisee <- if (!is.null(nom_echantillon) && !is.null(self$S_matrices_par_echantillon[[nom_echantillon]])) { # Recherche si une matrice individualisée existe pour l'échantillon demandé
+        self$S_matrices_par_echantillon[[nom_echantillon]] # Utilise la matrice personnalisée de cet échantillon si elle existe
+      } else {
+        self$S_matrix # Sinon utilise la matrice de spillover générale
+      }
+      if (is.null(matrice_utilisee)) stop("Veuillez d'abord calculer la matrice de spillover.") # Bloque le calcul si aucune matrice n'est disponible
+      
+      nombre_canaux <- length(self$canaux) # Évalue le nombre total de canaux d'acquisition actifs
+      mat_avant <- matrix(0, nrow = nombre_canaux, ncol = nombre_canaux, dimnames = list(self$canaux, self$canaux)) # Initialise la matrice du spillover mesuré AVANT compensation
+      mat_apres <- matrix(0, nrow = nombre_canaux, ncol = nombre_canaux, dimnames = list(self$canaux, self$canaux)) # Initialise la matrice du spillover résiduel mesuré APRÈS compensation
+      mat_ecart_avant <- matrix(NA, nrow = nombre_canaux, ncol = nombre_canaux, dimnames = list(self$canaux, self$canaux)) # Écart brut (médiane positive - médiane négative) AVANT compensation, pour vérifier l'égalité des médianes
+      mat_ecart_apres <- matrix(NA, nrow = nombre_canaux, ncol = nombre_canaux, dimnames = list(self$canaux, self$canaux)) # Écart brut (médiane positive - médiane négative) APRÈS compensation, pour vérifier l'égalité des médianes
+      
+      for (canal_principal in self$canaux) { # Boucle sur chaque canal monomarqué disponible (une ligne de la matrice)
+        if (is.null(self$gates_positifs[[canal_principal]]) || is.null(self$gates_negatifs[[canal_principal]])) { # Vérifie que les gates ont bien été validés pour ce canal
+          stop(paste("Gates manquants pour :", canal_principal)) # Alerte si un gate est manquant
+        }
+        
+        fcs_pos_brut <- self$gates_positifs[[canal_principal]] # Population positive brute (non compensée) pour ce canal
+        fcs_neg_brut <- self$gates_negatifs[[canal_principal]] # Population négative brute (non compensée) pour ce canal
+        fcs_pos_comp <- flowCore::compensate(fcs_pos_brut, matrice_utilisee) # Applique la matrice de compensation à la population positive
+        fcs_neg_comp <- flowCore::compensate(fcs_neg_brut, matrice_utilisee) # Applique la matrice de compensation à la population négative
+        
+        calculer_spillover_pourcentage <- function(fcs_cible, fcs_ref_neg) { # Sous-fonction interne calculant le pourcentage réel de débordement de chaque canal par rapport au canal principal (basée sur les médianes)
+          mat_exprs_cible <- flowCore::exprs(fcs_cible)[, self$canaux, drop = FALSE] # Extrait la matrice des intensités de fluorescence de la population positive
+          mat_exprs_neg   <- flowCore::exprs(fcs_ref_neg)[, self$canaux, drop = FALSE] # Extrait la matrice des intensités de fluorescence de la population négative
+          med_pos <- apply(mat_exprs_cible, 2, median, na.rm = TRUE) # Médiane de la population positive, pour l'ensemble des canaux
+          med_neg <- apply(mat_exprs_neg, 2, median, na.rm = TRUE) # Médiane de la population négative, pour l'ensemble des canaux
+          delta_signal <- med_pos - med_neg # Signal net (équivalent du delta_observe généralisé à tous les canaux)
+          delta_signal <- pmax(delta_signal, 0) # Empêche toute valeur négative : un spillover ne peut pas être inférieur à 0 (même logique que calculer_spillover())
+          delta_source <- delta_signal[canal_principal] # Signal net du canal primaire légitime (delta_source), déjà borné à 0
+          liste_retour <- list(pourcentage = NULL, ecart = med_pos - med_neg) # Prépare le retour : le pourcentage borné ET l'écart brut (non borné, utile pour le test d'égalité des médianes)
+          if (is.na(delta_source) || delta_source == 0) { # Évite une division par zéro si aucun signal n'est détecté dans le canal principal
+            liste_retour$pourcentage <- setNames(rep(0, length(delta_signal)), names(delta_signal)) # Renvoie 0 partout plutôt qu'une valeur indéfinie
+          } else {
+            liste_retour$pourcentage <- round((delta_signal / delta_source) * 100, 2) # Ratio de spillover exprimé en pourcentage, borné à 0 et arrondi à deux décimales
+          }
+          liste_retour
+        }
+        
+        res_brut <- calculer_spillover_pourcentage(fcs_pos_brut, fcs_neg_brut) # Calcule le spillover (%) et l'écart brut AVANT compensation
+        res_comp <- calculer_spillover_pourcentage(fcs_pos_comp, fcs_neg_comp) # Calcule le spillover (%) et l'écart brut APRÈS compensation
+        
+        mat_avant[canal_principal, ] <- res_brut$pourcentage # Remplit la ligne "avant compensation" pour ce canal (jamais négatif)
+        mat_apres[canal_principal, ] <- res_comp$pourcentage # Remplit la ligne "après compensation" (résiduel) pour ce canal (jamais négatif)
+        
+        mat_ecart_avant[canal_principal, ] <- round(res_brut$ecart, 3) # Écart brut médiane positive - médiane négative AVANT compensation (toutes unités confondues, positif ou négatif)
+        mat_ecart_apres[canal_principal, ] <- round(res_comp$ecart, 3) # Écart brut médiane positive - médiane négative APRÈS compensation : une compensation correcte donne un écart proche de 0
+        
+        mat_ecart_avant[canal_principal, canal_principal] <- NA # La diagonale correspond au signal réel du marqueur (et non à un spillover résiduel) : elle n'est pas concernée par le test d'égalité des médianes
+        mat_ecart_apres[canal_principal, canal_principal] <- NA # Idem après compensation : on neutralise la diagonale pour ne pas fausser la lecture du critère
+      }
+      
+      resultat <- list(
+        avant       = mat_avant,                          # Spillover (%) mesuré avant compensation (jamais négatif)
+        apres       = mat_apres,                           # Spillover (%) résiduel mesuré après compensation (jamais négatif)
+        delta       = round(mat_avant - mat_apres, 2),      # Amélioration apportée par la compensation (en points de %)
+        ecart_avant = mat_ecart_avant,                      # Écart brut médiane positive - médiane négative AVANT compensation (diagonale = NA)
+        ecart_apres = mat_ecart_apres                       # Écart brut médiane positive - médiane négative APRÈS compensation : doit tendre vers 0 si la compensation est correcte (diagonale = NA)
+      ) # Compile l'ensemble des matrices comparatives
+      
+      cle <- if (!is.null(nom_echantillon)) nom_echantillon else "GLOBAL" # Clé de stockage : nom de l'échantillon ou "GLOBAL" si aucun échantillon n'est précisé
+      self$comparaison_medianes[[cle]] <- resultat # Archive le résultat pour un accès ultérieur (ex: affichage Shiny)
+      
+      return(resultat) # Renvoie la liste des matrices comparatives
+    },
+    
     controler_monomarques = function(fichier_monomarque, canal_x, canal_y, max_points = 10000) { # Méthode générant un graphique biplot comparatif avant/après compensation pour contrôler le spillover
       if (is.null(canal_x) || canal_x == "" || is.null(canal_y) || canal_y == "") return(NULL) # Intercepte et arrête la fonction si l'un des deux canaux d'acquisition n'est pas renseigné
       fcs_brut_original  <- self$tubes_monomarques[[fichier_monomarque]] # Récupère le fichier d'acquisition FCS brut d'origine correspondant au tube monomarqué
@@ -331,8 +401,10 @@ CARROT <- R6Class(
         mat_exprs_neg   <- if(is.null(fcs_ref_neg)) mat_exprs_cible else flowCore::exprs(fcs_ref_neg) # Utilise la matrice de l'autocontrôle négatif approprié (interne ou externe)
         delta_observe <- median(mat_exprs_cible[indices_pos, canal_y], na.rm = TRUE) - median(mat_exprs_neg[indices_neg, canal_y], na.rm = TRUE) # Calcule le signal net reçu par le canal secondaire importun (canal Y)
         delta_source  <- median(mat_exprs_cible[indices_pos, canal_x], na.rm = TRUE) - median(mat_exprs_neg[indices_neg, canal_x], na.rm = TRUE) # Calcule le signal net reçu par le canal primaire légitime (canal X)
+        delta_observe <- max(delta_observe, 0, na.rm = TRUE) # Empêche toute valeur négative : un spillover ne peut pas être inférieur à 0
+        delta_source  <- max(delta_source, 0, na.rm = TRUE) # Idem pour le signal source, borné à 0
         if (is.na(delta_source) || delta_source == 0) return(0.00) # Évite une division par zéro si aucun signal n'est détecté dans le canal émetteur
-        return(round((delta_observe / delta_source) * 100, 2)) # Renvoie le ratio de spillover exprimé en pourcentage, arrondi à deux décimales
+        return(round((delta_observe / delta_source) * 100, 2)) # Renvoie le ratio de spillover exprimé en pourcentage, arrondi à deux décimales, toujours ≥ 0
       }
       
       tube_unstained_brut <- if(nom_tube_neg == "TUBE_UNSTAINED") self$tubes_monomarques[["TUBE_UNSTAINED"]] else NULL # Récupère le tube Unstained brut s'il s'agit de la référence négative globale
@@ -1112,7 +1184,7 @@ CARROT <- R6Class(
         if (source_nettoyage %in% c("peacoqc", "flowai")) {
           message("⚠️ [Warning] Source '", source_nettoyage, "' introuvable ou vide. Repli sur les données compensées brutes.")
         }
-        liste_source <- if (length(self$echantillons_traites) > 0) self$echantillons_traites else self$fcs_compenses
+        liste_source <- self$echantillons_traites
       }
       
       if (is.null(liste_source) || length(liste_source) == 0) {
@@ -1143,6 +1215,68 @@ CARROT <- R6Class(
       if (!is.null(self$update_pipeline)) {
         self$update_pipeline("debris", nom_echantillon)
       }
+      
+      return(invisible(self))
+    },
+    
+    # Applique un gate polygonal nommé séquentiellement sur tous les échantillons.
+    # Chaque gate est empilé sur le précédent (le résultat du gate N-1 alimente le gate N).
+    # L'entrée du 1er gate est déterminée par source_nettoyage.
+    # gates_history stocke, pour chaque nom de gate, les résultats par échantillon.
+    appliquer_gate_nomme = function(nom_gate, matrice_points, canal_x, canal_y,
+                                    source_nettoyage = "brutes") {
+      if (is.null(nom_gate) || nchar(trimws(nom_gate)) == 0) stop("Le gate doit avoir un nom.")
+      if (is.null(matrice_points) || nrow(matrice_points) < 3) stop("Polygone invalide (< 3 points).")
+      
+      # Source d'entrée : dernier gate validé si disponible, sinon source QC choisie
+      if (length(self$gates_history) > 0) {
+        dernier_gate <- self$gates_history[[length(self$gates_history)]]
+        liste_source <- lapply(names(dernier_gate), function(n) dernier_gate[[n]]$post_data)
+      } else {
+        if (source_nettoyage == "peacoqc" && length(self$post_PeacoQC) > 0) {
+          liste_source <- self$post_PeacoQC
+        } else if (source_nettoyage == "flowai" && length(self$post_flowAI) > 0) {
+          liste_source <- self$post_flowAI
+        } else {
+          liste_source <- self$get_derniere_source()
+        }
+      }
+      
+      if (is.null(liste_source) || length(liste_source) == 0) {
+        stop("Aucune donnée disponible pour appliquer le gate.")
+      }
+      
+      mat_gate <- as.matrix(matrice_points[, 1:2])
+      colnames(mat_gate) <- c(canal_x, canal_y)
+      polygone <- flowCore::polygonGate(.gate = mat_gate, filterId = nom_gate)
+      
+      resultats_gate <- list()
+      for (nom in names(liste_source)) {
+        ff_entree <- liste_source[[nom]]
+        if (is.null(ff_entree)) next
+        n_avant <- nrow(flowCore::exprs(ff_entree))
+        message("Application gate '", nom_gate, "' sur : ", nom)
+        res_filtre <- flowCore::filter(ff_entree, polygone)
+        ff_apres   <- ff_entree[res_filtre@subSet, ]
+        n_apres    <- nrow(flowCore::exprs(ff_apres))
+        resultats_gate[[nom]] <- list(
+          polygone  = mat_gate,
+          canal_x   = canal_x,
+          canal_y   = canal_y,
+          post_data = ff_apres,
+          n_avant   = n_avant,
+          n_apres   = n_apres
+        )
+      }
+      
+      # Enregistre dans l'historique (écrase si même nom)
+      self$gates_history[[nom_gate]] <- resultats_gate
+      
+      # Met aussi à jour post_debris pour compatibilité avec visualiser_debris et les étapes aval
+      self$gate_debris <- lapply(resultats_gate, function(r) {
+        flowCore::polygonGate(.gate = r$polygone, filterId = nom_gate)
+      })
+      self$post_debris <- lapply(resultats_gate, function(r) r$post_data)
       
       return(invisible(self))
     },
@@ -1419,7 +1553,7 @@ CARROT <- R6Class(
       } 
       
       ff_nettoye <- self$post_flowAI[[nom_echantillon]] # Extrait l'objet flowFrame épuré (contenant uniquement les cellules validées par le QC)
-      fcs_initial <- if (length(self$echantillons_traites) > 0) self$echantillons_traites[[nom_echantillon]] else self$fcs_compenses[[nom_echantillon]] # Récupère l'échantillon brut d'origine (avant QC) au sein de la structure de stockage disponible
+      fcs_initial <- self$echantillons_traites[[nom_echantillon]] # Récupère l'échantillon compensé d'origine (avant QC)
       exprs_initiales <- as.data.frame(flowCore::exprs(fcs_initial)) # Extrait sous forme de tableau de données R la matrice d'expression de tous les événements cellulaires initiaux
       canal_temps <- grep("time", colnames(exprs_initiales), ignore.case = TRUE, value = TRUE)[1] # Détecte dynamiquement par expression régulière le nom du canal dédié au suivi du temps d'acquisition
       canal_taille <- grep("FSC", colnames(exprs_initiales), ignore.case = TRUE, value = TRUE)[1] # Détecte dynamiquement par expression régulière le nom du canal de taille cellulaire relative (Forward Scatter)

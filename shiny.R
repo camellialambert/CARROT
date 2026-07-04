@@ -17,8 +17,9 @@ CANAUX_CONNUS <- c(
   "", "FITC-A", "Alexa Fluor 488-A", "Alexa Fluor 700-A",
   "PE-A", "PE-Cy5-A", "PE-Cy7-A", "PerCP-Cy5-5-A", "GFP-A",
   "APC-A", "APC-R700-A", "APC-H7-A",
-  "BV421-A", "AmCyan-A", "BV510-A", "BV605-A", "BV650-A",
-  "Pacific Blue-A", "V450-A", "BV711-A", "BV786-A"
+  "AmCyan-A", "BV 650-A" , "BV 711-A"  ,
+  "Pacific Blue-A", "BV 786-A", "DAPI-A", 
+  "PE-Texas Red-A", "BV 421-A", "BV 605-A"
 )
 
 ui <- dashboardPage(
