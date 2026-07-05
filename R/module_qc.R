@@ -127,12 +127,16 @@ qc_ui <- function(id) {
                    selectInput(ns("flowai_remove_from"), "Critères évalués (remove_from) :",
                                choices = c("all", "FR", "FS", "FM", "FR_FS", "FR_FM", "FS_FM"),
                                selected = "all"),
+                   textInput(ns("flowai_timeCh"), "Canal temporel (timeCh) — vide = auto :",
+                             value = ""),
                    
                    h5(tags$b("Flow Rate (débit)")),
                    numericInput(ns("flowai_second_fractionFR"), "Fraction de seconde :",
                                 value = 0.1, min = 0.01, step = 0.01),
                    numericInput(ns("flowai_alphaFR"), "Seuil alpha :",
                                 value = 0.01, min = 0, max = 1, step = 0.01),
+                   checkboxInput(ns("flowai_decompFR"), "Décomposer tendance/cycle (decompFR)",
+                                 value = TRUE),
                    
                    h5(tags$b("Flow Signal")),
                    numericInput(ns("flowai_max_cptFS"), "Nombre max. de points de changement :",
@@ -141,10 +145,16 @@ qc_ui <- function(id) {
                                 value = 500, min = 1, step = 50),
                    textInput(ns("flowai_ChExcludeFS"), "Canaux exclus (séparés par virgule) :",
                              value = "FSC,SSC"),
+                   checkboxInput(ns("flowai_outlier_binsFS"), "Retirer les bins aberrants (outlier_binsFS)",
+                                 value = FALSE),
                    
                    h5(tags$b("Flow Margin")),
                    selectInput(ns("flowai_neg_valuesFM"), "Gestion valeurs négatives :",
                                choices = c("1" = 1, "2" = 2), selected = 1),
+                   selectInput(ns("flowai_sideFM"), "Côté de la plage dynamique (sideFM) :",
+                               choices = c("both", "upper", "lower"), selected = "both"),
+                   textInput(ns("flowai_ChExcludeFM"), "Canaux exclus (séparés par virgule) :",
+                             value = "FSC,SSC"),
                    hr(),
                    
                    actionButton(ns("btn_reset_flowai"), "Réinitialiser les valeurs par défaut",
@@ -177,6 +187,53 @@ qc_ui <- function(id) {
           column(width = 3,
                  box(title = "Résumé", width = NULL, status = "warning", solidHeader = TRUE,
                      uiOutput(ns("ui_recap_flowai"))
+                 ),
+                 box(title = tagList(icon("file-lines"), " Rapport natif flowAI"), width = NULL,
+                     status = "warning", solidHeader = TRUE,
+                     uiOutput(ns("ui_dl_rapport_flowai"))
+                 )
+          )
+        )
+      ),
+      
+      # ══════════════════════════════════════════════════════════════════════
+      # ONGLET 3 — Export
+      # ══════════════════════════════════════════════════════════════════════
+      tabPanel(
+        title = tagList(icon("file-export"), " Export"),
+        fluidRow(
+          # --- Colonne de Gauche : Sélection & options ---
+          column(width = 4,
+                 wellPanel(
+                   h4("Export des résultats de contrôle qualité"),
+                   
+                   div(class = "qc-instructions",
+                       icon("info-circle"),
+                       " Sélectionnez les méthodes de QC et les échantillons à inclure, puis téléchargez ",
+                       tags$b("les fichiers FCS"), " nettoyés et/ou un ", tags$b("résumé PDF"),
+                       " regroupant toutes les figures et les paramètres utilisés."),
+                   hr(),
+                   
+                   checkboxGroupInput(ns("export_sources"), "Contrôles qualité à inclure :",
+                                      choices = c("PeacoQC" = "peacoqc", "flowAI" = "flowai"),
+                                      selected = c("peacoqc", "flowai")),
+                   
+                   uiOutput(ns("ui_select_echantillons_export")),
+                   
+                   hr(),
+                   
+                   downloadButton(ns("dl_export_fcs"), tagList(icon("file-arrow-down"), " Télécharger les FCS (.zip)"),
+                                  class = "btn-warning", style = "width:100%; font-weight:bold; margin-bottom:10px;"),
+                   downloadButton(ns("dl_export_pdf"), tagList(icon("file-pdf"), " Télécharger le résumé PDF"),
+                                  class = "btn-warning", style = "width:100%; font-weight:bold;")
+                 )
+          ),
+          
+          # --- Colonne de Droite : Récapitulatif de ce qui sera exporté ---
+          column(width = 8,
+                 box(title = "Aperçu des données disponibles pour l'export", width = NULL,
+                     status = "warning", solidHeader = TRUE,
+                     uiOutput(ns("ui_recap_export"))
                  )
           )
         )
@@ -245,11 +302,6 @@ qc_server <- function(id, pipeline, pipeline_version) {
       if (length(p$echantillons_traites) == 0) {
         showNotification("Veuillez d'abord appliquer la compensation (onglet Compensation).",
                          type = "error")
-        return(invisible(NULL))
-      }
-      
-      if (is.null(p$canaux) || length(p$canaux) == 0) {
-        showNotification("Aucun canal détecté (étape d'importation incomplète).", type = "error")
         return(invisible(NULL))
       }
       
@@ -366,18 +418,24 @@ qc_server <- function(id, pipeline, pipeline_version) {
     # ════════════════════════════════════════════════════════════════════════
     
     defaults_flowai <- list(
-      remove_from = "all", second_fractionFR = 0.1, alphaFR = 0.01,
-      max_cptFS = 3, pen_valueFS = 500, neg_valuesFM = 1, ChExcludeFS = c("FSC", "SSC")
+      remove_from = "all", timeCh = NULL, second_fractionFR = 0.1, alphaFR = 0.01, decompFR = TRUE,
+      ChExcludeFS = c("FSC", "SSC"), outlier_binsFS = FALSE, pen_valueFS = 500, max_cptFS = 3,
+      ChExcludeFM = c("FSC", "SSC"), sideFM = "both", neg_valuesFM = 1
     )
     
     observeEvent(input$btn_reset_flowai, {
       updateSelectInput(session, "flowai_remove_from", selected = defaults_flowai$remove_from)
+      updateTextInput(session, "flowai_timeCh", value = "")
       updateNumericInput(session, "flowai_second_fractionFR", value = defaults_flowai$second_fractionFR)
       updateNumericInput(session, "flowai_alphaFR", value = defaults_flowai$alphaFR)
+      updateCheckboxInput(session, "flowai_decompFR", value = defaults_flowai$decompFR)
       updateNumericInput(session, "flowai_max_cptFS", value = defaults_flowai$max_cptFS)
       updateNumericInput(session, "flowai_pen_valueFS", value = defaults_flowai$pen_valueFS)
       updateTextInput(session, "flowai_ChExcludeFS", value = paste(defaults_flowai$ChExcludeFS, collapse = ","))
+      updateCheckboxInput(session, "flowai_outlier_binsFS", value = defaults_flowai$outlier_binsFS)
       updateSelectInput(session, "flowai_neg_valuesFM", selected = defaults_flowai$neg_valuesFM)
+      updateSelectInput(session, "flowai_sideFM", selected = defaults_flowai$sideFM)
+      updateTextInput(session, "flowai_ChExcludeFM", value = paste(defaults_flowai$ChExcludeFM, collapse = ","))
       showNotification("Paramètres flowAI réinitialisés.", type = "message")
     })
     
@@ -392,34 +450,46 @@ qc_server <- function(id, pipeline, pipeline_version) {
       p <- carrot_obj()
       
       if (length(p$echantillons_traites) == 0) {
-        showNotification("Veuillez d'abord appliquer la compensation (onglet Compensation).",
-                         type = "error")
-        return(invisible(NULL))
+        showNotification("Veuillez d'abord appliquer la compensation.", type = "error")
+        return()
       }
       
-      ch_exclude <- trimws(strsplit(input$flowai_ChExcludeFS, ",")[[1]])
-      ch_exclude <- ch_exclude[nchar(ch_exclude) > 0]
+      ch_exclude_fs <- trimws(strsplit(input$flowai_ChExcludeFS, ",")[[1]])
+      ch_exclude_fs <- ch_exclude_fs[nchar(ch_exclude_fs) > 0]
+      if (length(ch_exclude_fs) == 0) ch_exclude_fs <- NULL
+      ch_exclude_fm <- trimws(strsplit(input$flowai_ChExcludeFM, ",")[[1]])
+      ch_exclude_fm <- ch_exclude_fm[nchar(ch_exclude_fm) > 0]
+      if (length(ch_exclude_fm) == 0) ch_exclude_fm <- NULL
+      time_ch <- trimws(input$flowai_timeCh)
+      time_ch <- if (nchar(time_ch) == 0) NULL else time_ch
       
       reglages <- list(
+        remove_from       = input$flowai_remove_from,
+        timeCh            = time_ch,
         second_fractionFR = input$flowai_second_fractionFR,
         alphaFR           = input$flowai_alphaFR,
-        max_cptFS         = input$flowai_max_cptFS,
+        decompFR          = if (isTRUE(input$flowai_decompFR)) "cffilter" else "loess",
+        ChExcludeFS       = ch_exclude_fs,
+        outlier_binsFS    = input$flowai_outlier_binsFS,
         pen_valueFS       = input$flowai_pen_valueFS,
-        neg_valuesFM      = as.numeric(input$flowai_neg_valuesFM),
-        ChExcludeFS       = ch_exclude
+        max_cptFS         = input$flowai_max_cptFS,
+        ChExcludeFM       = ch_exclude_fm,
+        sideFM            = input$flowai_sideFM,
+        neg_valuesFM      = as.numeric(input$flowai_neg_valuesFM)
       )
       
-      withProgress(message = "Exécution de flowAI en cours...", value = 0.3, {
+      withProgress(message = "Exécution de flowAI...", value = 0.3, {
         tryCatch({
-          p$appliquer_flowai(reglages_specifiques = reglages)
+          p$appliquer_flowai(reglages)
           pipeline(p)
           flowai_trigger(flowai_trigger() + 1L)
-          showNotification("✔ flowAI appliqué à la cohorte.", type = "message")
+          showNotification("✔ flowAI appliqué.", type = "message")
         }, error = function(e) {
           showNotification(paste("Erreur flowAI :", conditionMessage(e)), type = "error")
         })
       })
     })
+    
     
     output$plot_flowai <- renderPlot({
       flowai_trigger()
@@ -479,6 +549,153 @@ qc_server <- function(id, pipeline, pipeline_version) {
       
       tagList(Filter(Negate(is.null), lignes))
     })
+    
+    # Bouton de téléchargement du rapport natif flowAI (HTML + TXT + PNG) pour l'échantillon sélectionné
+    output$ui_dl_rapport_flowai <- renderUI({
+      flowai_trigger()
+      p <- carrot_obj()
+      req(input$sel_echantillon_flowai)
+      
+      chemin_rapport <- p$rapports_flowai[[input$sel_echantillon_flowai]]
+      
+      if (is.null(chemin_rapport) || !dir.exists(chemin_rapport)) {
+        return(div(style = "padding:10px; text-align:center; color:grey; font-size:12px;",
+                   icon("file-lines"),
+                   " Le rapport flowAI apparaîtra ici après l'exécution de l'algorithme."))
+      }
+      
+      downloadButton(ns("dl_rapport_flowai"), tagList(icon("download"), " Télécharger le rapport (.zip)"),
+                     class = "btn-warning", style = "width:100%; font-weight:bold;")
+    })
+    
+    output$dl_rapport_flowai <- downloadHandler(
+      filename = function() {
+        paste0("flowAI_rapport_", gsub("[^a-zA-Z0-9_]", "_", input$sel_echantillon_flowai), ".zip")
+      },
+      content = function(file) {
+        p <- carrot_obj()
+        chemin_rapport <- p$rapports_flowai[[input$sel_echantillon_flowai]]
+        req(!is.null(chemin_rapport), dir.exists(chemin_rapport))
+        
+        fichiers <- list.files(chemin_rapport, recursive = TRUE, full.names = TRUE)
+        req(length(fichiers) > 0)
+        
+        ancien_wd <- setwd(chemin_rapport)
+        on.exit(setwd(ancien_wd), add = TRUE)
+        fichiers_relatifs <- list.files(".", recursive = TRUE, full.names = TRUE)
+        utils::zip(zipfile = file, files = fichiers_relatifs)
+      },
+      contentType = "application/zip"
+    )
+    
+    # ════════════════════════════════════════════════════════════════════════
+    # SECTION 3 — Export (FCS post-QC + résumé PDF)
+    # ════════════════════════════════════════════════════════════════════════
+    
+    # Sélecteur multiple des échantillons disponibles pour l'export (union PeacoQC + flowAI, filtrée par les sources cochées)
+    output$ui_select_echantillons_export <- renderUI({
+      peacoqc_trigger()
+      flowai_trigger()
+      p <- carrot_obj()
+      
+      sources <- input$export_sources %||% c("peacoqc", "flowai")
+      noms_disponibles <- unique(c(
+        if ("peacoqc" %in% sources) names(p$post_PeacoQC) else character(0),
+        if ("flowai"  %in% sources) names(p$post_flowAI)  else character(0)
+      ))
+      
+      if (length(noms_disponibles) == 0) {
+        return(div(class = "alert alert-warning", style = "font-size:12px; padding:8px;",
+                   icon("exclamation-triangle"),
+                   " Aucun échantillon disponible pour les sources sélectionnées."))
+      }
+      
+      selectizeInput(ns("export_echantillons"), "Échantillons à exporter :",
+                     choices = noms_disponibles, selected = noms_disponibles,
+                     multiple = TRUE, options = list(plugins = list("remove_button")))
+    })
+    
+    # Tableau récapitulatif de ce qui sera inclus dans l'export
+    output$ui_recap_export <- renderUI({
+      peacoqc_trigger()
+      flowai_trigger()
+      p <- carrot_obj()
+      
+      noms <- unique(c(names(p$post_PeacoQC), names(p$post_flowAI)))
+      if (length(noms) == 0) {
+        return(div(class = "alert alert-warning", style = "font-size:12px; padding:8px;",
+                   icon("exclamation-triangle"),
+                   " Aucun résultat PeacoQC ou flowAI disponible. Exécutez d'abord un contrôle qualité."))
+      }
+      
+      icone_ok   <- icon("circle-check", style = "color:#2e7d32;")
+      icone_vide <- icon("circle-xmark", style = "color:#c62828;")
+      
+      lignes <- lapply(noms, function(nom) {
+        a_peacoqc <- !is.null(p$post_PeacoQC[[nom]])
+        a_flowai  <- !is.null(p$post_flowAI[[nom]])
+        tags$tr(
+          tags$td(strong(nom)),
+          tags$td(style = "text-align:center;", if (a_peacoqc) icone_ok else icone_vide),
+          tags$td(style = "text-align:center;", if (a_flowai) icone_ok else icone_vide)
+        )
+      })
+      
+      tags$table(class = "table table-condensed", style = "font-size:12px;",
+                 tags$thead(tags$tr(tags$th("Échantillon"), tags$th("PeacoQC"), tags$th("flowAI"))),
+                 tags$tbody(lignes)
+      )
+    })
+    
+    # Export ZIP des fichiers FCS post-QC (PeacoQC et/ou flowAI, selon la sélection utilisateur)
+    output$dl_export_fcs <- downloadHandler(
+      filename = function() paste0("QC_FCS_", format(Sys.Date(), "%Y%m%d"), ".zip"),
+      content = function(file) {
+        p <- carrot_obj()
+        req(length(input$export_sources) > 0, length(input$export_echantillons) > 0)
+        
+        dossier_temp <- file.path(tempdir(), paste0("export_fcs_qc_", as.integer(Sys.time())))
+        dir.create(dossier_temp, recursive = TRUE)
+        
+        tryCatch({
+          p$exporter_fcs_qc(
+            noms_echantillons = input$export_echantillons,
+            sources           = input$export_sources,
+            dossier_export    = dossier_temp
+          )
+        }, error = function(e) {
+          showNotification(paste("Erreur export FCS :", conditionMessage(e)), type = "error")
+        })
+        
+        fichiers <- list.files(dossier_temp, full.names = FALSE)
+        req(length(fichiers) > 0)
+        
+        ancien_wd <- setwd(dossier_temp)
+        on.exit(setwd(ancien_wd), add = TRUE)
+        utils::zip(zipfile = file, files = fichiers)
+      },
+      contentType = "application/zip"
+    )
+    
+    # Export PDF du résumé (figures PeacoQC/flowAI + paramètres utilisés)
+    output$dl_export_pdf <- downloadHandler(
+      filename = function() paste0("QC_Resume_", format(Sys.Date(), "%Y%m%d"), ".pdf"),
+      content = function(file) {
+        p <- carrot_obj()
+        req(length(input$export_sources) > 0, length(input$export_echantillons) > 0)
+        
+        tryCatch({
+          p$generer_pdf_resume_qc(
+            chemin_pdf        = file,
+            noms_echantillons = input$export_echantillons,
+            sources           = input$export_sources
+          )
+        }, error = function(e) {
+          showNotification(paste("Erreur génération du résumé PDF :", conditionMessage(e)), type = "error")
+        })
+      },
+      contentType = "application/pdf"
+    )
     
   })
 }

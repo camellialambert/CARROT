@@ -49,6 +49,9 @@ CARROT <- R6Class(
     canaux_bordures = NULL, # Liste technique des canaux ou détecteurs ciblés pour l'analyse et le retrait des événements saturés aux bordures
     post_PeacoQC = list(), # Contient les données des fichiers FCS après le contrôle qualité de PeacoQC (retrait des anomalies de débit et d'instabilité du signal)
     post_flowAI = list(), # Contient les données des fichiers FCS après le contrôle qualité alternatif flowAI (vérification du débit, de la lueur et0 de la stabilité)
+    rapports_flowai = list(), # Contient, par échantillon, le chemin du dossier temporaire regroupant le rapport natif flowAI (HTML, TXT, PNG) généré par flow_auto_qc
+    parametres_peacoqc_utilises = NULL, # Mémorise les derniers réglages PeacoQC appliqués à la cohorte (pour affichage dans le résumé PDF)
+    parametres_flowai_utilises = NULL, # Mémorise les derniers réglages flowAI appliqués à la cohorte (pour affichage dans le résumé PDF)
     post_retrait_bordures = list(), # Stocke la matrice d'expression des échantillons nettoyée des signaux saturés (valeurs maximales ou minimales des détecteurs)
     gate_debris = list(), # Contient les coordonnées et les structures géométriques des fenêtres (gates) de sélection des cellules (retrait des débris en FSC vs SSC)
     post_debris = list(), # Stocke les données des échantillons filtrées où seuls les événements correspondants aux cellules (hors débris) ont été conservés
@@ -64,6 +67,7 @@ CARROT <- R6Class(
     # Variables de Visualisation
     plots_peacoqc = list(), # contient toutes les figures après application de PeacoQC
     plots_peacoqc_natif = list(), # contient les chemins des PNG diagnostiques natifs générés par PeacoQC::PeacoQC (bins retirés par canal)
+    plots_flowai = list(), # contient toutes les figures après application de flowAI (archivées pour réutilisation dans le résumé PDF d'export)
     plots_debris = list(), # contient toutes les figures après application du gate de débris
     plots_doublets = list(), # contient toutes les figures après application du gate de doublets
     plots_viabilite = list(), # contient toutes les figures après application du gate de viabilité
@@ -579,6 +583,121 @@ CARROT <- R6Class(
       message(paste(length(tubes_a_exporter), "fichier(s) FCS compensé(s) exporté(s) dans :", dossier_export)) # Affiche un message de confirmation récapitulatif dans la console de commande
     },
     
+    exporter_fcs_qc = function(noms_echantillons = "all", sources = c("peacoqc", "flowai"), dossier_export = ".") { # Méthode permettant d'écrire sur le disque les fichiers FCS ayant subi le contrôle qualité PeacoQC et/ou flowAI
+      sources <- intersect(sources, c("peacoqc", "flowai")) # Filtre les sources demandées pour ne garder que les valeurs reconnues ("peacoqc" et/ou "flowai")
+      if (length(sources) == 0) {
+        stop("Aucune source de contrôle qualité valide sélectionnée (attendu : 'peacoqc' et/ou 'flowai').")
+      }
+      
+      liste_sources <- list(peacoqc = self$post_PeacoQC, flowai = self$post_flowAI) # Regroupe les deux listes de résultats QC disponibles pour un accès homogène
+      suffixes      <- list(peacoqc = "_PeacoQC", flowai = "_flowAI") # Associe à chaque source le suffixe de nommage utilisé pour distinguer les fichiers exportés
+      
+      noms_disponibles <- unique(unlist(lapply(sources, function(s) names(liste_sources[[s]])))) # Recense l'ensemble des échantillons disponibles, toutes sources sélectionnées confondues
+      if (length(noms_disponibles) == 0) {
+        stop("Aucun résultat PeacoQC ou flowAI disponible : exécutez d'abord le contrôle qualité correspondant.")
+      }
+      
+      tubes_a_exporter <- if (length(noms_echantillons) == 1 && noms_echantillons == "all") { # Si l'utilisateur souhaite exporter la totalité des échantillons traités
+        noms_disponibles # Sélectionne l'intégralité des échantillons disponibles pour les sources demandées
+      } else { # Sinon, si une liste restreinte de noms a été fournie par l'utilisateur
+        intersect(noms_echantillons, noms_disponibles) # Identifie par intersection les échantillons demandés qui existent réellement en mémoire
+      }
+      if (length(tubes_a_exporter) == 0) {
+        stop("Aucun des échantillons spécifiés n'a été trouvé dans les résultats PeacoQC/flowAI.")
+      }
+      
+      if (!dir.exists(dossier_export)) { # Vérifie si le dossier de destination spécifié n'existe pas encore physiquement sur le disque
+        dir.create(dossier_export, recursive = TRUE) # Crée automatiquement l'arborescence des dossiers manquants pour éviter une erreur d'écriture
+      }
+      
+      fichiers_ecrits <- character(0) # Accumule au fil de la boucle les chemins des fichiers FCS effectivement écrits sur le disque
+      
+      for (nom in tubes_a_exporter) { # Boucle de traitement itérative pour chaque échantillon sélectionné
+        for (source in sources) { # Boucle interne pour chaque source de contrôle qualité demandée (PeacoQC et/ou flowAI)
+          fcs_obj <- liste_sources[[source]][[nom]] # Extrait l'objet flowFrame nettoyé correspondant à cet échantillon et cette source
+          if (is.null(fcs_obj)) next # Sécurité : passe au suivant si cet échantillon n'a pas de résultat pour cette source précise
+          
+          nom_fichier_propre <- paste0(gsub("[^a-zA-Z0-9_]", "_", nom), suffixes[[source]], ".fcs") # Construit un nom de fichier sûr, distinguant la source d'origine du nettoyage
+          chemin_fcs <- file.path(dossier_export, nom_fichier_propre) # Concatène le chemin du dossier et le nom du fichier pour obtenir l'adresse d'écriture finale
+          flowCore::write.FCS(fcs_obj, filename = chemin_fcs) # Enregistre physiquement l'objet flowFrame nettoyé au format binaire FCS standard sur le disque dur
+          fichiers_ecrits <- c(fichiers_ecrits, chemin_fcs) # Ajoute le chemin du fichier fraîchement écrit à la liste de suivi
+        }
+      }
+      
+      message(paste(length(fichiers_ecrits), "fichier(s) FCS post-QC exporté(s) dans :", dossier_export)) # Affiche un message de confirmation récapitulatif dans la console de commande
+      invisible(fichiers_ecrits) # Renvoie de manière invisible la liste des chemins écrits (utile pour zipper ensuite depuis Shiny)
+    },
+    
+    generer_pdf_resume_qc = function(chemin_pdf, noms_echantillons = NULL, sources = c("peacoqc", "flowai")) { # Méthode générant un PDF multi-pages regroupant toutes les figures de contrôle qualité et les paramètres utilisés
+      sources <- intersect(sources, c("peacoqc", "flowai")) # Filtre les sources demandées pour ne garder que les valeurs reconnues
+      if (length(sources) == 0) {
+        stop("Aucune source de contrôle qualité valide sélectionnée (attendu : 'peacoqc' et/ou 'flowai').")
+      }
+      
+      if (is.null(noms_echantillons) || (length(noms_echantillons) == 1 && noms_echantillons == "all")) { # Si aucune sélection précise n'est fournie
+        noms_echantillons <- unique(c(names(self$post_PeacoQC), names(self$post_flowAI))) # Reprend l'ensemble des échantillons ayant un résultat PeacoQC et/ou flowAI
+      }
+      if (length(noms_echantillons) == 0) {
+        stop("Aucun échantillon PeacoQC ou flowAI disponible pour générer le résumé.")
+      }
+      
+      formater_parametres <- function(titre, params) { # Fonction utilitaire transformant une liste de réglages nommés en un bloc de texte lisible pour la page de garde des paramètres
+        if (is.null(params) || length(params) == 0) return(paste0(titre, "\n(paramètres non disponibles)")) # Sécurité si aucun réglage n'a encore été archivé
+        lignes <- vapply(names(params), function(n) { # Parcourt chaque réglage pour produire une ligne "nom : valeur"
+          paste0("  - ", n, " : ", paste(params[[n]], collapse = ", ")) # Concatène le nom du paramètre et sa valeur (gère aussi les vecteurs comme ChExcludeFS)
+        }, character(1))
+        paste(c(titre, lignes), collapse = "\n") # Assemble le titre et l'ensemble des lignes de paramètres en un seul bloc de texte
+      }
+      
+      grDevices::pdf(chemin_pdf, width = 11, height = 8.5) # Ouvre un nouveau périphérique graphique PDF multi-pages à l'emplacement demandé
+      on.exit(grDevices::dev.off(), add = TRUE) # Garantit la fermeture propre du périphérique PDF même en cas d'erreur en cours de génération
+      
+      # Page de garde récapitulant les paramètres utilisés pour chaque méthode sélectionnée
+      grid::grid.newpage() # Initialise une page blanche pour la synthèse textuelle des réglages
+      blocs_params <- character(0) # Accumule les blocs de texte des paramètres pour chaque source demandée
+      if ("peacoqc" %in% sources) {
+        blocs_params <- c(blocs_params, formater_parametres("Paramètres PeacoQC utilisés :", self$parametres_peacoqc_utilises))
+      }
+      if ("flowai" %in% sources) {
+        blocs_params <- c(blocs_params, formater_parametres("Paramètres flowAI utilisés :", self$parametres_flowai_utilises))
+      }
+      texte_page_garde <- paste(c(
+        paste0("Résumé du contrôle qualité — ", format(Sys.time(), "%Y-%m-%d %H:%M")), "",
+        paste0("Échantillons inclus (", length(noms_echantillons), ") : ", paste(noms_echantillons, collapse = ", ")), "",
+        blocs_params
+      ), collapse = "\n") # Assemble titre, liste des échantillons et blocs de paramètres en un seul texte multi-lignes
+      grid::grid.text(texte_page_garde, x = 0.05, y = 0.95, just = c("left", "top"), # Affiche le texte de synthèse en haut à gauche de la page PDF
+                      gp = grid::gpar(fontsize = 10, fontfamily = "mono")) # Utilise une police à chasse fixe pour un alignement propre des paramètres
+      
+      # Une page par échantillon et par source sélectionnée, contenant la figure de diagnostic correspondante
+      for (nom in noms_echantillons) { # Boucle sur chaque échantillon à documenter dans le résumé
+        if ("peacoqc" %in% sources && !is.null(self$post_PeacoQC[[nom]])) { # Si un résultat PeacoQC existe pour cet échantillon
+          graphique <- self$plots_peacoqc[[nom]] # Récupère la figure déjà archivée si l'utilisateur l'a préalablement visualisée dans l'onglet PeacoQC
+          if (is.null(graphique)) { # Si la figure n'a encore jamais été générée pour cet échantillon
+            graphique <- tryCatch(self$visualiser_peacoqc(nom_echantillon = nom), error = function(e) NULL) # Génère la figure à la volée en cas d'absence
+          }
+          if (!is.null(graphique)) print(graphique) # Insère la figure PeacoQC dans une nouvelle page du PDF
+          
+          chemin_png <- self$plots_peacoqc_natif[[nom]] # Récupère le chemin du rapport diagnostique natif PNG généré par PeacoQC::PeacoQC
+          if (!is.null(chemin_png) && file.exists(chemin_png)) { # Si ce PNG natif est disponible sur le disque
+            image_native <- png::readPNG(chemin_png) # Charge le PNG natif en mémoire sous forme de matrice de pixels
+            grid::grid.newpage() # Ouvre une nouvelle page dédiée au rapport natif
+            grid::grid.raster(image_native) # Dessine l'image du rapport natif PeacoQC sur toute la page
+          }
+        }
+        
+        if ("flowai" %in% sources && !is.null(self$post_flowAI[[nom]])) { # Si un résultat flowAI existe pour cet échantillon
+          graphique <- self$plots_flowai[[nom]] # Récupère la figure déjà archivée si l'utilisateur l'a préalablement visualisée dans l'onglet flowAI
+          if (is.null(graphique)) { # Si la figure n'a encore jamais été générée pour cet échantillon
+            graphique <- tryCatch(self$visualiser_flowai(nom_echantillon = nom), error = function(e) NULL) # Génère la figure à la volée en cas d'absence
+          }
+          if (!is.null(graphique)) print(graphique) # Insère la figure flowAI dans une nouvelle page du PDF
+        }
+      }
+      
+      invisible(chemin_pdf) # Renvoie de manière invisible le chemin du PDF généré, prêt à être proposé au téléchargement depuis Shiny
+    },
+    
     sauvegarder_session_rds = function(nom_fichier = "Compensation_Session_Complete.rds") { # Méthode permettant de sauvegarder l'intégralité de l'état et des résultats de la session d'analyse dans un fichier binaire R (.rds)
       sauvegarde <- list( # Initialise une structure de liste imbriquée pour regrouper de manière organisée tous les éléments à archiver
         meta = list( # Sous-liste dédiée aux informations générales et de traçabilité de l'expérience
@@ -1053,95 +1172,178 @@ CARROT <- R6Class(
       return(self$echantillons)  # fallback ultime = données brutes
     },
     
-    appliquer_peacoqc = function(dossier_rapports = NULL, reglages_specifiques = list()) { # Méthode appliquant l'algorithme PeacoQC pour filtrer et éliminer les anomalies d'instabilité du flux fluidique au cours du temps
-      parametres_par_defaut <- list( # Initialise la liste des hyperparamètres statistiques de référence de PeacoQC
-        min_cells = 150, max_bins = 100, step = 500, MAD = 6, # Définit les seuils de cellules minimales, de fenêtres temporelles, de pas et de l'écart absolu à la médiane (MAD)
-        IT_limit = 0.6, consecutive_bins = 5, remove_zeros = FALSE, # Définit la limite d'intervalle de temps (IT) et les tolérances pour la détection de dérive du signal
-        force_IT = 150, peak_removal = 1/3, min_nr_bins_peakdetection = 10 # Fixe les critères d'exclusion des pics de forte densité suspectés d'être des agrégats ou des micro-clogging
-      ) 
-      config_qc <- utils::modifyList(parametres_par_defaut, reglages_specifiques) # Écrase de manière réactive les constantes par défaut si l'utilisateur fournit des réglages personnalisés
+    appliquer_peacoqc = function(dossier_rapports = NULL, reglages_specifiques = list()) {
       
-      self$post_PeacoQC <- lapply(names(self$echantillons_traites), function(nom) { # Boucle vectorisée itérant sur chaque échantillon FCS de la cohorte pour appliquer le filtrage qualité
-        message("Exécution PeacoQC sur : ", nom) # Affiche une notification de suivi en temps réel dans la console R
-        ff_actuel <- self$echantillons_traites[[nom]] # Extrait l'objet flowFrame (les données cellulaires) correspondant à l'itération en cours
-        vrai_canal_temps <- grep("time", colnames(ff_actuel), value = TRUE, ignore.case = TRUE)[1] # Détecte dynamiquement l'indice ou le libellé exact du paramètre temporel dans le fichier binaire (ex: "Time" ou "time")
-        if (is.na(vrai_canal_temps)) vrai_canal_temps <- "Time" # Sécurité : attribue le nom standard par défaut si aucune chaîne similaire n'a été détectée
-        
-        # Dossier temporaire dédié pour récupérer le PNG diagnostique natif de PeacoQC sans polluer le disque
-        dossier_temp_plot <- file.path(tempdir(), paste0("PeacoQC_", gsub("[^a-zA-Z0-9_]", "_", nom)))
-        if (!dir.exists(dossier_temp_plot)) dir.create(dossier_temp_plot, recursive = TRUE)
-        
-        res <- PeacoQC::PeacoQC( # Déclenche la routine d'analyse mathématique de régularité fluidique du package PeacoQC
-          ff                     = ff_actuel, # Transmet l'objet flowFrame contenant les expressions de la cellule active
-          channels               = self$canaux, # Injecte la liste des canaux de fluorescence sur lesquels appliquer le contrôle qualité de signal
-          determine_good_cells   = "all", # Configure l'algorithme pour évaluer l'intégrité de la totalité des événements de l'échantillon
-          transform              = FALSE, # Désactive la transformation interne des données, celles-ci devant être déjà prétraitées ou démixées
-          time_channel_parameter = vrai_canal_temps, # Indique le canal temporel détecté nécessaire pour séquencer les mesures
-          save_fcs               = FALSE, # Désactive l'écriture automatique d'un fichier physique sur le disque pour optimiser la mémoire vive
-          min_cells              = config_qc$min_cells, # Injecte la valeur minimale requise de cellules par bloc d'analyse
-          max_bins               = config_qc$max_bins, # Injecte le nombre maximal de fenêtres temporelles (bins) autorisées pour découper l'acquisition
-          step                   = config_qc$step, # Injecte la taille du pas d'analyse glissant pour le calcul des variations de signal
-          MAD                    = config_qc$MAD, # Injecte le multiplicateur de l'écart absolu à la médiane pour définir les limites de tolérance
-          IT_limit               = config_qc$IT_limit, # Injecte la borne critique de l'indice d'intervalle de temps pour l'exclusion des débits irréguliers
-          consecutive_bins       = config_qc$consecutive_bins, # Nombre maximal de fenêtres successives déviantes tolérées avant élimination en bloc
-          remove_zeros           = config_qc$remove_zeros, # Active ou non le retrait algorithmique précoce des valeurs d'intensités nulles ou négatives
-          force_IT               = config_qc$force_IT, # Applique une contrainte stricte sur le calcul de la distribution du débit
-          peak_removal           = config_qc$peak_removal, # Fixe la fraction de tolérance pour l'isolement et la suppression des pics de bruit de fond
-          min_nr_bins_peakdetection = config_qc$min_nr_bins_peakdetection, # Nombre minimal de bins requis pour valider mathématiquement un pic d'anomalie
-          plot                   = TRUE, # Active la génération du rapport visuel natif PeacoQC (PNG des bins retirés par canal)
-          output_directory       = dossier_temp_plot, # Dirige l'écriture du PNG vers un dossier temporaire propre à cet échantillon
-          report                 = FALSE # Désactive la génération automatique du fichier texte de rapport d'analyse
-        ) 
-        
-        # Récupère le chemin du PNG généré par PeacoQC (cherché récursivement car PeacoQC crée un sous-dossier "PeacoQC_results")
-        pngs_generes <- list.files(dossier_temp_plot, pattern = "\\.png$", recursive = TRUE, full.names = TRUE)
-        if (is.null(self$plots_peacoqc_natif)) self$plots_peacoqc_natif <- list()
-        self$plots_peacoqc_natif[[nom]] <- if (length(pngs_generes) > 0) pngs_generes[1] else NULL
-        
-        return(res$FinalFF) # Extrait et isole uniquement l'objet flowFrame purgé de ses anomalies de flux (événements conformes uniquement)
-      }) 
+      # Paramètres par défaut
+      parametres_par_defaut <- list(
+        determine_good_cells = "all",
+        min_cells = 150,
+        max_bins = 100,
+        step = 500,
+        MAD = 6,
+        IT_limit = 0.6,
+        consecutive_bins = 5,
+        remove_zeros = FALSE,
+        force_IT = 150,
+        peak_removal = 1/3,
+        min_nr_bins_peakdetection = 10
+      )
       
-      names(self$post_PeacoQC) <- names(self$echantillons_traites) # Restaure et synchronise les noms des échantillons comme clés de la nouvelle liste filtrée
-      if (!is.null(self$update_pipeline)) self$update_pipeline("PeacoQC") # Met à jour le registre d'état ou l'interface Shiny pour indiquer l'achèvement de cette étape qualité
+      # Fusion des paramètres
+      config_qc <- utils::modifyList(parametres_par_defaut, reglages_specifiques)
+      
+      # Sorties
+      self$post_PeacoQC <- list()
+      self$plots_peacoqc <- list()
+      self$plots_peacoqc_natif <- list()
+      
+      # Boucle échantillons
+      for (nom in names(self$echantillons_traites)) {
+        
+        message("Exécution PeacoQC sur : ", nom)
+        
+        ff_actuel <- self$echantillons_traites[[nom]]
+        
+        # Détection du canal temporel
+        vrai_canal_temps <- grep("time", colnames(ff_actuel), value = TRUE, ignore.case = TRUE)[1]
+        if (is.na(vrai_canal_temps)) vrai_canal_temps <- "Time"
+        
+        # Détermination des canaux à analyser (doc officielle)
+        tous_canaux <- colnames(ff_actuel)
+        canaux_fluo <- tous_canaux[!grepl("fsc|ssc|time", tous_canaux, ignore.case = TRUE)]
+        
+        # Dossier temporaire pour les PNG
+        dossier_temp_plot <- file.path(
+          tempdir(),
+          paste0("PeacoQC_", gsub("[^a-zA-Z0-9_]", "_", nom), "_", format(Sys.time(), "%Y%m%d_%H%M%S"))
+        )
+        dir.create(dossier_temp_plot, recursive = TRUE, showWarnings = FALSE)
+        
+        # Exécution PeacoQC
+        res <- PeacoQC::PeacoQC(
+          ff                     = ff_actuel,
+          channels               = canaux_fluo,
+          determine_good_cells   = config_qc$determine_good_cells,
+          transform              = FALSE,
+          time_channel_parameter = vrai_canal_temps,
+          save_fcs               = FALSE,
+          min_cells              = config_qc$min_cells,
+          max_bins               = config_qc$max_bins,
+          step                   = config_qc$step,
+          MAD                    = config_qc$MAD,
+          IT_limit               = config_qc$IT_limit,
+          consecutive_bins       = config_qc$consecutive_bins,
+          remove_zeros           = config_qc$remove_zeros,
+          force_IT               = config_qc$force_IT,
+          peak_removal           = config_qc$peak_removal,
+          min_nr_bins_peakdetection = config_qc$min_nr_bins_peakdetection,
+          plot                   = TRUE,
+          output_directory       = dossier_temp_plot,
+          report                 = FALSE
+        )
+        
+        # Stockage du flowFrame filtré
+        self$post_PeacoQC[[nom]] <- res$FinalFF
+        
+        # Stockage du plot ggplot
+        self$plots_peacoqc[[nom]] <- res$Plot
+        
+        # Stockage du PNG natif
+        # ✓ CORRIGÉ : PeacoQC::PeacoQC() n'écrit PAS le PNG directement dans "output_directory".
+        # En interne, il crée un sous-dossier "output_directory/<name_directory>/" (name_directory
+        # vaut "PeacoQC_results" par défaut, non redéfini ici) et c'est LÀ qu'atterrit le PNG natif.
+        # Un list.files() non récursif sur dossier_temp_plot ne le trouvait donc jamais, laissant
+        # plots_peacoqc_natif toujours à NULL et empêchant tout affichage côté interface.
+        pngs <- list.files(dossier_temp_plot, pattern = "\\.png$", full.names = TRUE, recursive = TRUE)
+        self$plots_peacoqc_natif[[nom]] <- if (length(pngs) > 0) pngs[1] else NULL # Un seul PNG "montage" est généré par échantillon : on n'en garde qu'un chemin scalaire
+      }
+      
+      # Archive des paramètres
+      self$parametres_peacoqc_utilises <- config_qc
+      
+      # Mise à jour pipeline
+      if (!is.null(self$update_pipeline)) self$update_pipeline("PeacoQC")
     },
     
-    appliquer_flowai = function(dossier_rapports = NULL, reglages_specifiques = list()) { # Méthode exécutant le contrôle qualité automatisé flowAI sur l'ensemble de la cohorte pour éliminer les anomalies d'acquisition
-      parametres_par_defaut <- list( # Initialise les hyperparamètres par défaut pour l'évaluation des trois propriétés de l'acquisition (Flow Rate, Signal, Flight Time)
-        second_fractionFR = 0.1, alphaFR = 0.01, max_cptFS = 3, # Paramètre la granularité temporelle du débit (Flow Rate) et le niveau de signification statistique alpha associé
-        pen_valueFS = 500, neg_valuesFM = 1, ChExcludeFS = c("FSC", "SSC") # Fixe la pénalité pour les ruptures de signal, l'exclusion des valeurs aberrantes négatives et les canaux à ignorer
-      ) 
-      config_flowai <- utils::modifyList(parametres_par_defaut, reglages_specifiques) # Écrase dynamiquement les constantes par défaut si des réglages personnalisés sont fournis en entrée
-      generer_visuels <- !is.null(dossier_rapports) # Évalue sous forme de variable booléenne si un dossier de sortie a été spécifié pour la journalisation
+    appliquer_flowai = function(reglages_specifiques = list()) {
       
-      if (generer_visuels && !dir.exists(dossier_rapports)) { # Si l'exportation est demandée et que le répertoire cible est physiquement absent du disque
-        dir.create(dossier_rapports, recursive = TRUE) # Génère automatiquement l'arborescence complète des dossiers manquants sur le système de stockage
-      } 
+      if (length(self$echantillons_traites) == 0) {
+        stop("Aucun échantillon traité disponible pour flowAI.")
+      }
       
-      self$post_flowAI <- lapply(names(self$echantillons_traites), function(nom_echantillon) { # Boucle vectorisée appliquant le pipeline de nettoyage flowAI individuellement sur chaque échantillon
-        message("Contrôle qualité flowAI : ", nom_echantillon) # Envoie une notification d'avancement en temps réel dans la console d'exécution R
-        flowframe_a_nettoyer <- self$echantillons_traites[[nom_echantillon]] # Récupère l'objet flowFrame (les expressions de la matrice cellulaire) associé à cette itération
-        chemin_resultats <- if(generer_visuels) file.path(dossier_rapports, paste0("flowAI_", nom_echantillon)) else FALSE # Configure la chaîne de texte du chemin d'écriture ou lui attribue la valeur logique FALSE
+      # Paramètres sécurisés
+      remove_from       <- reglages_specifiques$remove_from       %||% "all"
+      timeCh            <- reglages_specifiques$timeCh            %||% NULL
+      second_fractionFR <- reglages_specifiques$second_fractionFR %||% 0.1
+      alphaFR           <- reglages_specifiques$alphaFR           %||% 0.01
+      decompFR          <- if (isTRUE(reglages_specifiques$decompFR)) "cffilter" else "loess"
+      
+      ChExcludeFS <- reglages_specifiques$ChExcludeFS
+      if (is.null(ChExcludeFS) || length(ChExcludeFS) == 0) ChExcludeFS <- NULL
+      
+      outlier_binsFS <- reglages_specifiques$outlier_binsFS %||% FALSE
+      pen_valueFS    <- reglages_specifiques$pen_valueFS    %||% 500
+      max_cptFS      <- reglages_specifiques$max_cptFS      %||% 3
+      
+      ChExcludeFM <- reglages_specifiques$ChExcludeFM
+      if (is.null(ChExcludeFM) || length(ChExcludeFM) == 0) ChExcludeFM <- NULL
+      
+      sideFM       <- reglages_specifiques$sideFM       %||% "both"
+      neg_valuesFM <- reglages_specifiques$neg_valuesFM %||% 1
+      
+      # Sorties
+      self$post_flowAI <- list()
+      self$rapports_flowai <- list()
+      
+      # Boucle échantillons
+      for (nom in names(self$echantillons_traites)) {
         
-        resultat_flowai <- flowAI::flow_auto_qc( # Déclenche l'algorithme d'audit et de nettoyage multi-critères du package flowAI
-          fcsfiles          = flowframe_a_nettoyer, # Transmet l'objet flowFrame contenant les événements et métadonnées cytométriques bruts
-          remove_from       = "all", # Demande l'élimination stricte des événements déviants détectés sur l'un des trois critères d'évaluation
-          output            = 1, # Configure le retour de la fonction pour renvoyer directement un objet flowFrame nettoyé des cellules non conformes
-          second_fractionFR = config_flowai$second_fractionFR, # Injecte la fraction de seconde utilisée pour découper l'acquisition et suivre la stabilité du débit
-          alphaFR           = config_flowai$alphaFR, # Injecte le seuil de tolérance alpha pour la détection statistique des anomalies de vélocité
-          max_cptFS         = config_flowai$max_cptFS, # Injecte le nombre maximal autorisé de points de changement de signal avant rejet
-          pen_valueFS       = config_flowai$pen_valueFS, # Injecte la valeur de pénalité de la méthode mathématique pour le lissage des sauts de signal
-          neg_valuesFM      = config_flowai$neg_valuesFM, # Indique le mode de gestion et de filtrage des valeurs électroniques négatives ou nulles aberrantes
-          ChExcludeFS       = config_flowai$ChExcludeFS, # Transmet la liste des canaux morphologiques (taille/granularité) à exclure du contrôle de signal
-          plot              = FALSE, # Désactive totalement la création des PNGs de diagnostics par flowAI pour optimiser les performances de calcul
-          htmlReport        = FALSE, # Désactive la compilation automatique du rapport web HTML pour économiser les accès en écriture disque
-          mini_report       = FALSE, # Évite la création automatique du sous-dossier technique "0_QC_files" à la racine du projet
-          fcs_QC            = FALSE # Désactive l'écriture automatique d'un nouveau fichier .fcs physique sur le support de stockage
-        ) 
-        return(resultat_flowai) # Renvoie l'objet flowFrame épuré ne contenant plus que les événements cellulaires ayant validé le contrôle de qualité
-      }) 
+        fcs_obj <- self$echantillons_traites[[nom]]
+        
+        # Dossier unique par échantillon
+        dossier_tmp <- file.path(tempdir(), paste0("flowAI_", nom, "_", format(Sys.time(), "%Y%m%d_%H%M%S")))
+        dir.create(dossier_tmp, recursive = TRUE, showWarnings = FALSE)
+        
+        res <- tryCatch({
+          
+          flowAI::flow_auto_qc(
+            fcsfiles            = fcs_obj,
+            remove_from         = remove_from,
+            output              = 1,
+            timeCh              = timeCh,
+            second_fractionFR   = second_fractionFR,
+            alphaFR             = alphaFR,
+            decompFR            = decompFR,
+            ChExcludeFS         = ChExcludeFS,
+            outlier_binsFS      = outlier_binsFS,
+            pen_valueFS         = pen_valueFS,
+            max_cptFS           = max_cptFS,
+            ChExcludeFM         = ChExcludeFM,
+            sideFM              = sideFM,
+            neg_valuesFM        = neg_valuesFM,
+            html_report         = "_QC",
+            mini_report         = "_QCmini",
+            fcs_QC              = "_QC",
+            fcs_highQ           = FALSE,
+            fcs_lowQ            = FALSE,
+            folder_results      = dossier_tmp
+          )
+          
+        }, error = function(e) {
+          stop(paste("Erreur flowAI pour l'échantillon", nom, ":", conditionMessage(e)))
+        })
+        
+        # res est un flowSet → on extrait le flowFrame
+        if (inherits(res, "flowSet")) {
+          res <- res[[1]]
+        }
+        
+        self$post_flowAI[[nom]] <- res
+        self$rapports_flowai[[nom]] <- dossier_tmp
+      }
       
-      names(self$post_flowAI) <- names(self$echantillons_traites) # Restaure et synchronise les noms des échantillons originaux comme clés de la nouvelle liste filtrée
-      if (!is.null(self$update_pipeline)) self$update_pipeline("flowAI") # Met à jour le registre d'état ou l'interface UI Shiny pour acter la complétion de cette étape qualité
+      self$update_pipeline("flowAI")
+      invisible(TRUE)
     },
     
     retirer_les_bordures = function(canal1, canal2, nom_echantillon = NULL) {
@@ -1590,6 +1792,9 @@ CARROT <- R6Class(
           plot.title    = ggplot2::element_text(face = "bold", size = 14), # Renforce l'accentuation visuelle du titre principal du diagnostic
           legend.title  = ggplot2::element_blank() # Masque l'intitulé de la légende devenu superflu grâce à l'explicitation des étiquettes
         ) 
+      
+      if (is.null(self$plots_flowai)) self$plots_flowai <- list() # Initialise la structure de liste dédiée au stockage des graphiques flowAI si inexistante en mémoire
+      self$plots_flowai[[nom_echantillon]] <- graphique_flowai # Archive l'objet graphique au sein de l'environnement R6 pour permettre sa réutilisation dans le résumé PDF d'export
       return(graphique_flowai) # Renvoie l'objet graphique ggplot2 complet prêt pour affichage ou intégration UI Shiny
     },
     
