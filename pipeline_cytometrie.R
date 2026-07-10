@@ -1039,10 +1039,9 @@ CARROT <- R6Class(
     self$canaux_bordures <- c(canal1, canal2) # Enregistre le couple de canaux morphologiques ou de fluorescence choisis pour le filtrage dans l'objet R6
     liste_source <- self$get_derniere_source() # Récupère automatiquement la structure de données la plus avancée du pipeline grâce au système de repli (fallback) pyramidal
     noms_a_traiter <- if (is.null(nom_echantillon)) names(liste_source) else nom_echantillon # Sélectionne la totalité de la cohorte si aucun fichier n'est spécifié, sinon cible l'échantillon unique fourni
-    
-<<<<<<< Updated upstream
+
     if (is.null(self$post_retrait_bordures)) self$post_retrait_bordures <- list()
-=======
+
     retirer_les_debris = function(matrice_points, canal_x, canal_y, nom_echantillon = NULL, source_nettoyage = "brutes") { # Méthode isolant les cellules intactes en éliminant les débris et bruits électroniques à l'aide d'une fenêtre polygonale (PolygonGate)
       if (is.null(matrice_points)) stop("Aucune coordonnée de gate fournie.") # bloque le script si la structure contenant les coordonnées du polygone est absente
       if (!is.matrix(matrice_points) && !is.data.frame(matrice_points)) { # valide que le format du tableau contenant les points géométriques est bien bidimensionnel
@@ -1090,8 +1089,8 @@ CARROT <- R6Class(
         self$update_pipeline("debris", nom_echantillon) # Signale le succès de la filtration des débris à l'interface de gestion centrale
       }
       return(invisible(self)) # Renvoie l'objet R6 complet discrètement pour permettre le chaînage d'autres méthodes de l'environnement
-    },
->>>>>>> Stashed changes
+    }
+
     
     if (is.null(noms_a_traiter) || length(noms_a_traiter) == 0) { # Détecte si la liste résultante des échantillons à analyser est totalement vide ou introuvable
       warning("Aucun échantillon trouvé à traiter pour le retrait des bordures.") # Émet un avertissement non bloquant pour signaler l'anomalie de flux à l'utilisateur

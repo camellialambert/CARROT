@@ -5,10 +5,10 @@ library(DT)
 library(plotly)
 
 
-source("~/Desktop/Institut_Cochin/Code/CARROT/pipeline_cytometrie.R")
-source("~/Desktop/Institut_Cochin/Code/CARROT/R/module_import.R.R")
-source("~/Desktop/Institut_Cochin/Code/CARROT/R/utils.R")
-source("~/Desktop/Institut_Cochin/Code/CARROT/R/module_compensation.R")
+source("~/Bureau/Camellia/Code/CARROT/pipeline_cytometrie.R")
+source("~/Bureau/Camellia/Code/CARROT/R/module_import.R.R")
+source("~/Bureau/Camellia/Code/CARROT/R/utils.R")
+source("~/Bureau/Camellia/Code/CARROT/R/module_compensation.R")
 
 CANAUX_CONNUS <- c(
   "", "FITC-A", "Alexa Fluor 488-A", "Alexa Fluor 700-A",
