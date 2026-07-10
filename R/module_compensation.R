@@ -260,7 +260,7 @@ compensation_ui <- function(id) {
           column(width = 4,
                  wellPanel(
                    h4("Comparaison Avant / Après Compensation"),
-                   p("Pour chaque canal, cette analyse compare le pourcentage de débordement (spillover) mesuré à partir des médianes des populations positives et négatives, avant et après application de la matrice de compensation.",
+                   p("Pour chaque fluorochrome (canal principal) et chaque canal, cette analyse affiche l'écart entre la médiane de la population positive et celle de la population négative, avant et après application de la matrice de compensation.",
                      style = "font-size:12px; color:#555;"),
                    hr(),
                    uiOutput(ns("ui_select_echantillon_medianes")),
@@ -270,32 +270,20 @@ compensation_ui <- function(id) {
                    div(class = "gate-instructions",
                        icon("info-circle"),
                        " ", tags$b("Critère de bonne compensation :"),
-                       " la compensation est correcte quand la médiane de la population positive (compensée) devient égale à la médiane de la population négative, dans tous les canaux hors diagonale.",
+                       " la compensation est correcte quand la médiane de la population positive (compensée) devient égale à la médiane de la population négative, dans tous les canaux hors diagonale — c'est-à-dire quand l'écart affiché tend vers 0.",
                        br(),
-                       "Les tableaux ", tags$b("« Écart de médianes »"), " ci-contre affichent directement cette différence brute : plus la valeur est proche de 0, meilleure est la compensation. La diagonale (canal principal) n'est pas concernée par ce test, car elle correspond au signal réel du marqueur."
+                       "La couleur reflète l'ampleur de l'écart (vert = proche de 0, rouge = écart important). La diagonale (canal principal) n'est pas concernée par ce test, car elle correspond au signal réel du marqueur — elle est affichée en gris neutre."
                    )
                  )
           ),
           column(width = 8,
-                 box(title = tagList(icon("exclamation-triangle"), " Spillover mesuré AVANT compensation (%)"),
+                 box(title = tagList(icon("exclamation-triangle"), " Écart de médianes AVANT compensation (Positif − Négatif)"),
                      width = NULL, status = "danger", solidHeader = TRUE,
                      DTOutput(ns("dt_medianes_avant"))
                  ),
-                 box(title = tagList(icon("check-circle"), " Spillover résiduel APRÈS compensation (%)"),
+                 box(title = tagList(icon("check-circle"), " Écart de médianes APRÈS compensation (Positif − Négatif)"),
                      width = NULL, status = "success", solidHeader = TRUE,
                      DTOutput(ns("dt_medianes_apres"))
-                 ),
-                 box(title = tagList(icon("chart-line"), " Amélioration apportée (Avant − Après, en points de %)"),
-                     width = NULL, status = "info", solidHeader = TRUE,
-                     DTOutput(ns("dt_medianes_delta"))
-                 ),
-                 box(title = tagList(icon("not-equal"), " Écart de médianes AVANT compensation (Positif − Négatif)"),
-                     width = NULL, status = "warning", solidHeader = TRUE,
-                     DTOutput(ns("dt_medianes_ecart_avant"))
-                 ),
-                 box(title = tagList(icon("equals"), " Écart de médianes APRÈS compensation (Positif − Négatif) — doit tendre vers 0"),
-                     width = NULL, status = "primary", solidHeader = TRUE,
-                     DTOutput(ns("dt_medianes_ecart_apres"))
                  )
           )
         )
@@ -1191,60 +1179,34 @@ compensation_server <- function(id, pipeline, pipeline_version) {
       res
     })
     
-    afficher_matrice_medianes <- function(mat) {
+    # Construit un tableau canal x canal affichant l'écart (médiane positive - médiane négative).
+    # Plus la valeur est proche de 0, meilleure est la compensation. La diagonale (canal principal,
+    # signal réel du marqueur) est affichée en gris neutre avec un tiret, car elle n'est pas concernée
+    # par le critère d'égalité des médianes.
+    afficher_matrice_medianes <- function(mat_ecart) {
+      canaux <- colnames(mat_ecart)
+      
+      df_affichage <- as.data.frame(mat_ecart)
+      colnames(df_affichage) <- canaux
+      rownames(df_affichage) <- rownames(mat_ecart)
+      
       datatable(
-        mat, rownames = TRUE, selection = "none",
+        df_affichage, rownames = TRUE, selection = "none",
         options = list(dom = 't', ordering = FALSE, scrollX = TRUE, scrollY = "300px",
                        scrollCollapse = TRUE, paging = FALSE)
-      ) %>% formatStyle(
-        columns = colnames(mat),
-        backgroundColor = styleInterval(c(5, 10, 20), c('#d1e7dd', '#fff3cd', '#f8d7da', '#e2c6c6'))
-      )
+      ) %>%
+        formatStyle(
+          columns = canaux,
+          backgroundColor = styleInterval(c(-20, -5, 5, 20), c('#f8d7da', '#fff3cd', '#d1e7dd', '#fff3cd', '#f8d7da'))
+        )
     }
     
     output$dt_medianes_avant <- renderDT({
-      afficher_matrice_medianes(resultat_medianes()$avant)
+      afficher_matrice_medianes(resultat_medianes()$avant$ecart)
     })
     
     output$dt_medianes_apres <- renderDT({
-      afficher_matrice_medianes(resultat_medianes()$apres)
-    })
-    
-    output$dt_medianes_delta <- renderDT({
-      mat <- resultat_medianes()$delta
-      datatable(
-        mat, rownames = TRUE, selection = "none",
-        options = list(dom = 't', ordering = FALSE, scrollX = TRUE, scrollY = "300px",
-                       scrollCollapse = TRUE, paging = FALSE)
-      ) %>% formatStyle(
-        columns = colnames(mat),
-        # Vert si la compensation a bien réduit le spillover (delta positif), rouge sinon
-        backgroundColor = styleInterval(c(0), c('#f8d7da', '#d1e7dd'))
-      )
-    })
-    
-    # Tableaux "Écart de médianes" : vérifient directement le critère de bonne compensation
-    # (médiane positive == médiane négative, hors diagonale). La diagonale (NA) est affichée en gris neutre.
-    afficher_matrice_ecart <- function(mat) {
-      datatable(
-        mat, rownames = TRUE, selection = "none",
-        options = list(dom = 't', ordering = FALSE, scrollX = TRUE, scrollY = "300px",
-                       scrollCollapse = TRUE, paging = FALSE)
-      ) %>% formatStyle(
-        columns = colnames(mat),
-        backgroundColor = styleInterval(
-          c(-1, -0.2, 0.2, 1),
-          c('#f8d7da', '#fff3cd', '#d1e7dd', '#fff3cd', '#f8d7da')
-        )
-      )
-    }
-    
-    output$dt_medianes_ecart_avant <- renderDT({
-      afficher_matrice_ecart(resultat_medianes()$ecart_avant)
-    })
-    
-    output$dt_medianes_ecart_apres <- renderDT({
-      afficher_matrice_ecart(resultat_medianes()$ecart_apres)
+      afficher_matrice_medianes(resultat_medianes()$apres$ecart)
     })
     
     # ════════════════════════════════════════════════════════════════════════

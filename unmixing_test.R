@@ -59,21 +59,113 @@ if (ncol(df_repare) == 1) {
 write.csv(df_repare, file = chemin_csv, row.names = FALSE, quote = TRUE)
 
 message("Le fichier fcs_control_file.csv a été nettoyé et réenregistré au format standard.")
+
 obj$verifier_asp(warning = 5000, error = 1000)
 
-cells <- obj$definir_gates_density(control_name = "smallGate_2")
-viable_cells <- obj$definir_gates_density(control_name = "viabilityGate_1")
-obj$visualiser_figures("figure_gate")
+### définition des gates
+
+obj$definir_tune_gates(gate.name = "bv421", n_cells = 2000, percentile = 70, bandwidth = 0.5)
+obj$definir_tune_gates(gate.name = "bv650", n_cells = 2000, percentile = 50, bandwidth = 0.5)
+obj$definir_tune_gates(gate.name = "bv711", n_cells = 2000, percentile = 50, bandwidth = 0.5)
+obj$definir_tune_gates(gate.name = "A588", n_cells = 2000, percentile = 50, bandwidth = 0.5)
+obj$definir_tune_gates(gate.name = "SB550", n_cells = 1000, percentile = 50, bandwidth = 0.5)
+obj$definir_tune_gates(gate.name = "PerCP", n_cells = 2000, percentile = 50, bandwidth = 0.5)
+obj$definir_tune_gates(gate.name = "PE", n_cells = 1000, percentile = 30, bandwidth = 0.5)
+obj$definir_tune_gates(gate.name = "SN685", n_cells = 1000, percentile = 50, bandwidth = 0.5)
+obj$definir_tune_gates(gate.name = "A700", n_cells = 2000, percentile = 50, bandwidth = 0.5)
+obj$definir_tune_gates(gate.name = "ECD", n_cells = 2000, percentile = 50, bandwidth = 0.5)
+obj$definir_tune_gates(gate.name = "APC770", n_cells = 2000, percentile = 60, bandwidth = 0.5)
+obj$definir_tune_gates(gate.name = "viable_cells", n_cells = 1000, percentile = 80, bandwidth = 0.5)
+
+
+# création des gates réels
+
+obj$definir_gates_landmarks(
+  control_name = "bv421",
+  n.cells = 2000,
+  percentile = 70
+)
+
+obj$definir_gates_landmarks(
+  control_name = "bv650",
+  n.cells = 2000,
+  percentile = 50
+)
+
+obj$definir_gates_landmarks(
+  control_name = "bv711",
+  n.cells = 2000,
+  percentile = 50
+)
+
+obj$definir_gates_landmarks(
+  control_name = "A588",
+  n.cells = 2000,
+  percentile = 50
+)
+
+obj$definir_gates_density(
+  control_name = "SB550",
+  n.cells = 2000,
+  grid.n = 100,
+  bandwidth.factor = 1
+)
+
+obj$definir_gates_landmarks(
+  control_name = "PerCP",
+  n.cells = 2000,
+  percentile = 50
+)
+
+obj$definir_gates_landmarks(
+  control_name = "PE",
+  n.cells = 1000,
+  percentile = 30
+)
+
+obj$definir_gates_landmarks(
+  control_name = "SN685",
+  n.cells = 1000,
+  percentile = 50
+)
+
+obj$definir_gates_landmarks(
+  control_name = "A700",
+  n.cells = 2000,
+  percentile = 50
+)
+
+obj$definir_gates_landmarks(
+  control_name = "ECD",
+  n.cells = 2000,
+  percentile = 50
+)
+
+obj$definir_gates_landmarks(
+  control_name = "APC770",
+  n.cells = 2000,
+  percentile = 60
+)
+
+obj$definir_gates_density(
+  control_name = "viable_cells",
+  n.cells = 2000,
+  grid.n = 100,
+  bandwidth.factor = 1
+)
+
+# la suite
+
 obj$charger_et_nettoyer()
 obj$extraire_fluorophore_spectre()
-# Extraction de l'AF sur le fichier Unstained pour le tissu "Cells"
+
 chemin_unstained <- df_monomarques$chemin[df_monomarques$type == "Unstained"]
 
 obj$extraire_spectre_af(
   unstained_fcs_path = chemin_unstained, 
   tissue_name = "Cells"
 )
-obj$preparer_variants_spectraux(tissue_af_name = "Cells")
+
 
 obj$unmix_folder(
   folder_path = dossier_echantillons, 
@@ -81,24 +173,62 @@ obj$unmix_folder(
   method = "WLS"
 )
 
+obj$unmix_folder(
+  folder_path = dossier_echantillons, 
+  tissue_name = "Cells", 
+  method = "OLS"
+)
+
+obj$unmix_folder(
+  folder_path = dossier_echantillons, 
+  tissue_name = "Cells", 
+  method = "WLS"
+)
+
+obj$unmix_folder(
+  folder_path = dossier_echantillons, 
+  tissue_name = "Cells", 
+  method = "AutoSpectral"
+)
+
 obj$charger_fcs_unmixes(dossier = "AutoSpectral_unmixed")
 colnames(obj$echantillons_traites[[1]])
-obj$visualiser_unmixing(
-  nom_fichier_fcs = "MM AutoSpectral.fcs", 
-  canal_x = "BV421-A",  # Mets ici le nom exact trouvé à la première étape
-  canal_y = "PE-A"      # Mets ici le nom exact trouvé à la première étape
-)
+
 
 # 1. Vérifier la séparation APC / Alexa Fluor 700 (Deux FAILs proches)
 obj$visualiser_unmixing(
-  nom_fichier_fcs = "MM AutoSpectral.fcs", 
-  canal_x = "APC-A", 
-  canal_y = "Alexa Fluor 700-A"
+  nom_fichier_fcs = "MM WLS.fcs", 
+  canal_x = "BV421-A", 
+  canal_y = "BV786-A"
 )
 
-# 2. Vérifier le PE (qui était en FAIL) face au BV421 (qui est PASS)
+obj$visualiser_unmixing(
+  nom_fichier_fcs = "MM OLS.fcs", 
+  canal_x = "BV421-A", 
+  canal_y = "BV786-A"
+)
+
 obj$visualiser_unmixing(
   nom_fichier_fcs = "MM AutoSpectral.fcs", 
-  canal_x = "BV421-A", 
-  canal_y = "PE-A"
+  canal_x = "SC-A", 
+  canal_y = "SSC-A"
+)
+
+#######################
+# correction
+
+# Charger le fichier en mémoire
+fcs_robin <- flowCore::read.FCS(
+  "~/Desktop/Institut_Cochin/Jeux de données/Données unmixing/MM_Robin.fcs", 
+  truncate_max_range = FALSE
+)
+
+# L'ajouter à votre objet
+obj$echantillons_traites[["MM_Robin.fcs"]] <- fcs_robin
+colnames(fcs_robin)
+
+obj$visualiser_unmixing(
+  nom_fichier_fcs = "MM_Robin.fcs", 
+  canal_x = "FSC-A",  # Mets ici le nom exact trouvé à la première étape
+  canal_y = "SSC-A"      # Mets ici le nom exact trouvé à la première étape
 )

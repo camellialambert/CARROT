@@ -27,7 +27,7 @@ CARROT <- R6Class(
     plots_gates = list(), # contient toutes les figures des gates (courbes de densité)
     S_matrix = NULL, # contient la matrice de spillover
     S_matrices_par_echantillon = list(), # contient les matrices de spillover par échantillon
-    comparaison_medianes = list(), # contient, par échantillon (ou "GLOBAL"), les matrices comparatives de spillover mesurées sur les médianes avant/après compensation
+    comparaison_medianes = list(), # contient, par échantillon (ou "GLOBAL"), les médianes brutes positive/négative (et leur écart) mesurées avant/après compensation
     plots_compensation = list(), # contient toutes les figures biplots, avant et/ou après compensation
     
     # Variable de l'unmixing
@@ -71,6 +71,11 @@ CARROT <- R6Class(
     plots_debris = list(), # contient toutes les figures après application du gate de débris
     plots_doublets = list(), # contient toutes les figures après application du gate de doublets
     plots_viabilite = list(), # contient toutes les figures après application du gate de viabilité
+    
+    # variables d'analyses
+    post_transformation = list(), # Stocke les données des échantillons après application de la transformation (ex: arcsinh)
+    cofactor_transformation = NULL,
+    canaux_transformes = list(),
     
     # variable 
     pipeline_callback = NULL,
@@ -322,7 +327,7 @@ CARROT <- R6Class(
       return(self$S_matrices_par_echantillon[[nom_echantillon]]) # Renvoie la matrice de compensation individualisée et mise à jour pour cet échantillon
     }, 
     
-    comparer_medianes_spillover = function(nom_echantillon = NULL) { # Méthode comparant, canal par canal, le spillover (%) mesuré à partir des médianes AVANT et APRÈS application de la matrice de compensation
+    comparer_medianes_spillover = function(nom_echantillon = NULL) { # Méthode calculant, canal par canal, les médianes brutes des populations positive et négative AVANT et APRÈS application de la matrice de compensation
       matrice_utilisee <- if (!is.null(nom_echantillon) && !is.null(self$S_matrices_par_echantillon[[nom_echantillon]])) { # Recherche si une matrice individualisée existe pour l'échantillon demandé
         self$S_matrices_par_echantillon[[nom_echantillon]] # Utilise la matrice personnalisée de cet échantillon si elle existe
       } else {
@@ -331,8 +336,10 @@ CARROT <- R6Class(
       if (is.null(matrice_utilisee)) stop("Veuillez d'abord calculer la matrice de spillover.") # Bloque le calcul si aucune matrice n'est disponible
       
       nombre_canaux <- length(self$canaux) # Évalue le nombre total de canaux d'acquisition actifs
-      mat_avant <- matrix(0, nrow = nombre_canaux, ncol = nombre_canaux, dimnames = list(self$canaux, self$canaux)) # Initialise la matrice du spillover mesuré AVANT compensation
-      mat_apres <- matrix(0, nrow = nombre_canaux, ncol = nombre_canaux, dimnames = list(self$canaux, self$canaux)) # Initialise la matrice du spillover résiduel mesuré APRÈS compensation
+      mat_pos_avant   <- matrix(NA, nrow = nombre_canaux, ncol = nombre_canaux, dimnames = list(self$canaux, self$canaux)) # Médiane de la population positive AVANT compensation
+      mat_neg_avant   <- matrix(NA, nrow = nombre_canaux, ncol = nombre_canaux, dimnames = list(self$canaux, self$canaux)) # Médiane de la population négative AVANT compensation
+      mat_pos_apres   <- matrix(NA, nrow = nombre_canaux, ncol = nombre_canaux, dimnames = list(self$canaux, self$canaux)) # Médiane de la population positive APRÈS compensation
+      mat_neg_apres   <- matrix(NA, nrow = nombre_canaux, ncol = nombre_canaux, dimnames = list(self$canaux, self$canaux)) # Médiane de la population négative APRÈS compensation
       mat_ecart_avant <- matrix(NA, nrow = nombre_canaux, ncol = nombre_canaux, dimnames = list(self$canaux, self$canaux)) # Écart brut (médiane positive - médiane négative) AVANT compensation, pour vérifier l'égalité des médianes
       mat_ecart_apres <- matrix(NA, nrow = nombre_canaux, ncol = nombre_canaux, dimnames = list(self$canaux, self$canaux)) # Écart brut (médiane positive - médiane négative) APRÈS compensation, pour vérifier l'égalité des médianes
       
@@ -346,48 +353,38 @@ CARROT <- R6Class(
         fcs_pos_comp <- flowCore::compensate(fcs_pos_brut, matrice_utilisee) # Applique la matrice de compensation à la population positive
         fcs_neg_comp <- flowCore::compensate(fcs_neg_brut, matrice_utilisee) # Applique la matrice de compensation à la population négative
         
-        calculer_spillover_pourcentage <- function(fcs_cible, fcs_ref_neg) { # Sous-fonction interne calculant le pourcentage réel de débordement de chaque canal par rapport au canal principal (basée sur les médianes)
+        calculer_medianes <- function(fcs_cible, fcs_ref_neg) { # Sous-fonction interne calculant les médianes brutes positive/négative, canal par canal
           mat_exprs_cible <- flowCore::exprs(fcs_cible)[, self$canaux, drop = FALSE] # Extrait la matrice des intensités de fluorescence de la population positive
           mat_exprs_neg   <- flowCore::exprs(fcs_ref_neg)[, self$canaux, drop = FALSE] # Extrait la matrice des intensités de fluorescence de la population négative
           med_pos <- apply(mat_exprs_cible, 2, median, na.rm = TRUE) # Médiane de la population positive, pour l'ensemble des canaux
           med_neg <- apply(mat_exprs_neg, 2, median, na.rm = TRUE) # Médiane de la population négative, pour l'ensemble des canaux
-          delta_signal <- med_pos - med_neg # Signal net (équivalent du delta_observe généralisé à tous les canaux)
-          delta_signal <- pmax(delta_signal, 0) # Empêche toute valeur négative : un spillover ne peut pas être inférieur à 0 (même logique que calculer_spillover())
-          delta_source <- delta_signal[canal_principal] # Signal net du canal primaire légitime (delta_source), déjà borné à 0
-          liste_retour <- list(pourcentage = NULL, ecart = med_pos - med_neg) # Prépare le retour : le pourcentage borné ET l'écart brut (non borné, utile pour le test d'égalité des médianes)
-          if (is.na(delta_source) || delta_source == 0) { # Évite une division par zéro si aucun signal n'est détecté dans le canal principal
-            liste_retour$pourcentage <- setNames(rep(0, length(delta_signal)), names(delta_signal)) # Renvoie 0 partout plutôt qu'une valeur indéfinie
-          } else {
-            liste_retour$pourcentage <- round((delta_signal / delta_source) * 100, 2) # Ratio de spillover exprimé en pourcentage, borné à 0 et arrondi à deux décimales
-          }
-          liste_retour
+          list(pos = round(med_pos, 2), neg = round(med_neg, 2), ecart = round(med_pos - med_neg, 3)) # Renvoie les médianes brutes (non bornées) ainsi que leur écart, utile pour le test d'égalité
         }
         
-        res_brut <- calculer_spillover_pourcentage(fcs_pos_brut, fcs_neg_brut) # Calcule le spillover (%) et l'écart brut AVANT compensation
-        res_comp <- calculer_spillover_pourcentage(fcs_pos_comp, fcs_neg_comp) # Calcule le spillover (%) et l'écart brut APRÈS compensation
+        res_brut <- calculer_medianes(fcs_pos_brut, fcs_neg_brut) # Calcule les médianes brutes AVANT compensation
+        res_comp <- calculer_medianes(fcs_pos_comp, fcs_neg_comp) # Calcule les médianes brutes APRÈS compensation
         
-        mat_avant[canal_principal, ] <- res_brut$pourcentage # Remplit la ligne "avant compensation" pour ce canal (jamais négatif)
-        mat_apres[canal_principal, ] <- res_comp$pourcentage # Remplit la ligne "après compensation" (résiduel) pour ce canal (jamais négatif)
+        mat_pos_avant[canal_principal, ] <- res_brut$pos # Remplit la ligne "médiane positive avant compensation" pour ce canal
+        mat_neg_avant[canal_principal, ] <- res_brut$neg # Remplit la ligne "médiane négative avant compensation" pour ce canal
+        mat_pos_apres[canal_principal, ] <- res_comp$pos # Remplit la ligne "médiane positive après compensation" pour ce canal
+        mat_neg_apres[canal_principal, ] <- res_comp$neg # Remplit la ligne "médiane négative après compensation" pour ce canal
         
-        mat_ecart_avant[canal_principal, ] <- round(res_brut$ecart, 3) # Écart brut médiane positive - médiane négative AVANT compensation (toutes unités confondues, positif ou négatif)
-        mat_ecart_apres[canal_principal, ] <- round(res_comp$ecart, 3) # Écart brut médiane positive - médiane négative APRÈS compensation : une compensation correcte donne un écart proche de 0
+        mat_ecart_avant[canal_principal, ] <- res_brut$ecart # Écart brut médiane positive - médiane négative AVANT compensation (toutes unités confondues, positif ou négatif)
+        mat_ecart_apres[canal_principal, ] <- res_comp$ecart # Écart brut médiane positive - médiane négative APRÈS compensation : une compensation correcte donne un écart proche de 0
         
         mat_ecart_avant[canal_principal, canal_principal] <- NA # La diagonale correspond au signal réel du marqueur (et non à un spillover résiduel) : elle n'est pas concernée par le test d'égalité des médianes
         mat_ecart_apres[canal_principal, canal_principal] <- NA # Idem après compensation : on neutralise la diagonale pour ne pas fausser la lecture du critère
       }
       
       resultat <- list(
-        avant       = mat_avant,                          # Spillover (%) mesuré avant compensation (jamais négatif)
-        apres       = mat_apres,                           # Spillover (%) résiduel mesuré après compensation (jamais négatif)
-        delta       = round(mat_avant - mat_apres, 2),      # Amélioration apportée par la compensation (en points de %)
-        ecart_avant = mat_ecart_avant,                      # Écart brut médiane positive - médiane négative AVANT compensation (diagonale = NA)
-        ecart_apres = mat_ecart_apres                       # Écart brut médiane positive - médiane négative APRÈS compensation : doit tendre vers 0 si la compensation est correcte (diagonale = NA)
-      ) # Compile l'ensemble des matrices comparatives
+        avant = list(pos = mat_pos_avant, neg = mat_neg_avant, ecart = mat_ecart_avant), # Médianes brutes positive/négative (+ écart) AVANT compensation
+        apres = list(pos = mat_pos_apres, neg = mat_neg_apres, ecart = mat_ecart_apres)  # Médianes brutes positive/négative (+ écart) APRÈS compensation
+      ) # Compile l'ensemble des résultats comparatifs
       
       cle <- if (!is.null(nom_echantillon)) nom_echantillon else "GLOBAL" # Clé de stockage : nom de l'échantillon ou "GLOBAL" si aucun échantillon n'est précisé
       self$comparaison_medianes[[cle]] <- resultat # Archive le résultat pour un accès ultérieur (ex: affichage Shiny)
       
-      return(resultat) # Renvoie la liste des matrices comparatives
+      return(resultat) # Renvoie la liste des résultats comparatifs
     },
     
     controler_monomarques = function(fichier_monomarque, canal_x, canal_y, max_points = 10000) { # Méthode générant un graphique biplot comparatif avant/après compensation pour contrôler le spillover
@@ -1155,21 +1152,23 @@ CARROT <- R6Class(
     # ============================================================
     
     get_derniere_source = function() {
-      if (!is.null(self$post_retrait_bordures) && length(self$post_retrait_bordures) > 0) {
-        return(self$post_retrait_bordures)
-      } 
-      if (!is.null(self$post_PeacoQC) && length(self$post_PeacoQC) > 0) {
-        return(self$post_PeacoQC)  # ✗ TYPO : était self$post_PeacoQ (manque C)
-      }
-      if (!is.null(self$post_flowAI) && length(self$post_flowAI) > 0) {
-        return(self$post_flowAI)
-      }
-      # ✗ AVANT : retournait echantillons_traites (vide avant transformation)
-      # ✓ APRÈS : remonte à echantillons (les données brutes chargées)
-      if (!is.null(self$echantillons_traites) && length(self$echantillons_traites) > 0) {
-        return(self$echantillons_traites)
-      }
-      return(self$echantillons)  # fallback ultime = données brutes
+      # 1. Étapes de transformation et gating final
+      if (!is.null(self$post_transformation) && length(self$post_transformation) > 0) return(self$post_transformation)
+      if (!is.null(self$post_viabilite) && length(self$post_viabilite) > 0) return(self$post_viabilite)
+      
+      # 2. Étapes de nettoyage des doublets et débris
+      if (!is.null(self$post_doublets_final) && length(self$post_doublets_final) > 0) return(self$post_doublets_final)
+      if (!is.null(self$post_debris) && length(self$post_debris) > 0) return(self$post_debris)
+      
+      # 3. Étapes de contrôle qualité (QC)
+      if (!is.null(self$post_retrait_bordures) && length(self$post_retrait_bordures) > 0) return(self$post_retrait_bordures)
+      if (!is.null(self$post_PeacoQC) && length(self$post_PeacoQC) > 0) return(self$post_PeacoQC)
+      if (!is.null(self$post_flowAI) && length(self$post_flowAI) > 0) return(self$post_flowAI)
+      
+      # 4. Sources initiales (fallback)
+      if (!is.null(self$echantillons_traites) && length(self$echantillons_traites) > 0) return(self$echantillons_traites)
+      
+      return(self$echantillons) # Données brutes chargées
     },
     
     appliquer_peacoqc = function(dossier_rapports = NULL, reglages_specifiques = list()) {
@@ -1830,8 +1829,9 @@ CARROT <- R6Class(
       gate_polygone    <- self$gate_debris[[nom_echantillon]] # Extrait l'objet formel polygonGate appliqué à cet échantillon au cours de la filtration
       coordonnees_gate <- as.data.frame(gate_polygone@boundaries) # Extrait sous forme de tableau bidimensionnel les sommets géométriques (X, Y) du polygone de tri
       colnames(coordonnees_gate) <- c("x", "y") # Renomme explicitement les colonnes du tableau pour simplifier l'intégration dans la couche ggplot2
-      canal_x <- gate_polygone@parameters[[1]] # Identifie l'identifiant technique du canal affecté à l'axe des abscisses (ex: FSC-A)
-      canal_y <- gate_polygone@parameters[[2]] # Identifie l'identifiant technique du canal affecté à l'axe des ordonnées (ex: SSC-A)
+      params <- flowCore::parameters(gate_polygone)
+      canal_x <- params[1]
+      canal_y <- params[2] # Identifie l'identifiant technique du canal affecté à l'axe des ordonnées (ex: SSC-A)
       total_evenements_apres   <- nrow(flowCore::exprs(flowframe_apres)) # Dénombre précisément la population de cellules intactes conservée après le détourage
       pourcentage_conservation <- if (total_evenements_avant > 0) round((total_evenements_apres / total_evenements_avant) * 100, 1) else 0 # Déduit le rendement de la filtration en pourcentage, arrondi au dixième
       lbl_x <- if (!is.null(self$get_label)) self$get_label(flowframe_avant, canal_x) else canal_x # Extrait le libellé biologique ou l'étiquette de l'axe X via get_label, ou garde le nom brut
@@ -1879,7 +1879,7 @@ CARROT <- R6Class(
       if (!is.null(max_points) && nb_avant > max_points) { # Si la taille de la population outrepasse la limite maximale définie pour la fluidité du rendu graphique
         
         if (!is.null(self$seed)) set.seed(self$seed)
-        donnees_visu <- donnees_source[sample(stats::seq_len(nb_avant), max_points), ] # Génère une sous-matrice par échantillonnage aléatoire uniforme sans remise pour alléger le nuage de points
+        donnees_visu <- donnees_source[sample(seq_len(nb_avant), max_points), ] # Génère une sous-matrice par échantillonnage aléatoire uniforme sans remise pour alléger le nuage de points
       } else { # Si le volume total de cellules initiales est inférieur au seuil critique max_points
         donnees_visu <- donnees_source # Conserve l'intégralité de la matrice source pour le tracé graphique
       } 
@@ -1892,9 +1892,31 @@ CARROT <- R6Class(
       lbl_x <- if (!is.null(self$get_label)) self$get_label(ff_avant, canal_x) else canal_x # Extrait le libellé biologique ou l'étiquette de l'axe X via get_label, ou garde le nom technique brut
       lbl_y <- if (!is.null(self$get_label)) self$get_label(ff_avant, canal_y) else canal_y # Extrait le libellé biologique ou l'étiquette de l'axe Y via get_label, ou garde le nom technique brut
       
-      graphique <- ggplot2::ggplot(donnees_visu, ggplot2::aes(x = .data[[canal_x]], y = .data[[canal_y]])) + # Initialise le biplot morphologique de linéarité avec les expressions de l'échantillon sous-échantillonné
-        ggpointdensity::geom_pointdensity(size = 0.1, alpha = 0.4) + # Nuage de points dont la couleur dépend localement de la densité (estimation locale du nombre de voisins)
-        ggplot2::scale_color_gradientn(colours = c("darkblue", "blue", "cyan", "greenyellow", "yellow", "darkorange", "red")) + # Applique une échelle pseudo-spectrale standardisée pour cartographier les gradients de population
+      # --- Détermination de l'appartenance conservé / retiré pour chaque évènement échantillonné ---
+      if (!is.null(ff_apres) && nb_apres > 0) { # Seulement si un résultat de filtration existe réellement pour cet échantillon
+        donnees_apres <- as.data.frame(flowCore::exprs(ff_apres)) # Convertit la matrice des cellules retenues (singlets) en tableau de données comparable
+        
+        colonnes_cle <- intersect(colnames(donnees_visu), colnames(donnees_apres)) # Sécurise la comparaison en ne retenant que les canaux communs aux deux tableaux
+        cle_visu  <- do.call(paste, c(lapply(colonnes_cle, function(col) donnees_visu[[col]]),  sep = "\r")) # Construit une clé composite unique par évènement à partir de l'ensemble des canaux (réduit fortement le risque de collision)
+        cle_apres <- do.call(paste, c(lapply(colonnes_cle, function(col) donnees_apres[[col]]), sep = "\r")) # Construit la même clé composite pour la population conservée en aval
+        
+        donnees_visu$statut_doublet <- ifelse(cle_visu %in% cle_apres, "Conservé", "Retiré") # Étiquette chaque évènement échantillonné selon sa présence ou non dans la population post-filtration
+      } else { # Si aucune filtration n'a encore été appliquée (ff_apres absent ou vide)
+        donnees_visu$statut_doublet <- "Conservé" # Par défaut, tout est considéré comme conservé pour ne pas fausser la lecture avant tri effectif
+      } 
+      
+      donnees_retirees   <- donnees_visu[donnees_visu$statut_doublet == "Retiré", ]   # Isole le sous-ensemble des évènements exclus par le gate de doublets
+      donnees_conservees <- donnees_visu[donnees_visu$statut_doublet == "Conservé", ] # Isole le sous-ensemble des évènements retenus (singlets) qui recevront la coloration par densité
+      
+      couleur_retire <- "darkred" # Teinte neutre et volontairement éloignée de la palette spectrale, pour signaler sans ambiguïté les évènements exclus
+      couleur_legende_conserve <- "#2C7FB8" # Nuance bleutée représentative du dégradé de densité, utilisée uniquement comme pastille de légende (n'affecte pas la coloration réelle des points)
+      
+      graphique <- ggplot2::ggplot() + # Initialise le biplot morphologique de linéarité en couches séparées afin de distinguer visuellement les évènements retirés des évènements conservés
+        { if (nrow(donnees_retirees) > 0) # N'ajoute la couche grise que si des évènements retirés existent effectivement pour cet échantillon
+          ggplot2::geom_point(data = donnees_retirees, ggplot2::aes(x = .data[[canal_x]], y = .data[[canal_y]]), color = couleur_retire, size = 0.1, alpha = 0.5) # Superpose en gris neutre les évènements exclus, sans encodage de densité, pour matérialiser leur rejet
+        } +
+        ggpointdensity::geom_pointdensity(data = donnees_conservees, ggplot2::aes(x = .data[[canal_x]], y = .data[[canal_y]]), size = 0.1, alpha = 0.4) + # Nuage de points des seuls évènements conservés, coloré localement selon la densité (estimation locale du nombre de voisins)
+        ggplot2::scale_color_gradientn(colours = c("darkblue", "blue", "cyan", "greenyellow", "yellow", "darkorange", "red")) + # Applique une échelle pseudo-spectrale standardisée pour cartographier les gradients de population conservée
         ggplot2::coord_cartesian(xlim = c(0, limite_max), ylim = c(0, limite_max)) + # Force un cadrage isométrique et strict de l'origine jusqu'au maximum pour préserver la diagonale théorique des singlets
         ggplot2::theme_bw() + # Applique un habillage blanc structuré et épuré optimisant l'évaluation des contrastes thermiques de densité
         ggplot2::labs( # Configure l'ensemble des métadonnées, titres et labels scientifiques entourant la figure
@@ -1902,108 +1924,278 @@ CARROT <- R6Class(
           subtitle = paste0("Événements conservés : ", format(nb_apres, big.mark=" "), " | ", pourcentage, "%"), # Resitue les métriques d'efficacité du tri (nombre d'événements uniques et rendement)
           x = lbl_x, y = lbl_y # Injecte les libellés biologiques nettoyés aux axes correspondants
         ) + 
-        ggplot2::theme(legend.position = "none", plot.title = element_text(face = "bold"), plot.subtitle = element_text(color = "darkblue", size = 11)) # Masque la barre d'échelle des densités devenue redondante et stylise les titres
+        ggplot2::theme(legend.position = "none", plot.title = element_text(face = "bold"), plot.subtitle = element_text(color = "darkblue", size = 11)) # Masque la barre d'échelle continue des densités (redondante) et stylise les titres ; la légende conservé/retiré est gérée manuellement ci-dessous
       
       if (infos_gate$type == "poly") { # Couche géométrique adaptative : si le filtre appliqué provient d'un gating polygonal manuel de l'utilisateur
         coordonnees_gate <- as.data.frame(infos_gate$gate@boundaries) # Extrait sous forme de tableau bidimensionnel les sommets géométriques (X, Y) du polygone de tri manuel
         colnames(coordonnees_gate) <- c("x", "y") # Renomme explicitement les colonnes du tableau pour simplifier l'intégration géométrique
         graphique <- graphique + ggplot2::geom_polygon(data = coordonnees_gate, ggplot2::aes(x = x, y = y), fill = NA, color = "darkred", linewidth = 0.6) # Superpose les contours du polygone utilisateur sous forme de ligne rouge continue
-      } else if (infos_gate$type == "stat") { # Sinon, si le filtre appliqué résulte d'une coupure statistique automatisée (MAD)
-        graphique <- graphique + ggplot2::geom_abline(slope = infos_gate$seuil, intercept = 0, color = "darkred", linetype = "dashed", linewidth = 0.6) # Dessine la droite de régression critique passant par l'origine matérialisant la frontière d'exclusion
       } 
+      # NOTE : la barre rouge pointillée (seuil statistique MAD, type == "stat") a été retirée à la demande de l'utilisateur ;
+      # la distinction conservé/retiré repose désormais uniquement sur la coloration des points et la légende manuelle ci-dessous
+      
+      # --- Légende manuelle "Conservé / Retiré", indépendante de toute échelle de couleur pour éviter les conflits avec le dégradé de densité ---
+      pas_legende <- limite_max * 0.05 # Définit un espacement vertical proportionnel entre les deux entrées de la légende manuelle
+      y_conserve  <- limite_max * 0.97 # Position verticale de la première entrée ("Conservé") en haut du cadre du graphique
+      y_retire    <- y_conserve - pas_legende # Position verticale de la seconde entrée ("Retiré"), juste en dessous de la première
+      x_pastille  <- limite_max * 0.80 # Position horizontale commune des pastilles de couleur de la légende
+      x_texte     <- limite_max * 0.83 # Position horizontale du texte explicatif, légèrement décalée à droite des pastilles
+      
+      graphique <- graphique +
+        ggplot2::annotate("point", x = x_pastille, y = y_conserve, color = couleur_legende_conserve, size = 2.2) + # Pastille représentative de la coloration des évènements conservés (teinte issue du dégradé de densité)
+        ggplot2::annotate("text", x = x_texte, y = y_conserve, label = "Conservé", hjust = 0, size = 3.2, color = "black") + # Libellé textuel associé à la pastille des évènements conservés
+        ggplot2::annotate("point", x = x_pastille, y = y_retire, color = couleur_retire, size = 2.2) + # Pastille représentative de la couleur grise attribuée aux évènements retirés
+        ggplot2::annotate("text", x = x_texte, y = y_retire, label = "Retiré", hjust = 0, size = 3.2, color = "black") # Libellé textuel associé à la pastille des évènements retirés
       
       if (is.null(self$plots_doublets)) self$plots_doublets <- list() # Initialise la structure de liste dédiée au stockage des graphiques de doublets si absente en mémoire de l'objet R6
       self$plots_doublets[[paste0(nom_echantillon, "_", type_analyse)]] <- graphique # Archive l'objet visuel généré au sein du registre d'environnement de la classe R6 en indexant par échantillon et axe
       return(graphique) # Renvoie l'objet graphique ggplot2 complet, prêt pour affichage immédiat ou intégration dans une interface UI Shiny
     },
     
-    retirer_les_cellules_mortes = function(canal_fsc = "FSC-A", marqueur_viabilite, points_utilisateur, nom_echantillon = NULL) { # Méthode appliquant un fenêtrage polygonal manuel (PolygonGate) pour isoler les cellules vivantes et exclure celles incorporant le marqueur de viabilité
-      if (is.null(points_utilisateur)) stop("Aucun point fourni pour la viabilité.") # Sécurité : bloque le script si la structure contenant les coordonnées du polygone est absente
-      if (nrow(points_utilisateur) < 3) stop("Un polygone de viabilité nécessite au moins 3 points.") # Sécurité mathématique : exige au moins trois sommets pour pouvoir fermer l'aire géométrique bidimensionnelle
+    
+    retirer_les_cellules_mortes = function(canal_fsc = "FSC-A", marqueur_viabilite,
+                                           points_utilisateur, nom_echantillon = NULL) {
       
-      liste_fcs_source <- if (!is.null(self$post_doublets_final) && length(self$post_doublets_final) > 0) { # Évalue si la structure finale des cellules uniques (singlets) est préalablement complétée
-        self$post_doublets_final # Privilégie le chaînage standard en se connectant immédiatement en aval de l'exclusion des doublets
-      } else if (!is.null(self$post_debris) && length(self$post_debris) > 0) { # À défaut, évalue si la liste épurée pour les débris cellulaires est accessible
-        self$post_debris # Connecte le flux en aval de l'étape de filtration des débris si l'exclusion des doublets n'a pas été faite
-      } else { # Si aucun des compartiments de tri précédents n'est peuplée ou initialisé en mémoire
-        self$get_derniere_source() # Active le mécanisme de repli automatique sur le dernier niveau de traitement valide détecté dans le pipeline
-      } # Fin de la sélection séquentielle de la liste source
-      if (length(liste_fcs_source) == 0) stop("Aucune donnée source disponible pour l'analyse de viabilité.") # Sécurité : interrompt l'exécution si aucune matrice cellulaire n'est localisée en mémoire vive
+      if (is.null(points_utilisateur)) stop("Aucun point fourni pour la viabilité.")
+      if (nrow(points_utilisateur) < 3) stop("Un polygone nécessite ≥ 3 points.")
+      
+      # Source avant viabilité : transformation > doublets > débris > brut
+      liste_fcs_source <- if (!is.null(self$post_transformation) && length(self$post_transformation) > 0) {
+        self$post_transformation
+      } else if (!is.null(self$post_doublets_final) && length(self$post_doublets_final) > 0) {
+        self$post_doublets_final
+      } else if (!is.null(self$post_debris) && length(self$post_debris) > 0) {
+        self$post_debris
+      } else {
+        self$get_derniere_source()
+      }
+      
       if (is.null(self$gate_viabilite)) self$gate_viabilite <- list()
       if (is.null(self$post_viabilite)) self$post_viabilite <- list()
       
-      matrice_coordonnees <- as.matrix(points_utilisateur[, 1:2]) # Force la conversion des deux premières colonnes de coordonnées utilisateur en une matrice R standard pour l'interface flowCore
-      colnames(matrice_coordonnees) <- c(canal_fsc, marqueur_viabilite) # Aligne et synchronise obligatoirement les noms des colonnes de la matrice sur les axes physiques cibles détectés (FSC et canal de fluorescence du dye)
-      polygone_viabilite <- flowCore::polygonGate(.gate = matrice_coordonnees, filterId = "Gate_Viabilite") # Instancie l'objet géométrique formel polygonGate définissant la barrière d'inclusion des cellules viables
+      matrice_coordonnees <- as.matrix(points_utilisateur[, 1:2])
+      colnames(matrice_coordonnees) <- c(canal_fsc, marqueur_viabilite)
       
-      appliquer_le_gate_vivantes = function(nom) { # Sous-fonction encapsulant le tri topologique de point dans un polygone pour un échantillon de la cohorte
-        flowframe_entree <- liste_fcs_source[[nom]] # Extrait l'objet flowFrame d'entrée correspondant à l'identifiant de l'itération active
-        if (is.null(flowframe_entree)) return(NULL) # Quitte proprement la sous-routine si l'échantillon spécifié est introuvable ou mal chargé
-        resultat_filtrage <- flowCore::filter(flowframe_entree, polygone_viabilite) # Exécute le filtrage géométrique bidimensionnel pour évaluer l'appartenance de chaque événement cellulaire au polygone
-        self$gate_viabilite[[nom]] <- polygone_viabilite # Consigne le polygone de tri dans l'environnement de l'objet R6 pour permettre des réaffichages graphiques ultérieurs
-        self$post_viabilite[[nom]] <- flowframe_entree[resultat_filtrage@subSet, ] # Sous-échantillonne la matrice d'expression pour ne conserver que les cellules validées par l'indice logique TRUE (cellules vivantes)
-      } 
+      polygone_viabilite <- flowCore::polygonGate(.gate = matrice_coordonnees, filterId = "Gate_Viabilite")
       
-      echantillons_a_traiter <- if (is.null(nom_echantillon)) names(liste_fcs_source) else nom_echantillon # Cible la cohorte complète si l'identifiant est omis, ou restreint l'exécution au fichier unique spécifié
-      for (nom in echantillons_a_traiter) { appliquer_le_gate_vivantes(nom) } # Parcourt et traite séquentiellement l'ensemble de la liste via une boucle d'exécution unitaire
-      self$update_pipeline("viabilite", nom_echantillon) # Active la mise à jour des graphes d'état ou rafraîchit l'interface Shiny pour cette étape d'isolement
-    }, 
-    
-    visualiser_viabilite = function(nom_echantillon, max_points = 10000) { # Méthode générant un graphique bidimensionnel de densité (biplot) pour cartographier et valider l'isolement des cellules viables par le polygone utilisateur
-      if (is.null(self$post_viabilite[[nom_echantillon]])) { # Évalue si la structure ou le fichier cible nettoyé pour la viabilité est absent de la mémoire vive
-        message("Pas de données Viabilité pour ", nom_echantillon) # Notification d'avertissement en console si l'étape de gating n'a pas été préalablement exécutée
-        return(NULL) # Interrompt proprement la fonction et renvoie NULL pour ne pas bloquer l'exécution globale
-      } 
-      
-      flowframe_avant <- if (!is.null(self$post_doublets_final) && length(self$post_doublets_final) > 0) { # Système pyramidal : évalue si les cellules proviennent du stockage terminal des singlets validés
-        self$post_doublets_final[[nom_echantillon]] # Charge les expressions issues du processus d'exclusion des doublets
-      } else if (!is.null(self$post_debris) && length(self$post_debris) > 0) { # À défaut, vérifie si la structure épurée pour les débris cellulaires est accessible
-        self$post_debris[[nom_echantillon]] # Oriente le flux vers les données épurées des débris et bruits de fond électroniques
-      } else { # Si aucun filtre morphologique intermédiaire n'est présent en mémoire de l'objet R6
-        self$get_derniere_source()[[nom_echantillon]] # Se replie automatiquement sur le dernier état de traitement valide disponible dans le pipeline
-      } 
-      if (is.null(flowframe_avant)) return(NULL) # Sécurité critique : quitte proprement la routine si aucun flowFrame antécédent valide n'est identifié
-      
-      flowframe_apres  <- self$post_viabilite[[nom_echantillon]] # Récupère l'objet flowFrame épuré (contenant les cellules viables localisées à l'intérieur du polygone)
-      donnees_globales <- as.data.frame(flowCore::exprs(flowframe_avant)) # Convertit la matrice des intensités de la source d'entrée en tableau de données exploitable par ggplot2
-      
-      total_evenements_avant <- nrow(donnees_globales) # Dénombre la population totale d'événements entrant dans l'étape d'isolement de viabilité
-      if (!is.null(max_points) && total_evenements_avant > max_points) { # Si la taille de la population outrepasse la limite maximale définie pour la fluidité du rendu graphique
+      appliquer_le_gate_vivantes = function(nom) {
+        ff <- liste_fcs_source[[nom]]
+        if (is.null(ff)) return(NULL)
         
-        if (!is.null(self$seed)) set.seed(self$seed)
-        indices_gardes <- sample(stats::seq_len(total_evenements_avant), max_points) # Génère un vecteur d'indices par échantillonnage aléatoire uniforme sans remise pour alléger le nuage de points
-        donnees_visu   <- donnees_globales[indices_gardes, ] # Extrait la sous-matrice d'expression correspondante dédiée à la représentation visuelle
-      } else { # Si le volume total de cellules initiales est inférieur au seuil critique max_points
-        donnees_visu   <- donnees_globales # Conserve l'intégralité de la matrice source pour le tracé graphique
+        resultat_filtrage <- flowCore::filter(ff, polygone_viabilite)
+        
+        self$gate_viabilite[[nom]] <- polygone_viabilite
+        self$post_viabilite[[nom]] <- ff[resultat_filtrage@subSet, ]
       }
       
-      gate_polygone    <- self$gate_viabilite[[nom_echantillon]] # Extrait l'objet formel polygonGate appliqué à cet échantillon au cours de la filtration
-      coordonnees_gate <- as.data.frame(gate_polygone@boundaries) # Extrait sous forme de tableau bidimensionnel les sommets géométriques (X, Y) du polygone de viabilité utilisateur
-      colnames(coordonnees_gate) <- c("x", "y") # Renomme explicitement les colonnes du tableau pour simplifier l'intégration dans la couche ggplot2
-      canal_x <- gate_polygone@parameters[[1]] # Identifie l'identifiant technique du canal affecté à l'axe des abscisses (ex: FSC-A)
-      canal_y <- gate_polygone@parameters[[2]] # Identifie l'identifiant technique du canal affecté à l'axe des ordonnées (ex: l'index du marqueur de viabilité)
-      total_evenements_apres   <- nrow(flowCore::exprs(flowframe_apres)) # Dénombre précisément la population de cellules intactes et vivantes conservée après le détourage
-      pourcentage_conservation <- if (total_evenements_avant > 0) round((total_evenements_apres / total_evenements_avant) * 100, 1) else 0 # Déduit le rendement de la filtration en pourcentage, arrondi au dixième
-      lbl_x <- if (!is.null(self$get_label)) self$get_label(flowframe_avant, canal_x) else canal_x # Extrait le libellé biologique ou l'étiquette de l'axe X via get_label, ou garde le nom technique brut
-      lbl_y <- if (!is.null(self$get_label)) self$get_label(flowframe_avant, canal_y) else canal_y # Extrait le libellé biologique ou l'étiquette de l'axe Y via get_label, ou garde le nom technique brut
+      echantillons <- if (is.null(nom_echantillon)) names(liste_fcs_source) else nom_echantillon
+      for (nom in echantillons) appliquer_le_gate_vivantes(nom)
       
-      graphique_viabilite <- ggplot2::ggplot(donnees_visu, ggplot2::aes(x = .data[[canal_x]], y = .data[[canal_y]])) + # Initialise le biplot de viabilité avec les expressions de l'échantillon sous-échantillonné
-        ggpointdensity::geom_pointdensity(size = 0.1, alpha = 0.4) + # Dessine un nuage de points dont la couleur dépend localement de la densité (estimation locale du nombre de voisins)
-        ggplot2::scale_color_gradientn(colours = c("darkblue", "blue", "cyan", "greenyellow", "yellow", "darkorange", "red")) + # Applique une échelle pseudo-spectrale standardisée pour cartographier les gradients de population
-        ggplot2::geom_polygon(data = coordonnees_gate, ggplot2::aes(x = x, y = y), fill = NA, color = "grey20", linewidth = 0.6) + # Dessine les contours du polygone de viabilité utilisateur sous forme de ligne grise foncée continue
-        ggplot2::coord_cartesian(xlim = range(donnees_globales[[canal_x]], na.rm = TRUE), ylim = range(donnees_globales[[canal_y]], na.rm = TRUE)) + # Ajuste dynamiquement le zoom cartésien sur l'étendue des données réelles de l'échantillon d'entrée
-        ggplot2::theme_bw() + # Applique un habillage blanc structuré et épuré optimisant l'évaluation des contrastes thermiques de densité
-        ggplot2::labs( # Configure l'ensemble des métadonnées, titres et labels scientifiques entourant la figure
-          title = paste("Retrait des cellules mortes :", nom_echantillon), # Affiche dynamiquement le titre de la manipulation associé au nom du tube FCS audité
-          subtitle = paste0("Cellules vivantes : ", format(total_evenements_apres, big.mark=" "), " | ", pourcentage_conservation, "%"), # Resitue les métriques d'efficacité du tri (nombre d'événements vivants et rendement)
-          x = lbl_x, y = lbl_y # Injecte les libellés biologiques nettoyés aux axes correspondants
-        ) + 
-        ggplot2::theme(legend.position = "none", plot.title = element_text(face = "bold"), plot.subtitle = element_text(color = "darkblue", size = 11)) # Masque la barre d'échelle des densités devenue redondante et stylise les titres
+      self$update_pipeline("viabilite", nom_echantillon)
+    },
+    
+    visualiser_viabilite = function(nom_echantillon, max_points = 10000) {
       
-      if (is.null(self$plots_viabilite)) self$plots_viabilite <- list() # Initialise la structure de liste dédiée au stockage des graphiques de viabilité si absente en mémoire de l'objet R6
-      self$plots_viabilite[[nom_echantillon]] <- graphique_viabilite # Archive l'objet visuel généré au sein du registre d'environnement de la classe R6
-      return(graphique_viabilite) # Renvoie l'objet graphique ggplot2 complet, prêt pour affichage immédiat ou intégration dans une interface UI Shiny
+      if (is.null(self$post_viabilite[[nom_echantillon]])) {
+        message("Pas de données Viabilité pour ", nom_echantillon)
+        return(NULL)
+      }
+      
+      # Source "avant" gating : si une version transformée existe, on l'utilise
+      flowframe_avant <- if (!is.null(self$post_transformation) &&
+                             !is.null(self$post_transformation[[nom_echantillon]])) {
+        self$post_transformation[[nom_echantillon]]
+      } else if (!is.null(self$post_doublets_final[[nom_echantillon]])) {
+        self$post_doublets_final[[nom_echantillon]]
+      } else if (!is.null(self$post_debris[[nom_echantillon]])) {
+        self$post_debris[[nom_echantillon]]
+      } else {
+        self$get_derniere_source()[[nom_echantillon]]
+      }
+      
+      if (is.null(flowframe_avant)) return(NULL)
+      
+      donnees_globales <- as.data.frame(flowCore::exprs(flowframe_avant))
+      
+      total_evenements_avant <- nrow(donnees_globales)
+      if (!is.null(max_points) && total_evenements_avant > max_points) {
+        if (!is.null(self$seed)) set.seed(self$seed)
+        indices_gardes <- sample(seq_len(total_evenements_avant), max_points)
+        donnees_visu <- donnees_globales[indices_gardes, ]
+      } else {
+        donnees_visu <- donnees_globales
+      }
+      
+      gate_polygone <- self$gate_viabilite[[nom_echantillon]]
+      
+      if (inherits(gate_polygone, "polygonGate")) {
+        bound <- gate_polygone@boundaries
+        if (is.null(dim(bound)) || ncol(bound) != 2) {
+          stop("Le gate polygonal ne contient pas une matrice Nx2 de boundaries.")
+        }
+        coordonnees_gate <- data.frame(
+          x = bound[, 1],
+          y = bound[, 2]
+        )
+        noms_canaux <- colnames(bound)
+      } else if (inherits(gate_polygone, "rectangleGate")) {
+        mins <- gate_polygone@min
+        maxs <- gate_polygone@max
+        noms_canaux <- names(mins)
+        coordonnees_gate <- data.frame(
+          x = c(mins[1], maxs[1], maxs[1], mins[1]),
+          y = c(mins[2], mins[2], maxs[2], maxs[2])
+        )
+      } else if (inherits(gate_polygone, "filterResult")) {
+        gate_interne <- gate_polygone@filter
+        if (inherits(gate_interne, "polygonGate")) {
+          bound <- gate_interne@boundaries
+          coordonnees_gate <- data.frame(
+            x = bound[, 1],
+            y = bound[, 2]
+          )
+          noms_canaux <- colnames(bound)
+        } else if (inherits(gate_interne, "rectangleGate")) {
+          mins <- gate_interne@min
+          maxs <- gate_interne@max
+          noms_canaux <- names(mins)
+          coordonnees_gate <- data.frame(
+            x = c(mins[1], maxs[1], maxs[1], mins[1]),
+            y = c(mins[2], mins[2], maxs[2], maxs[2])
+          )
+        } else {
+          stop("Type de gate non supporté : ", class(gate_interne))
+        }
+      } else {
+        stop("Type de gate non supporté : ", class(gate_polygone))
+      }
+      
+      canal_x <- as.character(noms_canaux[1])
+      canal_y <- as.character(noms_canaux[2])
+      
+      
+      if (!(canal_x %in% colnames(donnees_visu))) {
+        stop("Canal X introuvable dans les données : ", canal_x,
+             "\nColonnes disponibles : ", paste(colnames(donnees_visu), collapse=", "))
+      }
+      if (!(canal_y %in% colnames(donnees_visu))) {
+        stop("Canal Y introuvable dans les données : ", canal_y,
+             "\nColonnes disponibles : ", paste(colnames(donnees_visu), collapse=", "))
+      }
+      
+      flowframe_apres <- self$post_viabilite[[nom_echantillon]]
+      total_evenements_apres <- nrow(flowCore::exprs(flowframe_apres))
+      pourcentage_conservation <- round((total_evenements_apres / total_evenements_avant) * 100, 1)
+      
+      lbl_x <- if (!is.null(self$get_label)) self$get_label(flowframe_avant, canal_x) else canal_x
+      lbl_y <- if (!is.null(self$get_label)) self$get_label(flowframe_avant, canal_y) else canal_y
+      
+      graphique_viabilite <- ggplot2::ggplot(
+        donnees_visu,
+        ggplot2::aes(x = .data[[canal_x]], y = .data[[canal_y]])
+      ) +
+        ggpointdensity::geom_pointdensity(size = 0.1, alpha = 0.4) +
+        ggplot2::scale_color_gradientn(
+          colours = c("darkblue", "blue", "cyan", "greenyellow", "yellow", "darkorange", "red")
+        ) +
+        ggplot2::geom_polygon(
+          data = coordonnees_gate,
+          ggplot2::aes(x = x, y = y),
+          fill = NA, color = "grey20", linewidth = 0.6
+        ) +
+        ggplot2::coord_cartesian(
+          xlim = range(donnees_globales[[canal_x]], na.rm = TRUE),
+          ylim = range(donnees_globales[[canal_y]], na.rm = TRUE)
+        ) +
+        ggplot2::theme_bw() +
+        ggplot2::labs(
+          title = paste("Retrait des cellules mortes :", nom_echantillon),
+          subtitle = paste0(
+            "Cellules vivantes : ", format(total_evenements_apres, big.mark = " "),
+            " | ", pourcentage_conservation, "%"
+          ),
+          x = lbl_x, y = lbl_y
+        ) +
+        ggplot2::theme(
+          legend.position = "none",
+          plot.title = ggplot2::element_text(face = "bold"),
+          plot.subtitle = ggplot2::element_text(color = "darkblue", size = 11)
+        )
+      
+      if (is.null(self$plots_viabilite)) self$plots_viabilite <- list()
+      self$plots_viabilite[[nom_echantillon]] <- graphique_viabilite
+      
+      return(graphique_viabilite)
+    },
+    
+    
+    transformation_arcsinh = function(canaux = "", echantillon = NULL, cofactor = 400) {
+      
+      noms_a_traiter <- if (is.null(echantillon)) names(self$echantillons_traites) else echantillon
+      
+      arc_sinh_transform <- function(x, cf) {
+        asinh(x / cf)
+      }
+      
+      self$cofactor_transformation <- cofactor
+      
+      for (nom in noms_a_traiter) {
+        ff <- if (!is.null(self$post_doublets_final[[nom]])) {
+          self$post_doublets_final[[nom]]
+        } else if (!is.null(self$post_debris[[nom]])) {
+          self$post_debris[[nom]]
+        } else {
+          self$echantillons_traites[[nom]]
+        }
+        
+        if (is.null(ff)) next
+        
+        matrice_exprs <- flowCore::exprs(ff)
+        
+        canaux_a_transformer <- if (canaux[1] == "") colnames(matrice_exprs) else canaux
+        canaux_existants <- intersect(canaux_a_transformer, colnames(matrice_exprs))
+        
+        if (length(canaux_existants) == 0) next
+        
+        matrice_exprs[, canaux_existants] <- arc_sinh_transform(matrice_exprs[, canaux_existants], cofactor)
+        
+        ff_transforme <- ff
+        flowCore::exprs(ff_transforme) <- matrice_exprs
+        
+        if (is.null(self$post_transformation)) self$post_transformation <- list()
+        self$post_transformation[[nom]] <- ff_transforme
+      }
+      
+      invisible(self)
+    },
+    
+    creer_gate = function(nom_gate, type = "polygon", axes = c("FSC-A", "SSC-A"), points = NULL) {
+      # Validation de la structure de stockage
+      if (is.null(self$gates_personnalisees)) self$gates_personnalisees <- list()
+      
+      # Création de la porte selon le type
+      if (type == "polygon") {
+        if (is.null(points) || nrow(points) < 3) stop("Un polygone nécessite au moins 3 points.")
+        gate <- flowCore::polygonGate(.gate = as.matrix(points[, 1:2]), filterId = nom_gate)
+        
+      } else if (type == "rectangle") {
+        if (is.null(points) || length(points) != 4) stop("Le rectangle nécessite c(minX, maxX, minY, maxY).")
+        gate <- flowCore::rectangleGate(filterId = nom_gate, 
+                                        .gate = matrix(c(points[1], points[2], points[3], points[4]), 
+                                                       ncol = 2, byrow = TRUE, 
+                                                       dimnames = list(NULL, axes)))
+      } else {
+        stop("Type de gate invalide : utilisez 'polygon' ou 'rectangle'.")
+      }
+      
+      # Sauvegarde
+      self$gates_personnalisees[[nom_gate]] <- list(gate = gate, axes = axes, type = type)
+      
+      message("Succès : Gate '", nom_gate, "' créée sur les axes ", paste(axes, collapse="/"), ".")
+      return(invisible(self))
     }
+    
+    
   ),
   
   private = list(df_control_file = NULL)
