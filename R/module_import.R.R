@@ -74,13 +74,13 @@ import_data_ui <- function(id) {
   )
 }
 
-import_data_server <- function(id, pipeline, pipeline_version) {
+import_data_server <- function(id, pipeline, pipeline_version,canaux) {
   moduleServer(id, function(input, output, session) {
     
     rv <- reactiveValues(
       r_df_mono            = NULL,
       r_df_ech             = NULL,
-      r_dictionnaire       = CANAUX_CONNUS,
+      r_dictionnaire      = canaux,
       r_matrice_marqueurs  = NULL,
       groupes              = list()
     )

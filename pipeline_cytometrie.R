@@ -27,6 +27,7 @@ CARROT <- R6Class(
     plots_gates = list(), # contient toutes les figures des gates (courbes de densité)
     S_matrix = NULL, # contient la matrice de spillover
     S_matrices_par_echantillon = list(), # contient les matrices de spillover par échantillon
+    comparaison_medianes = list(), # contient, par échantillon (ou "GLOBAL"), les médianes brutes positive/négative (et leur écart) mesurées avant/après compensation
     plots_compensation = list(), # contient toutes les figures biplots, avant et/ou après compensation
     
     # Variable de l'unmixing
@@ -48,9 +49,13 @@ CARROT <- R6Class(
     canaux_bordures = NULL, # Liste technique des canaux ou détecteurs ciblés pour l'analyse et le retrait des événements saturés aux bordures
     post_PeacoQC = list(), # Contient les données des fichiers FCS après le contrôle qualité de PeacoQC (retrait des anomalies de débit et d'instabilité du signal)
     post_flowAI = list(), # Contient les données des fichiers FCS après le contrôle qualité alternatif flowAI (vérification du débit, de la lueur et0 de la stabilité)
+    rapports_flowai = list(), # Contient, par échantillon, le chemin du dossier temporaire regroupant le rapport natif flowAI (HTML, TXT, PNG) généré par flow_auto_qc
+    parametres_peacoqc_utilises = NULL, # Mémorise les derniers réglages PeacoQC appliqués à la cohorte (pour affichage dans le résumé PDF)
+    parametres_flowai_utilises = NULL, # Mémorise les derniers réglages flowAI appliqués à la cohorte (pour affichage dans le résumé PDF)
     post_retrait_bordures = list(), # Stocke la matrice d'expression des échantillons nettoyée des signaux saturés (valeurs maximales ou minimales des détecteurs)
     gate_debris = list(), # Contient les coordonnées et les structures géométriques des fenêtres (gates) de sélection des cellules (retrait des débris en FSC vs SSC)
     post_debris = list(), # Stocke les données des échantillons filtrées où seuls les événements correspondants aux cellules (hors débris) ont été conservés
+    gates_history = list(), # Historique ordonné des gates nommés appliqués : list(nom_gate -> list(nom_echantillon -> list(polygone, cx, cy, post_data, n_avant, n_apres)))
     gate_doublets_FSC = list(), # Contient les coordonnées du gate de discrimination des doublets basé sur les paramètres du Forward Scatter (ex: FSC-A vs FSC-H)
     gate_doublets_SSC = list(), # Contient les coordonnées du gate de discrimination des doublets basé sur les paramètres du Side Scatter (ex: SSC-A vs SSC-H)
     post_doublets_FSC = list(), # Stocke les données des échantillons après l'élimination des doublets par le filtre FSC
@@ -61,9 +66,16 @@ CARROT <- R6Class(
     
     # Variables de Visualisation
     plots_peacoqc = list(), # contient toutes les figures après application de PeacoQC
+    plots_peacoqc_natif = list(), # contient les chemins des PNG diagnostiques natifs générés par PeacoQC::PeacoQC (bins retirés par canal)
+    plots_flowai = list(), # contient toutes les figures après application de flowAI (archivées pour réutilisation dans le résumé PDF d'export)
     plots_debris = list(), # contient toutes les figures après application du gate de débris
     plots_doublets = list(), # contient toutes les figures après application du gate de doublets
     plots_viabilite = list(), # contient toutes les figures après application du gate de viabilité
+    
+    # variables d'analyses
+    post_transformation = list(), # Stocke les données des échantillons après application de la transformation (ex: arcsinh)
+    cofactor_transformation = NULL,
+    canaux_transformes = list(),
     
     # variable 
     pipeline_callback = NULL,
@@ -106,7 +118,7 @@ CARROT <- R6Class(
       }
     },
     
-  
+    
     charger_fcs = function() {
       self$tubes_monomarques <- lapply(seq_len(nrow(self$chemins_monomarques)), function(i) {
         row <- self$chemins_monomarques[i, ]
@@ -144,26 +156,26 @@ CARROT <- R6Class(
     },
     
     update_pipeline = function(etape, nom_echantillon = NULL) { # méthode qui permet de savoir à quelle étape on se situe
-        if (is.null(self$pipeline_status)) self$pipeline_status <- list() 
-        horodatage <- format(Sys.time(), "%H:%M:%S") 
-        if (is.null(nom_echantillon)) { 
-          self$pipeline_status[[etape]] <- list(
-            statut = "Terminé", 
-            date = horodatage, 
-            portee = "Tous les échantillons"
-          )
-        } else {
-          if (is.null(self$pipeline_status[[etape]])) self$pipeline_status[[etape]] <- list()
-          self$pipeline_status[[etape]][[nom_echantillon]] <- list(
-            statut = "Terminé", 
-            date = horodatage
-          )
-        }
-        
-        if (is.function(self$pipeline_callback)) {
-          self$pipeline_callback(etape, nom_echantillon)
-        }
-      },
+      if (is.null(self$pipeline_status)) self$pipeline_status <- list() 
+      horodatage <- format(Sys.time(), "%H:%M:%S") 
+      if (is.null(nom_echantillon)) { 
+        self$pipeline_status[[etape]] <- list(
+          statut = "Terminé", 
+          date = horodatage, 
+          portee = "Tous les échantillons"
+        )
+      } else {
+        if (is.null(self$pipeline_status[[etape]])) self$pipeline_status[[etape]] <- list()
+        self$pipeline_status[[etape]][[nom_echantillon]] <- list(
+          statut = "Terminé", 
+          date = horodatage
+        )
+      }
+      
+      if (is.function(self$pipeline_callback)) {
+        self$pipeline_callback(etape, nom_echantillon)
+      }
+    },
     
     # ===========================
     # COMPENSATION (Conventionnel)
@@ -290,6 +302,7 @@ CARROT <- R6Class(
         med_pos <- apply(exprs_pos, 2, median, na.rm = TRUE) # Calcule la valeur médiane de fluorescence de la population positive pour l'ensemble des canaux
         med_neg <- apply(exprs_neg, 2, median, na.rm = TRUE) # Calcule la valeur médiane de fluorescence de la population négative pour l'ensemble des canaux
         delta_signal <- med_pos - med_neg # Soustrait la médiane négative de la médiane positive pour isoler le signal spécifique (fluorescence nette)
+        delta_signal <- pmax(delta_signal, 0)
         signal_principal <- delta_signal[canal_principal] # Isole l'intensité du signal net émis dans le canal primaire (le fluorophore correspondant au tube)
         if (is.na(signal_principal) || signal_principal <= 0) signal_principal <- 1e-5 # Sécurise le calcul en remplaçant un signal nul ou négatif par une valeur infime pour éviter une division par zéro
         S[canal_principal, ] <- delta_signal / signal_principal # Calcule le ratio de chevauchement spectral (spillover) pour tous les canaux par rapport au canal primaire
@@ -314,6 +327,66 @@ CARROT <- R6Class(
       return(self$S_matrices_par_echantillon[[nom_echantillon]]) # Renvoie la matrice de compensation individualisée et mise à jour pour cet échantillon
     }, 
     
+    comparer_medianes_spillover = function(nom_echantillon = NULL) { # Méthode calculant, canal par canal, les médianes brutes des populations positive et négative AVANT et APRÈS application de la matrice de compensation
+      matrice_utilisee <- if (!is.null(nom_echantillon) && !is.null(self$S_matrices_par_echantillon[[nom_echantillon]])) { # Recherche si une matrice individualisée existe pour l'échantillon demandé
+        self$S_matrices_par_echantillon[[nom_echantillon]] # Utilise la matrice personnalisée de cet échantillon si elle existe
+      } else {
+        self$S_matrix # Sinon utilise la matrice de spillover générale
+      }
+      if (is.null(matrice_utilisee)) stop("Veuillez d'abord calculer la matrice de spillover.") # Bloque le calcul si aucune matrice n'est disponible
+      
+      nombre_canaux <- length(self$canaux) # Évalue le nombre total de canaux d'acquisition actifs
+      mat_pos_avant   <- matrix(NA, nrow = nombre_canaux, ncol = nombre_canaux, dimnames = list(self$canaux, self$canaux)) # Médiane de la population positive AVANT compensation
+      mat_neg_avant   <- matrix(NA, nrow = nombre_canaux, ncol = nombre_canaux, dimnames = list(self$canaux, self$canaux)) # Médiane de la population négative AVANT compensation
+      mat_pos_apres   <- matrix(NA, nrow = nombre_canaux, ncol = nombre_canaux, dimnames = list(self$canaux, self$canaux)) # Médiane de la population positive APRÈS compensation
+      mat_neg_apres   <- matrix(NA, nrow = nombre_canaux, ncol = nombre_canaux, dimnames = list(self$canaux, self$canaux)) # Médiane de la population négative APRÈS compensation
+      mat_ecart_avant <- matrix(NA, nrow = nombre_canaux, ncol = nombre_canaux, dimnames = list(self$canaux, self$canaux)) # Écart brut (médiane positive - médiane négative) AVANT compensation, pour vérifier l'égalité des médianes
+      mat_ecart_apres <- matrix(NA, nrow = nombre_canaux, ncol = nombre_canaux, dimnames = list(self$canaux, self$canaux)) # Écart brut (médiane positive - médiane négative) APRÈS compensation, pour vérifier l'égalité des médianes
+      
+      for (canal_principal in self$canaux) { # Boucle sur chaque canal monomarqué disponible (une ligne de la matrice)
+        if (is.null(self$gates_positifs[[canal_principal]]) || is.null(self$gates_negatifs[[canal_principal]])) { # Vérifie que les gates ont bien été validés pour ce canal
+          stop(paste("Gates manquants pour :", canal_principal)) # Alerte si un gate est manquant
+        }
+        
+        fcs_pos_brut <- self$gates_positifs[[canal_principal]] # Population positive brute (non compensée) pour ce canal
+        fcs_neg_brut <- self$gates_negatifs[[canal_principal]] # Population négative brute (non compensée) pour ce canal
+        fcs_pos_comp <- flowCore::compensate(fcs_pos_brut, matrice_utilisee) # Applique la matrice de compensation à la population positive
+        fcs_neg_comp <- flowCore::compensate(fcs_neg_brut, matrice_utilisee) # Applique la matrice de compensation à la population négative
+        
+        calculer_medianes <- function(fcs_cible, fcs_ref_neg) { # Sous-fonction interne calculant les médianes brutes positive/négative, canal par canal
+          mat_exprs_cible <- flowCore::exprs(fcs_cible)[, self$canaux, drop = FALSE] # Extrait la matrice des intensités de fluorescence de la population positive
+          mat_exprs_neg   <- flowCore::exprs(fcs_ref_neg)[, self$canaux, drop = FALSE] # Extrait la matrice des intensités de fluorescence de la population négative
+          med_pos <- apply(mat_exprs_cible, 2, median, na.rm = TRUE) # Médiane de la population positive, pour l'ensemble des canaux
+          med_neg <- apply(mat_exprs_neg, 2, median, na.rm = TRUE) # Médiane de la population négative, pour l'ensemble des canaux
+          list(pos = round(med_pos, 2), neg = round(med_neg, 2), ecart = round(med_pos - med_neg, 3)) # Renvoie les médianes brutes (non bornées) ainsi que leur écart, utile pour le test d'égalité
+        }
+        
+        res_brut <- calculer_medianes(fcs_pos_brut, fcs_neg_brut) # Calcule les médianes brutes AVANT compensation
+        res_comp <- calculer_medianes(fcs_pos_comp, fcs_neg_comp) # Calcule les médianes brutes APRÈS compensation
+        
+        mat_pos_avant[canal_principal, ] <- res_brut$pos # Remplit la ligne "médiane positive avant compensation" pour ce canal
+        mat_neg_avant[canal_principal, ] <- res_brut$neg # Remplit la ligne "médiane négative avant compensation" pour ce canal
+        mat_pos_apres[canal_principal, ] <- res_comp$pos # Remplit la ligne "médiane positive après compensation" pour ce canal
+        mat_neg_apres[canal_principal, ] <- res_comp$neg # Remplit la ligne "médiane négative après compensation" pour ce canal
+        
+        mat_ecart_avant[canal_principal, ] <- res_brut$ecart # Écart brut médiane positive - médiane négative AVANT compensation (toutes unités confondues, positif ou négatif)
+        mat_ecart_apres[canal_principal, ] <- res_comp$ecart # Écart brut médiane positive - médiane négative APRÈS compensation : une compensation correcte donne un écart proche de 0
+        
+        mat_ecart_avant[canal_principal, canal_principal] <- NA # La diagonale correspond au signal réel du marqueur (et non à un spillover résiduel) : elle n'est pas concernée par le test d'égalité des médianes
+        mat_ecart_apres[canal_principal, canal_principal] <- NA # Idem après compensation : on neutralise la diagonale pour ne pas fausser la lecture du critère
+      }
+      
+      resultat <- list(
+        avant = list(pos = mat_pos_avant, neg = mat_neg_avant, ecart = mat_ecart_avant), # Médianes brutes positive/négative (+ écart) AVANT compensation
+        apres = list(pos = mat_pos_apres, neg = mat_neg_apres, ecart = mat_ecart_apres)  # Médianes brutes positive/négative (+ écart) APRÈS compensation
+      ) # Compile l'ensemble des résultats comparatifs
+      
+      cle <- if (!is.null(nom_echantillon)) nom_echantillon else "GLOBAL" # Clé de stockage : nom de l'échantillon ou "GLOBAL" si aucun échantillon n'est précisé
+      self$comparaison_medianes[[cle]] <- resultat # Archive le résultat pour un accès ultérieur (ex: affichage Shiny)
+      
+      return(resultat) # Renvoie la liste des résultats comparatifs
+    },
+    
     controler_monomarques = function(fichier_monomarque, canal_x, canal_y, max_points = 10000) { # Méthode générant un graphique biplot comparatif avant/après compensation pour contrôler le spillover
       if (is.null(canal_x) || canal_x == "" || is.null(canal_y) || canal_y == "") return(NULL) # Intercepte et arrête la fonction si l'un des deux canaux d'acquisition n'est pas renseigné
       fcs_brut_original  <- self$tubes_monomarques[[fichier_monomarque]] # Récupère le fichier d'acquisition FCS brut d'origine correspondant au tube monomarqué
@@ -329,8 +402,10 @@ CARROT <- R6Class(
         mat_exprs_neg   <- if(is.null(fcs_ref_neg)) mat_exprs_cible else flowCore::exprs(fcs_ref_neg) # Utilise la matrice de l'autocontrôle négatif approprié (interne ou externe)
         delta_observe <- median(mat_exprs_cible[indices_pos, canal_y], na.rm = TRUE) - median(mat_exprs_neg[indices_neg, canal_y], na.rm = TRUE) # Calcule le signal net reçu par le canal secondaire importun (canal Y)
         delta_source  <- median(mat_exprs_cible[indices_pos, canal_x], na.rm = TRUE) - median(mat_exprs_neg[indices_neg, canal_x], na.rm = TRUE) # Calcule le signal net reçu par le canal primaire légitime (canal X)
+        delta_observe <- max(delta_observe, 0, na.rm = TRUE) # Empêche toute valeur négative : un spillover ne peut pas être inférieur à 0
+        delta_source  <- max(delta_source, 0, na.rm = TRUE) # Idem pour le signal source, borné à 0
         if (is.na(delta_source) || delta_source == 0) return(0.00) # Évite une division par zéro si aucun signal n'est détecté dans le canal émetteur
-        return(round((delta_observe / delta_source) * 100, 2)) # Renvoie le ratio de spillover exprimé en pourcentage, arrondi à deux décimales
+        return(round((delta_observe / delta_source) * 100, 2)) # Renvoie le ratio de spillover exprimé en pourcentage, arrondi à deux décimales, toujours ≥ 0
       }
       
       tube_unstained_brut <- if(nom_tube_neg == "TUBE_UNSTAINED") self$tubes_monomarques[["TUBE_UNSTAINED"]] else NULL # Récupère le tube Unstained brut s'il s'agit de la référence négative globale
@@ -365,90 +440,114 @@ CARROT <- R6Class(
       return(gridExtra::grid.arrange(plot_avant, plot_apres, ncol = 2)) # Assemble et retourne les deux graphiques côte à côte au sein d'une seule figure combinée
     }, 
     
-    compenser = function(){ # Méthode appliquant la matrice de compensation sur l'ensemble des échantillons biologiques de la cohorte
-      self$echantillons_traites <- lapply(self$echantillons, function(fcs){ # Boucle itérative pour traiter chaque fichier FCS de patient individuellement
-        canaux_communs <- intersect(colnames(self$S_matrix), flowCore::colnames(fcs)) # Identifie par intersection les canaux de la matrice de spillover qui sont physiquement présents dans ce fichier FCS
-        sub_matrix <- self$S_matrix[canaux_communs, canaux_communs, drop = FALSE] # Extrait une sous-matrice de compensation adaptée aux seuls canaux détectés dans ce tube (sécurité anti-crash)
-        return(flowCore::compensate(fcs, sub_matrix)) # Applique l'algorithme de compensation linéaire pour corriger les fluorescences croisées et retourne le fichier nettoyé
-      }) 
-      names(self$echantillons_traites) <- names(self$echantillons) # Réaffecte les identifiants d'origine (noms des patients) à la nouvelle liste des fichiers FCS compensés
+    compenser = function() {
+      self$echantillons_traites <- lapply(names(self$echantillons), function(nom) {
+        fcs <- self$echantillons[[nom]]
+        
+        # Sélectionner la matrice : spécifique si elle existe, sinon globale
+        matrice_cible <- if (!is.null(self$S_matrices_par_echantillon[[nom]])) {
+          self$S_matrices_par_echantillon[[nom]]
+        } else {
+          self$S_matrix
+        }
+        
+        canaux_communs <- intersect(colnames(matrice_cible), flowCore::colnames(fcs))
+        sub_matrix <- matrice_cible[canaux_communs, canaux_communs, drop = FALSE]
+        
+        return(flowCore::compensate(fcs, sub_matrix))
+      })
+      names(self$echantillons_traites) <- names(self$echantillons)
     },
     
     visualiser_compensation = function(nom_echantillon, canal_x, canal_y, max_points = 10000, affichage = "Both") {
       local_trans <- self$trans_list
-      df_avant <- NULL
-      df_apres <- NULL
-      lim_x    <- c(0, 1) 
-      lim_y    <- c(0, 1)
-      label_x <- paste0(self$mapping_marqueurs[[canal_x]], " | ", canal_x)
-      label_y <- paste0(self$mapping_marqueurs[[canal_y]], " | ", canal_y)
+      fcs_source  <- self$echantillons[[nom_echantillon]]
       
-      if (affichage %in% c("Both", "Before compensation only")) {
-        req_fcs_avant <- self$echantillons[[nom_echantillon]]
-        if (!is.null(req_fcs_avant)) {
-          fcs_avant <- flowCore::transform(req_fcs_avant, local_trans)
-          mat_avant <- flowCore::exprs(fcs_avant)[, c(canal_x, canal_y), drop = FALSE]
-          nb_evenements      <- nrow(mat_avant)
-          taille_echantillon <- min(nb_evenements, max_points)
-          indices            <- sample(seq_len(nb_evenements), taille_echantillon)
-          df_avant <- as.data.frame(mat_avant[indices, , drop = FALSE])
-        }
+      # ── Cas "ALL" : retourne une liste nommée de plots (rendu géré côté Shiny) ──
+      if (canal_x == "ALL" || canal_y == "ALL") {
+        tous_canaux  <- flowCore::colnames(fcs_source)
+        canaux_fluo  <- tous_canaux[!grepl("FSC|SSC|Time", tous_canaux, ignore.case = TRUE)]
+        combinaisons <- expand.grid(x = canaux_fluo, y = canaux_fluo, stringsAsFactors = FALSE)
+        combinaisons <- combinaisons[combinaisons$x != combinaisons$y, ]
+        
+        plots_list <- lapply(seq_len(nrow(combinaisons)), function(i) {
+          self$visualiser_compensation(
+            nom_echantillon,
+            combinaisons$x[i],
+            combinaisons$y[i],
+            max_points,
+            affichage
+          )
+        })
+        plots_list <- Filter(Negate(is.null), plots_list)
+        if (length(plots_list) == 0) return(NULL)
+        # On retourne la liste brute : Shiny s'occupe de la mise en page scrollable
+        return(structure(plots_list, class = c("carrot_plots_list", "list")))
       }
       
-      if (affichage %in% c("Both", "After compensation only")) {
-        req_fcs_apres <- self$echantillons_traites[[nom_echantillon]]
-        if (!is.null(req_fcs_apres)) {
-          fcs_apres <- flowCore::transform(req_fcs_apres, local_trans)
-          mat_apres <- flowCore::exprs(fcs_apres)[, c(canal_x, canal_y), drop = FALSE]
-          if (is.null(df_avant)) { 
-            nb_evenements      <- nrow(mat_apres)
-            taille_echantillon <- min(nb_evenements, max_points)
-            indices            <- sample(seq_len(nb_evenements), taille_echantillon)
-          }
-          df_apres <- as.data.frame(mat_apres[indices, , drop = FALSE])
-        }
+      # ── Cas simple : une paire de canaux ──
+      label_x <- self$get_label(fcs_source, canal_x)
+      label_y <- self$get_label(fcs_source, canal_y)
+      
+      # Extraction sécurisée + transformation + sous-échantillonnage
+      extraire_matrice <- function(fcs, cx, cy) {
+        if (is.null(fcs)) return(NULL)
+        if (!(cx %in% flowCore::colnames(fcs)) || !(cy %in% flowCore::colnames(fcs))) return(NULL)
+        
+        fcs_trans <- flowCore::transform(fcs, local_trans)
+        mat       <- flowCore::exprs(fcs_trans)[, c(cx, cy), drop = FALSE]
+        idx       <- sample(seq_len(nrow(mat)), min(nrow(mat), max_points))
+        as.data.frame(mat[idx, , drop = FALSE])
       }
       
-      all_x <- c(df_avant[[canal_x]], df_apres[[canal_x]])
-      all_y <- c(df_avant[[canal_y]], df_apres[[canal_y]])
-      if (length(all_x) > 0) lim_x <- range(all_x, na.rm = TRUE)
-      if (length(all_y) > 0) lim_y <- range(all_y, na.rm = TRUE)
+      df_avant <- if (affichage %in% c("Both", "Before compensation only"))
+        extraire_matrice(self$echantillons[[nom_echantillon]],         canal_x, canal_y) else NULL
       
-      creer_plot = function(donnees_df, titre) {
+      df_apres <- if (affichage %in% c("Both", "After compensation only"))
+        extraire_matrice(self$echantillons_traites[[nom_echantillon]], canal_x, canal_y) else NULL
+      
+      # Limites communes pour que les deux plots soient comparables
+      all_data <- rbind(df_avant, df_apres)
+      if (!is.null(all_data) && nrow(all_data) > 0) {
+        lim_x <- range(all_data[, 1], na.rm = TRUE)
+        lim_y <- range(all_data[, 2], na.rm = TRUE)
+      } else {
+        lim_x <- c(0, 1)
+        lim_y <- c(0, 1)
+      }
+      
+      creer_plot <- function(donnees_df, titre) {
         if (is.null(donnees_df) || nrow(donnees_df) == 0) return(NULL)
-        colnames(donnees_df)[1:2] <- c("Axe_X_Data", "Axe_Y_Data")
+        colnames(donnees_df) <- c("X", "Y")
         
-        ggplot(donnees_df, aes(x = Axe_X_Data, y = Axe_Y_Data)) +
+        ggplot2::ggplot(donnees_df, ggplot2::aes(x = X, y = Y)) +
           ggpointdensity::geom_pointdensity(size = 0.2, alpha = 0.5) +
-          scale_color_gradientn(colours = c("darkblue", "blue", "cyan", "greenyellow", "yellow", "darkorange", "red")) +
-          coord_cartesian(xlim = lim_x, ylim = lim_y) +
-          theme_bw() + 
-          theme(
-            legend.position = "none",
-            aspect.ratio    = 1 
+          ggplot2::scale_color_gradientn(
+            colours = c("darkblue", "blue", "cyan", "greenyellow", "yellow", "darkorange", "red")
           ) +
-          labs(title = titre, x = label_x, y = label_y) 
+          ggplot2::coord_cartesian(xlim = lim_x, ylim = lim_y) +
+          ggplot2::theme_bw() +
+          ggplot2::theme(legend.position = "none", aspect.ratio = 1) +
+          ggplot2::labs(title = titre, x = label_x, y = label_y)
       }
       
-      if (is.null(self$plots_compensation) || !is.list(self$plots_compensation)) {
-        self$plots_compensation <- list()
-      }
+      plot_avant <- creer_plot(df_avant, paste(nom_echantillon, "- Avant"))
+      plot_apres <- creer_plot(df_apres, paste(nom_echantillon, "- Après"))
+      
+      # Rendu selon le nombre de plots disponibles
       if (affichage == "Both") {
-        plot_avant <- creer_plot(df_avant, paste(nom_echantillon, "- Before compensation"))
-        plot_apres <- creer_plot(df_apres, paste(nom_echantillon, "- After compensation"))
-        
-        grille_complete <- gridExtra::grid.arrange(plot_avant, plot_apres, ncol = 2)
-        self$plots_compensation[[nom_echantillon]] <- grille_complete
-        return(grille_complete)
-      } else if (affichage == "Before compensation only") {
-        plot_avant <- creer_plot(df_avant, paste(nom_echantillon, "- Before compensation"))
-        self$plots_compensation[[nom_echantillon]] <- plot_avant
-        return(plot_avant)
-      } else if (affichage == "After compensation only") {
-        plot_apres <- creer_plot(df_apres, paste(nom_echantillon, "- After compensation"))
-        self$plots_compensation[[nom_echantillon]] <- plot_apres
-        return(plot_apres)
+        # Si l'un des deux est NULL (ex: compensation pas encore appliquée),
+        # on affiche seulement ce qui est disponible
+        plots_valides <- Filter(Negate(is.null), list(plot_avant, plot_apres))
+        if (length(plots_valides) == 0) return(NULL)
+        if (length(plots_valides) == 1) return(plots_valides[[1]])
+        return(gridExtra::arrangeGrob(grobs = plots_valides, ncol = 2))
       }
+      
+      if (affichage == "Before compensation only") return(plot_avant)
+      if (affichage == "After compensation only")  return(plot_apres)
+      
+      return(NULL)
     },
     
     exporter_fcs_compenses = function(noms_echantillons = "all", dossier_export = ".") { # Méthode permettant d'écrire et de sauvegarder les fichiers FCS compensés sur le disque dur
@@ -479,6 +578,121 @@ CARROT <- R6Class(
         flowCore::write.FCS(fcs_obj, filename = nom_fcs) # Enregistre physiquement le nouvel objet flowFrame au format binaire FCS 3.0 ou 3.1 standard sur le disque dur
       } 
       message(paste(length(tubes_a_exporter), "fichier(s) FCS compensé(s) exporté(s) dans :", dossier_export)) # Affiche un message de confirmation récapitulatif dans la console de commande
+    },
+    
+    exporter_fcs_qc = function(noms_echantillons = "all", sources = c("peacoqc", "flowai"), dossier_export = ".") { # Méthode permettant d'écrire sur le disque les fichiers FCS ayant subi le contrôle qualité PeacoQC et/ou flowAI
+      sources <- intersect(sources, c("peacoqc", "flowai")) # Filtre les sources demandées pour ne garder que les valeurs reconnues ("peacoqc" et/ou "flowai")
+      if (length(sources) == 0) {
+        stop("Aucune source de contrôle qualité valide sélectionnée (attendu : 'peacoqc' et/ou 'flowai').")
+      }
+      
+      liste_sources <- list(peacoqc = self$post_PeacoQC, flowai = self$post_flowAI) # Regroupe les deux listes de résultats QC disponibles pour un accès homogène
+      suffixes      <- list(peacoqc = "_PeacoQC", flowai = "_flowAI") # Associe à chaque source le suffixe de nommage utilisé pour distinguer les fichiers exportés
+      
+      noms_disponibles <- unique(unlist(lapply(sources, function(s) names(liste_sources[[s]])))) # Recense l'ensemble des échantillons disponibles, toutes sources sélectionnées confondues
+      if (length(noms_disponibles) == 0) {
+        stop("Aucun résultat PeacoQC ou flowAI disponible : exécutez d'abord le contrôle qualité correspondant.")
+      }
+      
+      tubes_a_exporter <- if (length(noms_echantillons) == 1 && noms_echantillons == "all") { # Si l'utilisateur souhaite exporter la totalité des échantillons traités
+        noms_disponibles # Sélectionne l'intégralité des échantillons disponibles pour les sources demandées
+      } else { # Sinon, si une liste restreinte de noms a été fournie par l'utilisateur
+        intersect(noms_echantillons, noms_disponibles) # Identifie par intersection les échantillons demandés qui existent réellement en mémoire
+      }
+      if (length(tubes_a_exporter) == 0) {
+        stop("Aucun des échantillons spécifiés n'a été trouvé dans les résultats PeacoQC/flowAI.")
+      }
+      
+      if (!dir.exists(dossier_export)) { # Vérifie si le dossier de destination spécifié n'existe pas encore physiquement sur le disque
+        dir.create(dossier_export, recursive = TRUE) # Crée automatiquement l'arborescence des dossiers manquants pour éviter une erreur d'écriture
+      }
+      
+      fichiers_ecrits <- character(0) # Accumule au fil de la boucle les chemins des fichiers FCS effectivement écrits sur le disque
+      
+      for (nom in tubes_a_exporter) { # Boucle de traitement itérative pour chaque échantillon sélectionné
+        for (source in sources) { # Boucle interne pour chaque source de contrôle qualité demandée (PeacoQC et/ou flowAI)
+          fcs_obj <- liste_sources[[source]][[nom]] # Extrait l'objet flowFrame nettoyé correspondant à cet échantillon et cette source
+          if (is.null(fcs_obj)) next # Sécurité : passe au suivant si cet échantillon n'a pas de résultat pour cette source précise
+          
+          nom_fichier_propre <- paste0(gsub("[^a-zA-Z0-9_]", "_", nom), suffixes[[source]], ".fcs") # Construit un nom de fichier sûr, distinguant la source d'origine du nettoyage
+          chemin_fcs <- file.path(dossier_export, nom_fichier_propre) # Concatène le chemin du dossier et le nom du fichier pour obtenir l'adresse d'écriture finale
+          flowCore::write.FCS(fcs_obj, filename = chemin_fcs) # Enregistre physiquement l'objet flowFrame nettoyé au format binaire FCS standard sur le disque dur
+          fichiers_ecrits <- c(fichiers_ecrits, chemin_fcs) # Ajoute le chemin du fichier fraîchement écrit à la liste de suivi
+        }
+      }
+      
+      message(paste(length(fichiers_ecrits), "fichier(s) FCS post-QC exporté(s) dans :", dossier_export)) # Affiche un message de confirmation récapitulatif dans la console de commande
+      invisible(fichiers_ecrits) # Renvoie de manière invisible la liste des chemins écrits (utile pour zipper ensuite depuis Shiny)
+    },
+    
+    generer_pdf_resume_qc = function(chemin_pdf, noms_echantillons = NULL, sources = c("peacoqc", "flowai")) { # Méthode générant un PDF multi-pages regroupant toutes les figures de contrôle qualité et les paramètres utilisés
+      sources <- intersect(sources, c("peacoqc", "flowai")) # Filtre les sources demandées pour ne garder que les valeurs reconnues
+      if (length(sources) == 0) {
+        stop("Aucune source de contrôle qualité valide sélectionnée (attendu : 'peacoqc' et/ou 'flowai').")
+      }
+      
+      if (is.null(noms_echantillons) || (length(noms_echantillons) == 1 && noms_echantillons == "all")) { # Si aucune sélection précise n'est fournie
+        noms_echantillons <- unique(c(names(self$post_PeacoQC), names(self$post_flowAI))) # Reprend l'ensemble des échantillons ayant un résultat PeacoQC et/ou flowAI
+      }
+      if (length(noms_echantillons) == 0) {
+        stop("Aucun échantillon PeacoQC ou flowAI disponible pour générer le résumé.")
+      }
+      
+      formater_parametres <- function(titre, params) { # Fonction utilitaire transformant une liste de réglages nommés en un bloc de texte lisible pour la page de garde des paramètres
+        if (is.null(params) || length(params) == 0) return(paste0(titre, "\n(paramètres non disponibles)")) # Sécurité si aucun réglage n'a encore été archivé
+        lignes <- vapply(names(params), function(n) { # Parcourt chaque réglage pour produire une ligne "nom : valeur"
+          paste0("  - ", n, " : ", paste(params[[n]], collapse = ", ")) # Concatène le nom du paramètre et sa valeur (gère aussi les vecteurs comme ChExcludeFS)
+        }, character(1))
+        paste(c(titre, lignes), collapse = "\n") # Assemble le titre et l'ensemble des lignes de paramètres en un seul bloc de texte
+      }
+      
+      grDevices::pdf(chemin_pdf, width = 11, height = 8.5) # Ouvre un nouveau périphérique graphique PDF multi-pages à l'emplacement demandé
+      on.exit(grDevices::dev.off(), add = TRUE) # Garantit la fermeture propre du périphérique PDF même en cas d'erreur en cours de génération
+      
+      # Page de garde récapitulant les paramètres utilisés pour chaque méthode sélectionnée
+      grid::grid.newpage() # Initialise une page blanche pour la synthèse textuelle des réglages
+      blocs_params <- character(0) # Accumule les blocs de texte des paramètres pour chaque source demandée
+      if ("peacoqc" %in% sources) {
+        blocs_params <- c(blocs_params, formater_parametres("Paramètres PeacoQC utilisés :", self$parametres_peacoqc_utilises))
+      }
+      if ("flowai" %in% sources) {
+        blocs_params <- c(blocs_params, formater_parametres("Paramètres flowAI utilisés :", self$parametres_flowai_utilises))
+      }
+      texte_page_garde <- paste(c(
+        paste0("Résumé du contrôle qualité — ", format(Sys.time(), "%Y-%m-%d %H:%M")), "",
+        paste0("Échantillons inclus (", length(noms_echantillons), ") : ", paste(noms_echantillons, collapse = ", ")), "",
+        blocs_params
+      ), collapse = "\n") # Assemble titre, liste des échantillons et blocs de paramètres en un seul texte multi-lignes
+      grid::grid.text(texte_page_garde, x = 0.05, y = 0.95, just = c("left", "top"), # Affiche le texte de synthèse en haut à gauche de la page PDF
+                      gp = grid::gpar(fontsize = 10, fontfamily = "mono")) # Utilise une police à chasse fixe pour un alignement propre des paramètres
+      
+      # Une page par échantillon et par source sélectionnée, contenant la figure de diagnostic correspondante
+      for (nom in noms_echantillons) { # Boucle sur chaque échantillon à documenter dans le résumé
+        if ("peacoqc" %in% sources && !is.null(self$post_PeacoQC[[nom]])) { # Si un résultat PeacoQC existe pour cet échantillon
+          graphique <- self$plots_peacoqc[[nom]] # Récupère la figure déjà archivée si l'utilisateur l'a préalablement visualisée dans l'onglet PeacoQC
+          if (is.null(graphique)) { # Si la figure n'a encore jamais été générée pour cet échantillon
+            graphique <- tryCatch(self$visualiser_peacoqc(nom_echantillon = nom), error = function(e) NULL) # Génère la figure à la volée en cas d'absence
+          }
+          if (!is.null(graphique)) print(graphique) # Insère la figure PeacoQC dans une nouvelle page du PDF
+          
+          chemin_png <- self$plots_peacoqc_natif[[nom]] # Récupère le chemin du rapport diagnostique natif PNG généré par PeacoQC::PeacoQC
+          if (!is.null(chemin_png) && file.exists(chemin_png)) { # Si ce PNG natif est disponible sur le disque
+            image_native <- png::readPNG(chemin_png) # Charge le PNG natif en mémoire sous forme de matrice de pixels
+            grid::grid.newpage() # Ouvre une nouvelle page dédiée au rapport natif
+            grid::grid.raster(image_native) # Dessine l'image du rapport natif PeacoQC sur toute la page
+          }
+        }
+        
+        if ("flowai" %in% sources && !is.null(self$post_flowAI[[nom]])) { # Si un résultat flowAI existe pour cet échantillon
+          graphique <- self$plots_flowai[[nom]] # Récupère la figure déjà archivée si l'utilisateur l'a préalablement visualisée dans l'onglet flowAI
+          if (is.null(graphique)) { # Si la figure n'a encore jamais été générée pour cet échantillon
+            graphique <- tryCatch(self$visualiser_flowai(nom_echantillon = nom), error = function(e) NULL) # Génère la figure à la volée en cas d'absence
+          }
+          if (!is.null(graphique)) print(graphique) # Insère la figure flowAI dans une nouvelle page du PDF
+        }
+      }
+      
+      invisible(chemin_pdf) # Renvoie de manière invisible le chemin du PDF généré, prêt à être proposé au téléchargement depuis Shiny
     },
     
     sauvegarder_session_rds = function(nom_fichier = "Compensation_Session_Complete.rds") { # Méthode permettant de sauvegarder l'intégralité de l'état et des résultats de la session d'analyse dans un fichier binaire R (.rds)
@@ -555,7 +769,7 @@ CARROT <- R6Class(
       return(verification) # Renvoie l'objet contenant le bilan de l'audit pour permettre son exploitation ou son affichage dans Shiny
     }, 
     
-  # définition des gates 
+    # définition des gates 
     
     definir_gates_landmarks = function(control_name, n.cells = 2000, percentile = 70, 
                                        grid.n = 100, bandwidth.factor = 1, 
@@ -658,7 +872,7 @@ CARROT <- R6Class(
     },
     
     charger_et_nettoyer = function() { # Méthode chargeant les fichiers témoins et exécutant le nettoyage algorithmique des signaux de fluorescence
-
+      
       if (is.null(self$gates) || length(self$gates) == 0) { # Détecte si aucune structure géométrique de gate n'a été préalablement calculée ou enregistrée
         message("Aucune gate définie. Les fichiers seront traités sans filtrage spatial.") # Alerte l'utilisateur que l'analyse se fera sur la totalité des événements du fichier binaire
       } 
@@ -670,14 +884,14 @@ CARROT <- R6Class(
       old_wd <- getwd() # Mémorise le chemin du répertoire de travail actuel de la session R avant de basculer
       setwd(dossier_figures) # Déplace temporairement le répertoire de travail de R vers le dossier d'export des figures pour y forcer l'écriture des fichiers images d'AutoSpectral
       on.exit(setwd(old_wd)) # Configure une sécurité forçant R à restaurer le répertoire de travail initial dès que la fonction se termine (qu'elle réussisse ou plante)
-
+      
       flow_res <- AutoSpectral::define.flow.control( # Initialise l'objet de contrôle de flux en associant les fichiers FCS, les configurations de marqueurs et les structures géométriques
         control.dir = dossier_fcs, # Spécifie le répertoire source hébergeant les fichiers d'acquisitions de cytométrie spectrale
         control.def.file = file.path(self$dossier_racine, self$asp_control_file), # Spécifie le chemin d'accès absolu vers le fichier CSV de configuration technique de l'expérience
         asp = self$asp_config, # Fournit la liste des constantes techniques liée au modèle de cytomètre configuré
         gate.list = if(length(self$gates) > 0) self$gates else NULL # Injecte la liste des gates calculés s'ils existent, sinon transmet la valeur NULL
       ) 
-
+      
       flow_cleaned <- AutoSpectral::clean.controls( # Déclenche l'algorithme de nettoyage et de normalisation mathématique des spectres d'autofluorescence
         flow.control = flow_res, # Fournit l'objet de contrôle de flux initialisé à l'étape précédente
         asp = self$asp_config, # Transmet la configuration technique de l'appareil pour guider le traitement des signaux
@@ -885,38 +1099,38 @@ CARROT <- R6Class(
       } 
       message("Chargement terminé : ", length(fichiers), " échantillons importés depuis ", dossier) # Affiche un bilan chiffré du succès de l'importation dans la console R
     }, 
-
+    
     get_chemins_figures = function(control_name) { # Méthode récupérant le chemin d'accès local des graphiques PNG de contrôle qualité générés pour le gating d'un témoin
       dossier <- file.path(self$dossier_racine, "figure_gate") # Construit le chemin absolu vers le répertoire de stockage des images de fenêtrage
       if (!dir.exists(dossier)) return(NULL) # Sécurité : retourne immédiatement NULL si le dossier des figures n'a pas encore été créé
       list.files(dossier, pattern=paste0(control_name, ".*\\.png$"), full.names=TRUE) # Recherche et renvoie le chemin complet de toutes les images PNG dont le nom commence par le témoin spécifié
     },
     
-  visualiser_unmixing = function(nom_fichier_fcs, canal_x, canal_y, cofacteur = 150, max_points = 10000) { # Méthode générant un biplot de densité pour inspecter la qualité du démixage spectral entre deux fluorophores déconvolués
-    fcs_unmixed <- self$echantillons_traites[[nom_fichier_fcs]] # Extrait le fichier FCS démixé (unmixed) de la mémoire de l'objet R6
-    if (is.null(fcs_unmixed)) stop("Fichier introuvable en mémoire.") # Sécurité : interrompt l'exécution si l'échantillon ciblé n'a pas été chargé ou traité
-    trans_list <- flowCore::transformList(c(canal_x, canal_y), flowCore::arcsinhTransform(a = 0, b = 1/cofacteur, c = 0)) # Construit dynamiquement l'opérateur de transformation mathématique Arcsinh adapté au cofacteur choisi pour les deux canaux cibles
-    mat <- flowCore::exprs(flowCore::transform(fcs_unmixed, trans_list))[, c(canal_x, canal_y)] # Applique la transformation Arcsinh et isole la matrice des intensités pour le couple de marqueurs spécifié
-    if (!is.null(self$seed)) set.seed(self$seed)
-    indices <- sample(seq_len(nrow(mat)), min(nrow(mat), max_points)) # Tire au sort de manière aléatoire un sous-échantillon d'événements pour fluidifier le rendu graphique
-    df <- as.data.frame(mat[indices, ]) # Convertit la matrice filtrée en tableau de données R standard exploitable par ggplot2
-    colnames(df) <- c("Axe_X", "Axe_Y") # Uniformise le nom des colonnes pour faciliter l'affectation des variables esthétiques
-    
-    graphique_unmixing <- ggplot(df, aes(x = Axe_X, y = Axe_Y)) + # Initialise la figure graphique biplot
-      ggpointdensity::geom_pointdensity(size = 0.2, alpha = 0.5) + # Dessine un nuage de points dont la couleur dépend de la densité locale de cellules (évite l'effet de saturation visuelle)
-      scale_color_gradientn( # Configure la palette colorimétrique pour exprimer le gradient de concentration cellulaire
-        colours = c("darkblue", "blue", "cyan", "greenyellow", "yellow", "darkorange", "red"), # Applique un dégradé pseudo-spectral standard allant du bleu (faible densité) au rouge (forte densité)
-        name = "Densité" # Définit le titre affiché au-dessus de la légende de l'échelle colorimétrique
-      ) + 
-      theme_bw() + # Applique un arrière-plan blanc épuré avec une grille de lecture grise discrète
-      labs( # Configure les textes informatifs entourant la figure
-        title = paste("Résultat après Unmixing :", nom_fichier_fcs), # Génère un titre dynamique identifiant précisément le fichier FCS traité
-        x = self$get_label(fcs_unmixed, canal_x), # Extrait et affiche le libellé biologique complet du paramètre X (ex: "CD4") via la méthode get_label
-        y = self$get_label(fcs_unmixed, canal_y) # Extrait et affiche le libellé biologique complet du paramètre Y (ex: "CD8") via la méthode get_label
-      ) 
-    
-    return(graphique_unmixing) # Renvoie l'objet graphique ggplot2 complet, prêt pour affichage immédiat ou intégration dans une interface UI Shiny
-  },
+    visualiser_unmixing = function(nom_fichier_fcs, canal_x, canal_y, cofacteur = 150, max_points = 10000) { # Méthode générant un biplot de densité pour inspecter la qualité du démixage spectral entre deux fluorophores déconvolués
+      fcs_unmixed <- self$echantillons_traites[[nom_fichier_fcs]] # Extrait le fichier FCS démixé (unmixed) de la mémoire de l'objet R6
+      if (is.null(fcs_unmixed)) stop("Fichier introuvable en mémoire.") # Sécurité : interrompt l'exécution si l'échantillon ciblé n'a pas été chargé ou traité
+      trans_list <- flowCore::transformList(c(canal_x, canal_y), flowCore::arcsinhTransform(a = 0, b = 1/cofacteur, c = 0)) # Construit dynamiquement l'opérateur de transformation mathématique Arcsinh adapté au cofacteur choisi pour les deux canaux cibles
+      mat <- flowCore::exprs(flowCore::transform(fcs_unmixed, trans_list))[, c(canal_x, canal_y)] # Applique la transformation Arcsinh et isole la matrice des intensités pour le couple de marqueurs spécifié
+      if (!is.null(self$seed)) set.seed(self$seed)
+      indices <- sample(seq_len(nrow(mat)), min(nrow(mat), max_points)) # Tire au sort de manière aléatoire un sous-échantillon d'événements pour fluidifier le rendu graphique
+      df <- as.data.frame(mat[indices, ]) # Convertit la matrice filtrée en tableau de données R standard exploitable par ggplot2
+      colnames(df) <- c("Axe_X", "Axe_Y") # Uniformise le nom des colonnes pour faciliter l'affectation des variables esthétiques
+      
+      graphique_unmixing <- ggplot(df, aes(x = Axe_X, y = Axe_Y)) + # Initialise la figure graphique biplot
+        ggpointdensity::geom_pointdensity(size = 0.2, alpha = 0.5) + # Dessine un nuage de points dont la couleur dépend de la densité locale de cellules (évite l'effet de saturation visuelle)
+        scale_color_gradientn( # Configure la palette colorimétrique pour exprimer le gradient de concentration cellulaire
+          colours = c("darkblue", "blue", "cyan", "greenyellow", "yellow", "darkorange", "red"), # Applique un dégradé pseudo-spectral standard allant du bleu (faible densité) au rouge (forte densité)
+          name = "Densité" # Définit le titre affiché au-dessus de la légende de l'échelle colorimétrique
+        ) + 
+        theme_bw() + # Applique un arrière-plan blanc épuré avec une grille de lecture grise discrète
+        labs( # Configure les textes informatifs entourant la figure
+          title = paste("Résultat après Unmixing :", nom_fichier_fcs), # Génère un titre dynamique identifiant précisément le fichier FCS traité
+          x = self$get_label(fcs_unmixed, canal_x), # Extrait et affiche le libellé biologique complet du paramètre X (ex: "CD4") via la méthode get_label
+          y = self$get_label(fcs_unmixed, canal_y) # Extrait et affiche le libellé biologique complet du paramètre Y (ex: "CD8") via la méthode get_label
+        ) 
+      
+      return(graphique_unmixing) # Renvoie l'objet graphique ggplot2 complet, prêt pour affichage immédiat ou intégration dans une interface UI Shiny
+    },
     
     visualiser_figures = function(dossier_nom) { # Méthode compilant et affichant dynamiquement les images de diagnostic (PNG/JPEG) d'un dossier dans le volet de visualisation d'RStudio
       chemin_dossier <- file.path(self$dossier_racine, dossier_nom) # Construit le chemin absolu standardisé vers le sous-répertoire d'images cible (ex: "figure_gate")
@@ -937,744 +1151,1051 @@ CARROT <- R6Class(
     #       ️ SECTION PRÉ-TRAITEMENT
     # ============================================================
     
-  get_derniere_source = function() {
-    if (!is.null(self$post_retrait_bordures) && length(self$post_retrait_bordures) > 0) {
-      return(self$post_retrait_bordures)
-    } 
-    if (!is.null(self$post_PeacoQC) && length(self$post_PeacoQC) > 0) {
-      return(self$post_PeacoQC)  # ✗ TYPO : était self$post_PeacoQ (manque C)
-    }
-    if (!is.null(self$post_flowAI) && length(self$post_flowAI) > 0) {
-      return(self$post_flowAI)
-    }
-    # ✗ AVANT : retournait echantillons_traites (vide avant transformation)
-    # ✓ APRÈS : remonte à echantillons (les données brutes chargées)
-    if (!is.null(self$echantillons_traites) && length(self$echantillons_traites) > 0) {
-      return(self$echantillons_traites)
-    }
-    return(self$echantillons)  # fallback ultime = données brutes
-  },
-    
-    appliquer_peacoqc = function(dossier_rapports = NULL, reglages_specifiques = list()) { # Méthode appliquant l'algorithme PeacoQC pour filtrer et éliminer les anomalies d'instabilité du flux fluidique au cours du temps
-      parametres_par_defaut <- list( # Initialise la liste des hyperparamètres statistiques de référence de PeacoQC
-        min_cells = 150, max_bins = 100, step = 500, MAD = 6, # Définit les seuils de cellules minimales, de fenêtres temporelles, de pas et de l'écart absolu à la médiane (MAD)
-        IT_limit = 0.6, consecutive_bins = 5, remove_zeros = FALSE, # Définit la limite d'intervalle de temps (IT) et les tolérances pour la détection de dérive du signal
-        force_IT = 150, peak_removal = 1/3, min_nr_bins_peakdetection = 10 # Fixe les critères d'exclusion des pics de forte densité suspectés d'être des agrégats ou des micro-clogging
-      ) 
-      config_qc <- utils::modifyList(parametres_par_defaut, reglages_specifiques) # Écrase de manière réactive les constantes par défaut si l'utilisateur fournit des réglages personnalisés
+    get_derniere_source = function() {
+      # 1. Étapes de transformation et gating final
+      if (!is.null(self$post_transformation) && length(self$post_transformation) > 0) return(self$post_transformation)
+      if (!is.null(self$post_viabilite) && length(self$post_viabilite) > 0) return(self$post_viabilite)
       
-      self$post_PeacoQC <- lapply(names(self$echantillons_traites), function(nom) { # Boucle vectorisée itérant sur chaque échantillon FCS de la cohorte pour appliquer le filtrage qualité
-        message("Exécution PeacoQC sur : ", nom) # Affiche une notification de suivi en temps réel dans la console R
-        ff_actuel <- self$echantillons_traites[[nom]] # Extrait l'objet flowFrame (les données cellulaires) correspondant à l'itération en cours
-        vrai_canal_temps <- grep("time", colnames(ff_actuel), value = TRUE, ignore.case = TRUE)[1] # Détecte dynamiquement l'indice ou le libellé exact du paramètre temporel dans le fichier binaire (ex: "Time" ou "time")
-        if (is.na(vrai_canal_temps)) vrai_canal_temps <- "Time" # Sécurité : attribue le nom standard par défaut si aucune chaîne similaire n'a été détectée
-        
-        res <- PeacoQC::PeacoQC( # Déclenche la routine d'analyse mathématique de régularité fluidique du package PeacoQC
-          ff                     = ff_actuel, # Transmet l'objet flowFrame contenant les expressions de la cellule active
-          channels               = self$canaux, # Injecte la liste des canaux de fluorescence sur lesquels appliquer le contrôle qualité de signal
-          determine_good_cells   = "all", # Configure l'algorithme pour évaluer l'intégrité de la totalité des événements de l'échantillon
-          transform              = FALSE, # Désactive la transformation interne des données, celles-ci devant être déjà prétraitées ou démixées
-          time_channel_parameter = vrai_canal_temps, # Indique le canal temporel détecté nécessaire pour séquencer les mesures
-          save_fcs               = FALSE, # Désactive l'écriture automatique d'un fichier physique sur le disque pour optimiser la mémoire vive
-          min_cells              = config_qc$min_cells, # Injecte la valeur minimale requise de cellules par bloc d'analyse
-          max_bins               = config_qc$max_bins, # Injecte le nombre maximal de fenêtres temporelles (bins) autorisées pour découper l'acquisition
-          step                   = config_qc$step, # Injecte la taille du pas d'analyse glissant pour le calcul des variations de signal
-          MAD                    = config_qc$MAD, # Injecte le multiplicateur de l'écart absolu à la médiane pour définir les limites de tolérance
-          IT_limit               = config_qc$IT_limit, # Injecte la borne critique de l'indice d'intervalle de temps pour l'exclusion des débits irréguliers
-          consecutive_bins       = config_qc$consecutive_bins, # Nombre maximal de fenêtres successives déviantes tolérées avant élimination en bloc
-          remove_zeros           = config_qc$remove_zeros, # Active ou non le retrait algorithmique précoce des valeurs d'intensités nulles ou négatives
-          force_IT               = config_qc$force_IT, # Applique une contrainte stricte sur le calcul de la distribution du débit
-          peak_removal           = config_qc$peak_removal, # Fixe la fraction de tolérance pour l'isolement et la suppression des pics de bruit de fond
-          min_nr_bins_peakdetection = config_qc$min_nr_bins_peakdetection, # Nombre minimal de bins requis pour valider mathématiquement un pic d'anomalie
-          plot                   = FALSE, # Désactive la création en arrière-plan d'images de contrôle pour gagner en vitesse de calcul
-          report                 = FALSE # Désactive la génération automatique du fichier texte de rapport d'analyse
-        ) 
-        return(res$FinalFF) # Extrait et isole uniquement l'objet flowFrame purgé de ses anomalies de flux (événements conformes uniquement)
-      }) 
+      # 2. Étapes de nettoyage des doublets et débris
+      if (!is.null(self$post_doublets_final) && length(self$post_doublets_final) > 0) return(self$post_doublets_final)
+      if (!is.null(self$post_debris) && length(self$post_debris) > 0) return(self$post_debris)
       
-      names(self$post_PeacoQC) <- names(self$echantillons_traites) # Restaure et synchronise les noms des échantillons comme clés de la nouvelle liste filtrée
-      if (!is.null(self$update_pipeline)) self$update_pipeline("PeacoQC") # Met à jour le registre d'état ou l'interface Shiny pour indiquer l'achèvement de cette étape qualité
+      # 3. Étapes de contrôle qualité (QC)
+      if (!is.null(self$post_retrait_bordures) && length(self$post_retrait_bordures) > 0) return(self$post_retrait_bordures)
+      if (!is.null(self$post_PeacoQC) && length(self$post_PeacoQC) > 0) return(self$post_PeacoQC)
+      if (!is.null(self$post_flowAI) && length(self$post_flowAI) > 0) return(self$post_flowAI)
+      
+      # 4. Sources initiales (fallback)
+      if (!is.null(self$echantillons_traites) && length(self$echantillons_traites) > 0) return(self$echantillons_traites)
+      
+      return(self$echantillons) # Données brutes chargées
     },
     
-    appliquer_flowai = function(dossier_rapports = NULL, reglages_specifiques = list()) { # Méthode exécutant le contrôle qualité automatisé flowAI sur l'ensemble de la cohorte pour éliminer les anomalies d'acquisition
-      parametres_par_defaut <- list( # Initialise les hyperparamètres par défaut pour l'évaluation des trois propriétés de l'acquisition (Flow Rate, Signal, Flight Time)
-        second_fractionFR = 0.1, alphaFR = 0.01, max_cptFS = 3, # Paramètre la granularité temporelle du débit (Flow Rate) et le niveau de signification statistique alpha associé
-        pen_valueFS = 500, neg_valuesFM = 1, ChExcludeFS = c("FSC", "SSC") # Fixe la pénalité pour les ruptures de signal, l'exclusion des valeurs aberrantes négatives et les canaux à ignorer
-      ) 
-      config_flowai <- utils::modifyList(parametres_par_defaut, reglages_specifiques) # Écrase dynamiquement les constantes par défaut si des réglages personnalisés sont fournis en entrée
-      generer_visuels <- !is.null(dossier_rapports) # Évalue sous forme de variable booléenne si un dossier de sortie a été spécifié pour la journalisation
+    appliquer_peacoqc = function(dossier_rapports = NULL, reglages_specifiques = list()) {
       
-      if (generer_visuels && !dir.exists(dossier_rapports)) { # Si l'exportation est demandée et que le répertoire cible est physiquement absent du disque
-        dir.create(dossier_rapports, recursive = TRUE) # Génère automatiquement l'arborescence complète des dossiers manquants sur le système de stockage
-      } 
-      
-      self$post_flowAI <- lapply(names(self$echantillons_traites), function(nom_echantillon) { # Boucle vectorisée appliquant le pipeline de nettoyage flowAI individuellement sur chaque échantillon
-        message("Contrôle qualité flowAI : ", nom_echantillon) # Envoie une notification d'avancement en temps réel dans la console d'exécution R
-        flowframe_a_nettoyer <- self$echantillons_traites[[nom_echantillon]] # Récupère l'objet flowFrame (les expressions de la matrice cellulaire) associé à cette itération
-        chemin_resultats <- if(generer_visuels) file.path(dossier_rapports, paste0("flowAI_", nom_echantillon)) else FALSE # Configure la chaîne de texte du chemin d'écriture ou lui attribue la valeur logique FALSE
-        
-        resultat_flowai <- flowAI::flow_auto_qc( # Déclenche l'algorithme d'audit et de nettoyage multi-critères du package flowAI
-          fcsfiles          = flowframe_a_nettoyer, # Transmet l'objet flowFrame contenant les événements et métadonnées cytométriques bruts
-          remove_from       = "all", # Demande l'élimination stricte des événements déviants détectés sur l'un des trois critères d'évaluation
-          output            = 1, # Configure le retour de la fonction pour renvoyer directement un objet flowFrame nettoyé des cellules non conformes
-          second_fractionFR = config_flowai$second_fractionFR, # Injecte la fraction de seconde utilisée pour découper l'acquisition et suivre la stabilité du débit
-          alphaFR           = config_flowai$alphaFR, # Injecte le seuil de tolérance alpha pour la détection statistique des anomalies de vélocité
-          max_cptFS         = config_flowai$max_cptFS, # Injecte le nombre maximal autorisé de points de changement de signal avant rejet
-          pen_valueFS       = config_flowai$pen_valueFS, # Injecte la valeur de pénalité de la méthode mathématique pour le lissage des sauts de signal
-          neg_valuesFM      = config_flowai$neg_valuesFM, # Indique le mode de gestion et de filtrage des valeurs électroniques négatives ou nulles aberrantes
-          ChExcludeFS       = config_flowai$ChExcludeFS, # Transmet la liste des canaux morphologiques (taille/granularité) à exclure du contrôle de signal
-          plot              = FALSE, # Désactive totalement la création des PNGs de diagnostics par flowAI pour optimiser les performances de calcul
-          htmlReport        = FALSE, # Désactive la compilation automatique du rapport web HTML pour économiser les accès en écriture disque
-          mini_report       = FALSE, # Évite la création automatique du sous-dossier technique "0_QC_files" à la racine du projet
-          fcs_QC            = FALSE # Désactive l'écriture automatique d'un nouveau fichier .fcs physique sur le support de stockage
-        ) 
-        return(resultat_flowai) # Renvoie l'objet flowFrame épuré ne contenant plus que les événements cellulaires ayant validé le contrôle de qualité
-      }) 
-      
-      names(self$post_flowAI) <- names(self$echantillons_traites) # Restaure et synchronise les noms des échantillons originaux comme clés de la nouvelle liste filtrée
-      if (!is.null(self$update_pipeline)) self$update_pipeline("flowAI") # Met à jour le registre d'état ou l'interface UI Shiny pour acter la complétion de cette étape qualité
-    },
-
-  retirer_les_bordures = function(canal1, canal2, nom_echantillon = NULL) { # Méthode éliminant les événements cellulaires saturant les limites électroniques minimales et maximales (bordures) de deux canaux cibles
-    self$canaux_bordures <- c(canal1, canal2) # Enregistre le couple de canaux morphologiques ou de fluorescence choisis pour le filtrage dans l'objet R6
-    liste_source <- self$get_derniere_source() # Récupère automatiquement la structure de données la plus avancée du pipeline grâce au système de repli (fallback) pyramidal
-    noms_a_traiter <- if (is.null(nom_echantillon)) names(liste_source) else nom_echantillon # Sélectionne la totalité de la cohorte si aucun fichier n'est spécifié, sinon cible l'échantillon unique fourni
-
-    if (is.null(self$post_retrait_bordures)) self$post_retrait_bordures <- list()
-
-    retirer_les_debris = function(matrice_points, canal_x, canal_y, nom_echantillon = NULL, source_nettoyage = "brutes") { # Méthode isolant les cellules intactes en éliminant les débris et bruits électroniques à l'aide d'une fenêtre polygonale (PolygonGate)
-      if (is.null(matrice_points)) stop("Aucune coordonnée de gate fournie.") # bloque le script si la structure contenant les coordonnées du polygone est absente
-      if (!is.matrix(matrice_points) && !is.data.frame(matrice_points)) { # valide que le format du tableau contenant les points géométriques est bien bidimensionnel
-        stop("La structure de la gate doit être une matrice ou un data.frame.") # interrompt l'exécution si la structure de données transmise est incompatible
-      }
-      if (nrow(matrice_points) < 3) stop("Un polygone de filtrage nécessite au moins 3 points.") # Sécurité mathématique : exige au moins trois sommets pour fermer l'aire géométrique bidimensionnelle
-      
-      liste_source <- NULL # Initialise à vide la variable destinée à recevoir les données cellulaires de départ
-      if (source_nettoyage == "peacoqc") { # Si l'utilisateur demande explicitement la source issue du contrôle qualité PeacoQC
-        liste_source <- self$post_PeacoQC # Oriente le flux vers les données épurées des instabilités fluidiques par PeacoQC
-      } else if (source_nettoyage == "flowai") { # Sinon, si l'utilisateur spécifie la source en provenance du nettoyage flowAI
-        liste_source <- self$post_flowAI # Oriente le flux vers les données préalablement corrigées par la routine flowAI
-      } 
-      
-      if (is.null(liste_source) || length(liste_source) == 0) { # Si la structure de nettoyage demandée est introuvable ou si les étapes amont n'ont pas été lancées
-        if (source_nettoyage == "peacoqc" || source_nettoyage == "flowai") { # vérifie si l'utilisateur visait un pipeline de qualité spécifique
-          message("Source '", source_nettoyage, "' introuvable ou vide. Repli sur les données compensées brutes.") # Émet un avertissement pour notifier le contournement et le repli algorithmique
-        } 
-        liste_source <- if (length(self$echantillons_traites) > 0) self$echantillons_traites else self$echantillons # Système de repli dynamique : charge la liste d'échantillons traités ou compenses disponible
-      }
-      
-      if (is.null(liste_source) || length(liste_source) == 0) { # Si, après toutes les tentatives de secours, aucune donnée valide n'est localisée en mémoire
-        stop("Aucune donnée disponible (brute, PeacoQC ou flowAI) pour appliquer le filtre débris.") # Interrompt définitivement la méthode pour éviter une erreur fatale en cascade
-      } 
-      
-      matrice_points <- as.matrix(matrice_points[, 1:2]) # Force la conversion des deux premières colonnes en matrice R brute pour l'interface de flowCore
-      colnames(matrice_points) <- c(canal_x, canal_y) # Assigne explicitement les noms des canaux physiques (ex: FSC-A, SSC-A) aux colonnes pour le ciblage optique
-      polygone_debris <- flowCore::polygonGate(.gate = matrice_points, filterId = "Gate_Debris") # Construit l'objet formel polygonGate définissant l'aire géométrique d'inclusion des cellules saines
-      if (is.null(self$gate_debris)) self$gate_debris <- list() # Initialise la sous-liste de mémorisation des objets géométriques de fenêtrage si inexistante
-      if (is.null(self$post_debris)) self$post_debris <- list() # Initialise la sous-liste de stockage des flowFrames de cellules triées si inexistante
-      
-      appliquer_le_filtrage = function(nom) { # Sous-fonction encapsulant le calcul de tri topologique pour un fichier FCS individuel
-        flowframe_entree <- liste_source[[nom]] # Extrait l'objet flowFrame d'entrée correspondant à la clé courante de la cohorte
-        if (is.null(flowframe_entree)) return(NULL) # Quitte proprement la sous-routine si l'échantillon ciblé est introuvable
-        resultat_filtre <- flowCore::filter(flowframe_entree, polygone_debris) # Calcule l'appartenance de chaque événement cellulaire à l'intérieur du polygone (test du point dans un polygone)
-        self$gate_debris[[nom]] <- polygone_debris # Sauvegarde l'objet géométrique appliqué pour permettre des réaffichages graphiques ultérieurs
-        self$post_debris[[nom]] <- flowframe_entree[resultat_filtre@subSet, ] # Sous-échantillonne la matrice binaire en ne retenant que les événements de l'indice logique TRUE (cellules saines)
-      }
-      
-      noms_a_traiter <- if (is.null(nom_echantillon)) names(liste_source) else nom_echantillon # Cible l'ensemble du dossier si aucun nom n'est fourni, ou restreint le traitement à l'échantillon unique spécifié
-      for (nom in noms_a_traiter) { # Boucle itérative exécutant le processus sur chaque fichier sélectionné pour la cohorte active
-        appliquer_le_filtrage(nom) # Applique le fenêtrage géométrique sur l'échantillon de l'itération en cours
-      }
-      if (!is.null(self$update_pipeline)) { # Évalue si la méthode de mise à jour du graphe d'état du pipeline existe dans l'architecture R6
-        self$update_pipeline("debris", nom_echantillon) # Signale le succès de la filtration des débris à l'interface de gestion centrale
-      }
-      return(invisible(self)) # Renvoie l'objet R6 complet discrètement pour permettre le chaînage d'autres méthodes de l'environnement
-    }
-
-    
-    if (is.null(noms_a_traiter) || length(noms_a_traiter) == 0) { # Détecte si la liste résultante des échantillons à analyser est totalement vide ou introuvable
-      warning("Aucun échantillon trouvé à traiter pour le retrait des bordures.") # Émet un avertissement non bloquant pour signaler l'anomalie de flux à l'utilisateur
-      return(NULL) # Interrompt proprement la fonction et retourne la valeur NULL sans altérer l'objet
-    } 
-    
-    for (nom in noms_a_traiter) { # Boucle itérative inspectant et traitant de manière isolée chaque fichier FCS de la cohorte définie
-      if (!is.null(liste_source[[nom]])) { # Vérifie que l'échantillon extrait de la liste source est bien modélisé et présent en mémoire vive
-        message("Retrait des bordures (Margins) sur : ", nom) # Affiche une notification de suivi textuelle en temps réel au sein de la console R
-        self$post_retrait_bordures[[nom]] <- PeacoQC::RemoveMargins( # Déclenche la routine mathématique d'exclusion des événements de saturation du package PeacoQC
-          ff       = liste_source[[nom]], # Transmet l'objet flowFrame (la matrice d'expression cellulaire active) destiné à être purgé
-          channels = self$canaux_bordures # Injecte le vecteur contenant les labels des canaux sur lesquels appliquer le filtrage des valeurs extrêmes
-        ) 
-      } 
-    } 
-    
-    self$update_pipeline("bordures", nom_echantillon) # Met à jour le registre d'état du pipeline ou réactive l'interface UI Shiny pour valider cette étape
-  },
-    
-  retirer_les_debris = function(matrice_points, canal_x, canal_y, nom_echantillon = NULL, source_nettoyage = "brutes") { # Méthode isolant les cellules intactes en éliminant les débris et bruits électroniques à l'aide d'une fenêtre polygonale (PolygonGate)
-    if (is.null(matrice_points)) stop("Aucune coordonnée de gate fournie.") # bloque le script si la structure contenant les coordonnées du polygone est absente
-    if (!is.matrix(matrice_points) && !is.data.frame(matrice_points)) { # valide que le format du tableau contenant les points géométriques est bien bidimensionnel
-      stop("La structure de la gate doit être une matrice ou un data.frame.") # interrompt l'exécution si la structure de données transmise est incompatible
-    }
-    if (nrow(matrice_points) < 3) stop("Un polygone de filtrage nécessite au moins 3 points.") # Sécurité mathématique : exige au moins trois sommets pour fermer l'aire géométrique bidimensionnelle
-    
-    liste_source <- NULL # Initialise à vide la variable destinée à recevoir les données cellulaires de départ
-    if (source_nettoyage == "peacoqc") { # Si l'utilisateur demande explicitement la source issue du contrôle qualité PeacoQC
-      liste_source <- self$post_PeacoQC # Oriente le flux vers les données épurées des instabilités fluidiques par PeacoQC
-    } else if (source_nettoyage == "flowai") { # Sinon, si l'utilisateur spécifie la source en provenance du nettoyage flowAI
-      liste_source <- self$post_flowAI # Oriente le flux vers les données préalablement corrigées par la routine flowAI
-    } 
-    
-    if (is.null(liste_source) || length(liste_source) == 0) { # Si la structure de nettoyage demandée est introuvable ou si les étapes amont n'ont pas été lancées
-      if (source_nettoyage == "peacoqc" || source_nettoyage == "flowai") { # vérifie si l'utilisateur visait un pipeline de qualité spécifique
-        message("Source '", source_nettoyage, "' introuvable ou vide. Repli sur les données compensées / traitées disponibles.") # Émet un avertissement pour notifier le contournement et le repli algorithmique
-      } 
-      liste_source <- if (length(self$echantillons_traites) > 0) self$echantillons_traites else self$echantillons
-    }
-    if (is.null(liste_source) || length(liste_source) == 0) { # Si, après toutes les tentatives de secours, aucune donnée valide n'est localisée en mémoire
-      stop("Aucune donnée disponible (brute ou traitée) pour appliquer le filtre débris.") # Interrompt définitivement la méthode pour éviter une erreur fatale en cascade
-    } 
-    
-    matrice_points <- as.matrix(matrice_points[, 1:2]) # Force la conversion des deux premières colonnes en matrice R brute pour l'interface de flowCore
-    colnames(matrice_points) <- c(canal_x, canal_y) # Assigne explicitement les noms des canaux physiques (ex: FSC-A, SSC-A) aux colonnes pour le ciblage optique
-    polygone_debris <- flowCore::polygonGate(.gate = matrice_points, filterId = "Gate_Debris") # Construit l'objet formel polygonGate définissant l'aire géométrique d'inclusion des cellules saines
-    if (is.null(self$gate_debris)) self$gate_debris <- list() # Initialise la sous-liste de mémorisation des objets géométriques de fenêtrage si inexistante
-    if (is.null(self$post_debris)) self$post_debris <- list() # Initialise la sous-liste de stockage des flowFrames de cellules triées si inexistante
-    
-    appliquer_le_filtrage = function(nom) { # Sous-fonction encapsulant le calcul de tri topologique pour un fichier FCS individuel
-      flowframe_entree <- liste_source[[nom]] # Extrait l'objet flowFrame d'entrée correspondant à la clé courante de la cohorte
-      if (is.null(flowframe_entree)) return(NULL) # Quitte proprement la sous-routine si l'échantillon ciblé est introuvable
-      resultat_filtre <- flowCore::filter(flowframe_entree, polygone_debris) # Calcule l'appartenance de chaque événement cellulaire à l'intérieur du polygone (test du point dans un polygone)
-      self$gate_debris[[nom]] <- polygone_debris # Sauvegarde l'objet géométrique appliqué pour permettre des réaffichages graphiques ultérieurs
-      self$post_debris[[nom]] <- flowframe_entree[resultat_filtre@subSet, ] # Sous-échantillonne la matrice binaire en ne retenant que les événements de l'indice logique TRUE (cellules saines)
-    }
-    
-    noms_a_traiter <- if (is.null(nom_echantillon)) names(liste_source) else nom_echantillon # Cible l'ensemble du dossier si aucun nom n'est fourni, ou restreint le traitement à l'échantillon unique spécifié
-    for (nom in noms_a_traiter) { # Boucle itérative exécutant le processus sur chaque fichier sélectionné pour la cohorte active
-      appliquer_le_filtrage(nom) # Applique le fenêtrage géométrique sur l'échantillon de l'itération en cours
-    }
-    
-    self$update_pipeline("debris", nom_echantillon) # Signale directement le succès de la filtration des débris
-    return(invisible(self)) # Renvoie l'objet R6 complet discrètement pour permettre le chaînage d'autres méthodes de l'environnement
-  },
-    
-  retirer_doublets_FSC = function(facteur_sensibilite = 4, axe_discrimination = "H_A", nom_echantillon = NULL) { # Méthode statistique éliminant les agrégats cellulaires (doublets) sur l'axe Forward Scatter (FSC) en évaluant la linéarité géométrique des signaux
-    liste_fcs_source <- if (!is.null(self$post_debris) && length(self$post_debris) > 0) self$post_debris else self$get_derniere_source() # Sélectionne par défaut les données issues du filtre débris ou applique le mécanisme de repli pyramidal sur le dernier état valide
-    label_source <- if (!is.null(self$post_debris) && length(self$post_debris) > 0) "post_debris" else "source_parente" # Génère une étiquette textuelle décrivant le niveau d'origine des données pour la traçabilité du pipeline
-    
-    if (is.null(self$gate_doublets_FSC)) self$gate_doublets_FSC <- list()
-    if (is.null(self$post_doublets_FSC)) self$post_doublets_FSC <- list()
-    if (is.null(self$post_doublets_final)) self$post_doublets_final <- list()
-    
-    calculer_doublets = function(nom, lbl_src) { # Sous-fonction interne calculant de manière isolée les limites statistiques d'exclusion des agrégats pour un échantillon donné
-      flowframe_entree <- liste_fcs_source[[nom]] # Extrait l'objet flowFrame d'entrée correspondant à l'indexation de la cohorte
-      if (is.null(flowframe_entree)) return(NULL) # Quitte proprement la sous-routine si l'échantillon spécifié est introuvable en mémoire
-      matrice_exprs <- flowCore::exprs(flowframe_entree) # Extrait la matrice bidimensionnelle des expressions d'intensités brutes de toutes les cellules de l'échantillon
-      
-      if (axe_discrimination == "H_A") {
-        canal_x <- grep("FSC-H", colnames(matrice_exprs), value = TRUE, ignore.case = TRUE)[1]
-        canal_y <- grep("FSC-A", colnames(matrice_exprs), value = TRUE, ignore.case = TRUE)[1]
-      } else if (axe_discrimination == "W_A") {
-        canal_x <- grep("FSC-W", colnames(matrice_exprs), value = TRUE, ignore.case = TRUE)[1]
-        canal_y <- grep("FSC-A", colnames(matrice_exprs), value = TRUE, ignore.case = TRUE)[1]
-      } else if (axe_discrimination == "H_W") {
-        canal_x <- grep("FSC-H", colnames(matrice_exprs), value = TRUE, ignore.case = TRUE)[1]
-        canal_y <- grep("FSC-W", colnames(matrice_exprs), value = TRUE, ignore.case = TRUE)[1]
-      } else {
-        stop("axe_discrimination invalide. Choisir parmi 'H_A', 'W_A' ou 'H_W'")
-      }
-      
-      if (is.na(canal_x) || is.na(canal_y)) { # Si l'un des deux signaux morphologiques fondamentaux indispensables à l'évaluation géométrique est manquant
-        warning("Canaux FSC requis pour l'axe ", axe_discrimination, " introuvables pour ", nom, ". Étape ignorée.") # Émet un avertissement pour alerter sur l'incompatibilité de la structure du fichier FCS
-        self$post_doublets_FSC[[nom]] <- flowframe_entree # Duplique les données d'entrée sans altération pour ne pas rompre la chaîne de traitement en aval
-        return(NULL) # Interrompt la sous-routine de cet échantillon pour passer au tube suivant
-      } 
-      
-      ratio_Y_X <- matrice_exprs[, canal_y] / (matrice_exprs[, canal_x] + 1e-6) # Calcule le ratio de linéarité cellulaire en ajoutant un epsilon régulateur pour interdire les divisions critiques par zéro
-      val_mad <- stats::mad(ratio_Y_X, na.rm = TRUE) # Calcule l'écart absolu à la médiane (MAD), indicateur robuste de la dispersion de la population de cellules uniques (singlets)
-      if (val_mad == 0) val_mad <- mean(ratio_Y_X, na.rm = TRUE) * 0.05 # Securité statistique : si la dispersion est nulle (artefact), calcule une variance de substitution basée sur la moyenne
-      seuil_statistique <- stats::median(ratio_Y_X, na.rm = TRUE) + (facteur_sensibilite * val_mad) # Fixe la frontière critique d'exclusion au-delà de laquelle la déformation géométrique trahit un doublet
-      
-      self$gate_doublets_FSC[[nom]] <- list( # Sauvegarde la structure des paramètres de la coupure statistique au sein de l'environnement R6 pour les exports de métadonnées
-        type = "stat", seuil = seuil_statistique, facteur = facteur_sensibilite, # Consigne la nature mathématique du filtre, le seuil calculé et le coefficient multiplicateur appliqué
-        source = lbl_src, channels = c(canal_x, canal_y) # Enregistre la provenance des données d'entrée ainsi que le couple d'axes physiques utilisés
-      ) 
-      
-      flowframe_filtre <- flowframe_entree[ratio_Y_X < seuil_statistique & is.finite(ratio_Y_X), ] # Filtre la matrice en excluant les événements au-dessus du seuil (doublets) ou présentant des instabilités mathématiques
-      self$post_doublets_FSC[[nom]] <- flowframe_filtre # Enregistre l'échantillon purgé dans la mémoire de stockage intermédiaire dédiée aux filtres FSC
-      self$post_doublets_final[[nom]] <- flowframe_filtre # Met à jour la mémoire de stockage terminale des cellules uniques validées (singlets)
-    } 
-    
-    noms_a_traiter <- if (is.null(nom_echantillon)) names(liste_fcs_source) else nom_echantillon # Détermine la liste d'échantillons à traiter en lot (tous les fichiers ou l'identifiant exclusif fourni)
-    for (nom in noms_a_traiter) { calculer_doublets(nom, label_source) } # Parcourt et traite séquentiellement via la boucle chaque échantillon configuré dans la liste cible
-    self$update_pipeline("doublets_FSC", nom_echantillon) # Active la mise à jour des graphes d'état ou rafraîchit l'interface Shiny pour cette étape d'isolement
-  },
-  
-  retirer_doublets_SSC = function(facteur_sensibilite = 4, axe_discrimination = "H_A", nom_echantillon = NULL) { # Méthode statistique éliminant les agrégats cellulaires (doublets) sur l'axe Side Scatter (SSC) en évaluant la linéarité géométrique des signaux de granularité
-    liste_fcs_source <- if (!is.null(self$post_doublets_FSC) && length(self$post_doublets_FSC) > 0) { # Évalue si la liste issue du filtrage des doublets FSC est préalablement disponible
-      self$post_doublets_FSC # Privilégie le chaînage direct après l'isolement des singlets sur l'axe FSC
-    } else if (!is.null(self$post_debris) && length(self$post_debris) > 0) { # À défaut, évalue si la liste filtrée pour les débris est accessible
-      self$post_debris # Se connecte en aval de l'étape de filtration des débris cellulaires
-    } else { # Si aucune des structures de tri précédentes n'est peuplée ou initialisée
-      self$get_derniere_source() # Active le mécanisme de repli automatique sur le dernier niveau de traitement valide du pipeline
-    } 
-    
-    label_source <- if (!is.null(self$post_doublets_FSC) && length(self$post_doublets_FSC) > 0) { # Détermine l'origine exacte des données pour documenter l'historique d'analyse
-      "post_doublets_FSC" # Attribue le label indiquant un chaînage standard post-filtre FSC
-    } else if (!is.null(self$post_debris) && length(self$post_debris) > 0) { # Si l'étape FSC a été contournée ou omise volontairement
-      "post_debris" # Attribue le label identifiant la provenance directe du filtre débris
-    } else { # Si le script s'est replié sur une structure amont
-      "source_parente" # Attribue le label générique de traçabilité par défaut
-    } 
-    
-    if (is.null(self$gate_doublets_SSC)) self$gate_doublets_SSC <- list()
-    if (is.null(self$post_doublets_SSC)) self$post_doublets_SSC <- list()
-    if (is.null(self$post_doublets_final)) self$post_doublets_final <- list()
-    
-    calculer_doublets = function(nom, lbl_src) { # Sous-fonction interne isolant les limites de coupure statistique et triant les événements pour un échantillon individuel
-      flowframe_entree <- liste_fcs_source[[nom]] # Extrait l'objet flowFrame d'entrée indexé pour la clé de l'itération active
-      if (is.null(flowframe_entree)) return(NULL) # Quitte la sous-routine si l'échantillon de la cohorte est inexistant en mémoire vive
-      matrice_exprs <- flowCore::exprs(flowframe_entree) # Extrait sous forme de matrice bivariée les intensités de numérisation de chaque cellule
-      
-      # === ROUTAGE DYNAMIQUE DES CANAUX SSC ===
-      if (axe_discrimination == "H_A") {
-        canal_x <- grep("SSC-H", colnames(matrice_exprs), value = TRUE, ignore.case = TRUE)[1]
-        canal_y <- grep("SSC-A", colnames(matrice_exprs), value = TRUE, ignore.case = TRUE)[1]
-      } else if (axe_discrimination == "W_A") {
-        canal_x <- grep("SSC-W", colnames(matrice_exprs), value = TRUE, ignore.case = TRUE)[1]
-        canal_y <- grep("SSC-A", colnames(matrice_exprs), value = TRUE, ignore.case = TRUE)[1]
-      } else if (axe_discrimination == "H_W") {
-        canal_x <- grep("SSC-H", colnames(matrice_exprs), value = TRUE, ignore.case = TRUE)[1]
-        canal_y <- grep("SSC-W", colnames(matrice_exprs), value = TRUE, ignore.case = TRUE)[1]
-      } else {
-        stop("axe_discrimination invalide. Choisir parmi 'H_A', 'W_A' ou 'H_W'")
-      }
-      
-      if (is.na(canal_x) || is.na(canal_y)) { # Si l'un des deux signaux SSC fondamentaux pour discriminer la géométrie cellulaire est introuvable
-        warning("Canaux SSC requis pour l'axe ", axe_discrimination, " introuvables pour ", nom, ". Étape ignorée.") # Alerte l'utilisateur via un avertissement concernant la non-conformité structurelle du fichier
-        self$post_doublets_SSC[[nom]] <- flowframe_entree # Duplique les données brutes dans la structure cible pour préserver le flux algorithmique
-        return(NULL) # Interrompt proprement la sous-routine de cet échantillon pour basculer sur le tube suivant
-      } 
-      
-      ratio_Y_X <- matrice_exprs[, canal_y] / (matrice_exprs[, canal_x] + 1e-6) # Calcule le ratio de granularité en ajoutant un epsilon stabilisateur pour empêcher les divisions interdites par zéro
-      val_mad <- stats::mad(ratio_Y_X, na.rm = TRUE) # Calcule l'écart absolu à la médiane (MAD), estimateur robuste de la dispersion de la population de cellules uniques (singlets)
-      if (val_mad == 0) val_mad <- mean(ratio_Y_X, na.rm = TRUE) * 0.05 # Sécurité statistique : calcule une variance artificielle basée sur la moyenne si la dispersion réelle est nulle
-      seuil_statistique <- stats::median(ratio_Y_X, na.rm = TRUE) + (facteur_sensibilite * val_mad) # Calcule le seuil discriminant au-delà duquel la déformation temporelle du signal valide la présence d'un agrégat
-      
-      self$gate_doublets_SSC[[nom]] <- list( # Consigne la totalité des variables de tri au sein de l'environnement R6 pour les besoins de traçabilité
-        type = "stat", seuil = seuil_statistique, facteur = facteur_sensibilite, # Sauvegarde la nature du filtre, la valeur de la barrière calculée et la sensibilité appliquée
-        source = lbl_src, channels = c(canal_x, canal_y) # Enregistre l'origine des données ainsi que le couple de paramètres SSC sollicités
+      # Paramètres par défaut
+      parametres_par_defaut <- list(
+        determine_good_cells = "all",
+        min_cells = 150,
+        max_bins = 100,
+        step = 500,
+        MAD = 6,
+        IT_limit = 0.6,
+        consecutive_bins = 5,
+        remove_zeros = FALSE,
+        force_IT = 150,
+        peak_removal = 1/3,
+        min_nr_bins_peakdetection = 10
       )
       
-      flowframe_filtre <- flowframe_entree[ratio_Y_X < seuil_statistique & is.finite(ratio_Y_X), ] # Filtre la matrice en excluant les doublets (au-dessus du seuil) et les valeurs infinies aberrantes
-      self$post_doublets_SSC[[nom]] <- flowframe_filtre # Sauvegarde l'échantillon épuré dans le compartiment intermédiaire dédié aux filtres SSC
-      self$post_doublets_final[[nom]] <- flowframe_filtre # Met à jour la mémoire finale centralisée de l'objet contenant les cellules uniques (singlets) qualifiées
-    } 
-    
-    noms_a_traiter <- if (is.null(nom_echantillon)) names(liste_fcs_source) else nom_echantillon # Cible la cohorte entière si l'identifiant est omis, sinon restreint l'exécution au fichier unique spécifié
-    for (nom in noms_a_traiter) { calculer_doublets(nom, label_source) } # Parcourt et traite séquentiellement l'ensemble de la liste via une boucle d'exécution unitaire
-    self$update_pipeline("doublets_SSC", nom_echantillon) # Déclenche directement la mise à jour des graphes de suivi ou actualise l'interface graphique UI Shiny
-  },
-    
-  gate_les_doublets_FSC = function(points_utilisateur, axe_discrimination = "H_A", nom_echantillon = NULL) { # Méthode appliquant un fenêtrage polygonal manuel (PolygonGate) fourni par l'utilisateur pour discriminer et exclure les doublets sur les axes Forward Scatter
-    liste_fcs_source <- if (!is.null(self$post_debris) && length(self$post_debris) > 0) self$post_debris else self$get_derniere_source() # Sélectionne en priorité les données issues du filtre débris ou active le mécanisme de repli hiérarchique pyramidal
-    if (length(liste_fcs_source) == 0) stop("Aucune donnée source disponible pour le gating des doublets FSC.") # Sécurité : bloque l'exécution si aucune matrice cellulaire n'est localisée en mémoire vive
-    
-    premier_ff  <- liste_fcs_source[[1]] # Extrait le premier objet flowFrame disponible de la liste pour analyser sa structure technique
-    tous_canaux <- flowCore::colnames(premier_ff) # Récupère la liste complète des étiquettes de colonnes (canaux physiques de numérisation) de l'appareil
-    
-    if (axe_discrimination == "H_A") {
-      canal_x <- grep("FSC-H", tous_canaux, value = TRUE, ignore.case = TRUE)[1]
-      canal_y <- grep("FSC-A", tous_canaux, value = TRUE, ignore.case = TRUE)[1]
-    } else if (axe_discrimination == "W_A") {
-      canal_x <- grep("FSC-W", tous_canaux, value = TRUE, ignore.case = TRUE)[1]
-      canal_y <- grep("FSC-A", tous_canaux, value = TRUE, ignore.case = TRUE)[1]
-    } else if (axe_discrimination == "H_W") {
-      canal_x <- grep("FSC-H", tous_canaux, value = TRUE, ignore.case = TRUE)[1]
-      canal_y <- grep("FSC-W", tous_canaux, value = TRUE, ignore.case = TRUE)[1]
-    }
-    
-    matrice_coords <- as.matrix(points_utilisateur[, 1:2]) # Force la conversion des deux premières colonnes de coordonnées utilisateur en une matrice R standard pour l'interface flowCore
-    colnames(matrice_coords) <- c(canal_x, canal_y) # Aligne et synchronise obligatoirement les noms des colonnes de la matrice sur les canaux physiques cibles détectés
-    poly_fsc <- flowCore::polygonGate(.gate = matrice_coords, filterId = "Gate_Doublets_FSC") # Instancie l'objet géométrique formel polygonGate définissant la barrière d'inclusion des cellules uniques
-    
-    appliquer_fsc = function(nom) { # Sous-fonction encapsulant le tri topologique de point dans un polygone pour un échantillon de la cohorte
-      ff_entree  <- liste_fcs_source[[nom]] # Extrait l'objet flowFrame d'entrée correspondant à l'identifiant de l'itération active
-      if (is.null(ff_entree)) return(NULL) # Quitte proprement la sous-routine si l'échantillon spécifié est introuvable ou mal chargé
-      res_filtre <- flowCore::filter(ff_entree, poly_fsc) # Exécute le filtrage géométrique bidimensionnel pour évaluer l'appartenance de chaque événement cellulaire au polygone
-      self$gate_doublets_FSC[[nom]] <- list(type = "poly", gate = poly_fsc, channels = c(canal_x, canal_y)) # Consigne le polygone et les métadonnées de tri dans l'environnement de l'objet R6 pour traçabilité
-      ff_propre <- ff_entree[res_filtre@subSet, ] # Sous-échantillonne la matrice d'expression pour ne conserver que les cellules validées par l'indice logique TRUE (singlets)
-      self$post_doublets_FSC[[nom]]    <- ff_propre # Enregistre l'échantillon nettoyé dans la mémoire intermédiaire dédiée aux structures FSC
-      self$post_doublets_final[[nom]]  <- ff_propre # Met à jour la structure finale de stockage centralisant les cellules uniques qualifiées de l'expérience
-    } 
-    
-    noms <- if (is.null(nom_echantillon)) names(liste_fcs_source) else nom_echantillon # Cible la cohorte complète si l'identifiant est omis, ou restreint l'exécution au fichier unique spécifié
-    for (n in noms) { appliquer_fsc(n) } # Parcourt et traite séquentiellement l'ensemble de la liste via une boucle d'exécution unitaire
-    if (!is.null(self$update_pipeline)) self$update_pipeline("doublets_FSC", nom_echantillon) # Déclenche la mise à jour des graphes de suivi ou actualise l'interface graphique Shiny
-  },
-  
-  gate_les_doublets_SSC = function(points_utilisateur, axe_discrimination = "H_A", nom_echantillon = NULL) { # Méthode appliquant un fenêtrage polygonal manuel (PolygonGate) fourni par l'utilisateur pour discriminer et exclure les doublets sur les axes Side Scatter
-    liste_fcs_source <- if (!is.null(self$post_doublets_FSC) && length(self$post_doublets_FSC) > 0) { # Évalue si la liste issue du filtrage ou du gating des doublets FSC est disponible en mémoire
-      self$post_doublets_FSC # Privilégie le chaînage direct des filtres en se connectant en aval des cellules uniques isolées sur l'axe FSC
-    } else if (!is.null(self$post_debris) && length(self$post_debris) > 0) { # À défaut, évalue si la liste filtrée pour les débris cellulaires est accessible
-      self$post_debris # Connecte le flux en aval immédiat de l'étape de filtration des débris
-    } else { # Si aucune des structures de tri précédentes n'est peuplée ou initialisée
-      self$get_derniere_source() # Active le mécanisme de repli automatique sur le dernier niveau de traitement valide détecté dans le pipeline
-    } 
-    if (length(liste_fcs_source) == 0) stop("Aucune donnée source disponible pour le gating des doublets SSC.") # Sécurité : bloque l'exécution si aucune matrice cellulaire n'est localisée en mémoire vive
-    
-    premier_ff  <- liste_fcs_source[[1]] # Extrait le premier objet flowFrame disponible de la liste pour analyser sa structure technique
-    tous_canaux <- flowCore::colnames(premier_ff) # Récupère la liste complète des étiquettes de colonnes (canaux physiques de numérisation) de l'appareil
-    
-    if (axe_discrimination == "H_A") {
-      canal_x <- grep("SSC-H", tous_canaux, value = TRUE, ignore.case = TRUE)[1]
-      canal_y <- grep("SSC-A", tous_canaux, value = TRUE, ignore.case = TRUE)[1]
-    } else if (axe_discrimination == "W_A") {
-      canal_x <- grep("SSC-W", tous_canaux, value = TRUE, ignore.case = TRUE)[1]
-      canal_y <- grep("SSC-A", tous_canaux, value = TRUE, ignore.case = TRUE)[1]
-    } else if (axe_discrimination == "H_W") {
-      canal_x <- grep("SSC-H", tous_canaux, value = TRUE, ignore.case = TRUE)[1]
-      canal_y <- grep("SSC-W", tous_canaux, value = TRUE, ignore.case = TRUE)[1]
-    }
-    
-    matrice_coords <- as.matrix(points_utilisateur[, 1:2]) # Force la conversion des deux premières colonnes de coordonnées utilisateur en une matrice R standard pour l'interface flowCore
-    colnames(matrice_coords) <- c(canal_x, canal_y) # Aligne et synchronise obligatoirement les noms des colonnes de la matrice sur les canaux physiques cibles détectés
-    poly_ssc <- flowCore::polygonGate(.gate = matrice_coords, filterId = "Gate_Doublets_SSC") # Instancie l'objet géométrique formel polygonGate définissant la barrière d'inclusion des cellules uniques
-    
-    appliquer_ssc = function(nom) { # Sous-fonction encapsulant le tri topologique de point dans un polygone pour un échantillon de la cohorte
-      ff_entree <- liste_fcs_source[[nom]] # Extrait l'objet flowFrame d'entrée correspondant à l'identifiant de l'itération active
-      if (is.null(ff_entree)) return(NULL) # Quitte proprement la sous-routine si l'échantillon spécifié est introuvable ou mal chargé
-      res_filtre <- flowCore::filter(ff_entree, poly_ssc) # Exécute le filtrage géométrique bidimensionnel pour évaluer l'appartenance de chaque événement cellulaire au polygone
-      self$gate_doublets_SSC[[nom]] <- list(type = "poly", gate = poly_ssc, channels = c(canal_x, canal_y)) # Consigne le polygone et les métadonnées de tri dans l'environnement de l'objet R6 pour traçabilité
-      ff_propre <- ff_entree[res_filtre@subSet, ] # Sous-échantillonne la matrice d'expression pour ne conserver que les cellules validées par l'indice logique TRUE (singlets)
-      self$post_doublets_SSC[[nom]]   <- ff_propre # Enregistre l'échantillon nettoyé dans la mémoire intermédiaire dédiée aux structures SSC
-      self$post_doublets_final[[nom]] <- ff_propre # Met à jour la structure finale de stockage centralisant les cellules uniques qualifiées de l'expérience
-    } 
-    
-    noms <- if (is.null(nom_echantillon)) names(liste_fcs_source) else nom_echantillon # Cible la cohorte complète si l'identifiant est omis, ou restreint l'exécution au fichier unique spécifié
-    for (n in noms) { appliquer_ssc(n) } # Parcourt et traite séquentiellement l'ensemble de la liste via une boucle d'exécution unitaire
-    if (!is.null(self$update_pipeline)) self$update_pipeline("doublets_SSC", nom_echantillon) # Déclenche la mise à jour des graphes de suivi ou actualise l'interface graphique Shiny
-  },
-    
-  visualiser_peacoqc = function(nom_echantillon, max_points = 10000) { # Méthode générant un graphique cinétique comparatif pour évaluer visuellement l'efficacité du filtrage de bruit de flux opéré par PeacoQC
-    if (is.null(self$post_PeacoQC[[nom_echantillon]])) { # Évalue si la structure ou le fichier cible nettoyé par PeacoQC est absent de la mémoire vive
-      message("Pas de données PeacoQC pour ", nom_echantillon) # Notification d'avertissement en console si l'étape amont n'a pas été exécutée
-      return(NULL) # Interrompt proprement la fonction et renvoie NULL pour ne pas provoquer de plantage de l'interface
-    } 
-    
-    flowframe_initial <- self$echantillons_traites[[nom_echantillon]] # Récupère l'objet flowFrame initial d'origine (avant le processus PeacoQC)
-    flowframe_nettoye <- self$post_PeacoQC[[nom_echantillon]] # Extrait l'objet flowFrame épuré contenant uniquement la population cellulaire conforme
-    donnees_initiales <- as.data.frame(flowCore::exprs(flowframe_initial)) # Convertit la matrice des intensités d'origine en tableau de données exploitable par ggplot2
-    donnees_nettoyees <- as.data.frame(flowCore::exprs(flowframe_nettoye)) # Convertit la matrice des intensités épurées en tableau de données exploitable par ggplot2
-    canal_temps <- grep("time", colnames(donnees_initiales), value = TRUE, ignore.case = TRUE)[1] # Détecte par expression régulière le libellé de la colonne associée à la variable temporelle
-    canal_fsc   <- grep("FSC", colnames(donnees_initiales), value = TRUE, ignore.case = TRUE)[1] # Détecte par expression régulière le libellé de la colonne associée au paramètre morphologique FSC
-    if (is.na(canal_temps)) canal_temps <- colnames(donnees_initiales)[1] # Sécurité : force l'affectation de la première colonne si aucun paramètre temporel n'est trouvé
-    if (is.na(canal_fsc))   canal_fsc   <- colnames(donnees_initiales)[2] # Sécurité : force l'affectation de la deuxième colonne si aucun paramètre morphologique n'est trouvé
-    limites_temps <- range(donnees_initiales[[canal_temps]], na.rm = TRUE) # Calcule l'amplitude minimale et maximale du temps pour fixer les frontières absolues de l'axe X
-    limites_fsc   <- range(donnees_initiales[[canal_fsc]], na.rm = TRUE) # Calcule l'amplitude minimale et maximale du signal FSC pour fixer les frontières absolues de l'axe Y
-    total_evenements  <- nrow(donnees_initiales) # Dénombre le nombre total d'événements cellulaires bruts enregistrés à l'acquisition
-    evenements_gardes <- nrow(donnees_nettoyees) # Dénombre le nombre de cellules conservées post-contrôle qualité statistique
-    pourcentage_conservation <- if(total_evenements > 0) round((evenements_gardes / total_evenements) * 100, 1) else 0 # Calcule le rendement d'acquisition après filtration, arrondi au dixième
-    
-    if (!is.null(max_points) && total_evenements > max_points) { # Si la taille de l'échantillon outrepasse la limite maximale définie pour la fluidité du rendu graphique
-    
-      if (!is.null(self$seed)) set.seed(self$seed)
-      donnees_init_visu  <- donnees_initiales[sample(seq_len(total_evenements), max_points), ] # Sous-échantillonne de manière aléatoire la matrice initiale pour alléger la charge graphique
+      # Fusion des paramètres
+      config_qc <- utils::modifyList(parametres_par_defaut, reglages_specifiques)
       
-      if (evenements_gardes > 0) { # S'il reste des cellules viables après le passage de l'algorithme PeacoQC
-        nb_nettoye_visu   <- min(evenements_gardes, max_points) # Détermine la borne supérieure optimale de points à conserver pour le rendu des données épurées
+      # Sorties
+      self$post_PeacoQC <- list()
+      self$plots_peacoqc <- list()
+      self$plots_peacoqc_natif <- list()
+      
+      # Boucle échantillons
+      for (nom in names(self$echantillons_traites)) {
         
-        # === SÉCURITÉ SEED : Fixe la graine avant le sous-échantillonnage nettoyé ===
+        message("Exécution PeacoQC sur : ", nom)
+        
+        ff_actuel <- self$echantillons_traites[[nom]]
+        
+        # Détection du canal temporel
+        vrai_canal_temps <- grep("time", colnames(ff_actuel), value = TRUE, ignore.case = TRUE)[1]
+        if (is.na(vrai_canal_temps)) vrai_canal_temps <- "Time"
+        
+        # Détermination des canaux à analyser (doc officielle)
+        tous_canaux <- colnames(ff_actuel)
+        canaux_fluo <- tous_canaux[!grepl("fsc|ssc|time", tous_canaux, ignore.case = TRUE)]
+        
+        # Dossier temporaire pour les PNG
+        dossier_temp_plot <- file.path(
+          tempdir(),
+          paste0("PeacoQC_", gsub("[^a-zA-Z0-9_]", "_", nom), "_", format(Sys.time(), "%Y%m%d_%H%M%S"))
+        )
+        dir.create(dossier_temp_plot, recursive = TRUE, showWarnings = FALSE)
+        
+        # Exécution PeacoQC
+        res <- PeacoQC::PeacoQC(
+          ff                     = ff_actuel,
+          channels               = canaux_fluo,
+          determine_good_cells   = config_qc$determine_good_cells,
+          transform              = FALSE,
+          time_channel_parameter = vrai_canal_temps,
+          save_fcs               = FALSE,
+          min_cells              = config_qc$min_cells,
+          max_bins               = config_qc$max_bins,
+          step                   = config_qc$step,
+          MAD                    = config_qc$MAD,
+          IT_limit               = config_qc$IT_limit,
+          consecutive_bins       = config_qc$consecutive_bins,
+          remove_zeros           = config_qc$remove_zeros,
+          force_IT               = config_qc$force_IT,
+          peak_removal           = config_qc$peak_removal,
+          min_nr_bins_peakdetection = config_qc$min_nr_bins_peakdetection,
+          plot                   = TRUE,
+          output_directory       = dossier_temp_plot,
+          report                 = FALSE
+        )
+        
+        # Stockage du flowFrame filtré
+        self$post_PeacoQC[[nom]] <- res$FinalFF
+        
+        # Stockage du plot ggplot
+        self$plots_peacoqc[[nom]] <- res$Plot
+        
+        # Stockage du PNG natif
+        # ✓ CORRIGÉ : PeacoQC::PeacoQC() n'écrit PAS le PNG directement dans "output_directory".
+        # En interne, il crée un sous-dossier "output_directory/<name_directory>/" (name_directory
+        # vaut "PeacoQC_results" par défaut, non redéfini ici) et c'est LÀ qu'atterrit le PNG natif.
+        # Un list.files() non récursif sur dossier_temp_plot ne le trouvait donc jamais, laissant
+        # plots_peacoqc_natif toujours à NULL et empêchant tout affichage côté interface.
+        pngs <- list.files(dossier_temp_plot, pattern = "\\.png$", full.names = TRUE, recursive = TRUE)
+        self$plots_peacoqc_natif[[nom]] <- if (length(pngs) > 0) pngs[1] else NULL # Un seul PNG "montage" est généré par échantillon : on n'en garde qu'un chemin scalaire
+      }
+      
+      # Archive des paramètres
+      self$parametres_peacoqc_utilises <- config_qc
+      
+      # Mise à jour pipeline
+      if (!is.null(self$update_pipeline)) self$update_pipeline("PeacoQC")
+    },
+    
+    appliquer_flowai = function(reglages_specifiques = list()) {
+      
+      if (length(self$echantillons_traites) == 0) {
+        stop("Aucun échantillon traité disponible pour flowAI.")
+      }
+      
+      # Paramètres sécurisés
+      remove_from       <- reglages_specifiques$remove_from       %||% "all"
+      timeCh            <- reglages_specifiques$timeCh            %||% NULL
+      second_fractionFR <- reglages_specifiques$second_fractionFR %||% 0.1
+      alphaFR           <- reglages_specifiques$alphaFR           %||% 0.01
+      decompFR          <- if (isTRUE(reglages_specifiques$decompFR)) "cffilter" else "loess"
+      
+      ChExcludeFS <- reglages_specifiques$ChExcludeFS
+      if (is.null(ChExcludeFS) || length(ChExcludeFS) == 0) ChExcludeFS <- NULL
+      
+      outlier_binsFS <- reglages_specifiques$outlier_binsFS %||% FALSE
+      pen_valueFS    <- reglages_specifiques$pen_valueFS    %||% 500
+      max_cptFS      <- reglages_specifiques$max_cptFS      %||% 3
+      
+      ChExcludeFM <- reglages_specifiques$ChExcludeFM
+      if (is.null(ChExcludeFM) || length(ChExcludeFM) == 0) ChExcludeFM <- NULL
+      
+      sideFM       <- reglages_specifiques$sideFM       %||% "both"
+      neg_valuesFM <- reglages_specifiques$neg_valuesFM %||% 1
+      
+      # Sorties
+      self$post_flowAI <- list()
+      self$rapports_flowai <- list()
+      
+      # Boucle échantillons
+      for (nom in names(self$echantillons_traites)) {
+        
+        fcs_obj <- self$echantillons_traites[[nom]]
+        
+        # Dossier unique par échantillon
+        dossier_tmp <- file.path(tempdir(), paste0("flowAI_", nom, "_", format(Sys.time(), "%Y%m%d_%H%M%S")))
+        dir.create(dossier_tmp, recursive = TRUE, showWarnings = FALSE)
+        
+        res <- tryCatch({
+          
+          flowAI::flow_auto_qc(
+            fcsfiles            = fcs_obj,
+            remove_from         = remove_from,
+            output              = 1,
+            timeCh              = timeCh,
+            second_fractionFR   = second_fractionFR,
+            alphaFR             = alphaFR,
+            decompFR            = decompFR,
+            ChExcludeFS         = ChExcludeFS,
+            outlier_binsFS      = outlier_binsFS,
+            pen_valueFS         = pen_valueFS,
+            max_cptFS           = max_cptFS,
+            ChExcludeFM         = ChExcludeFM,
+            sideFM              = sideFM,
+            neg_valuesFM        = neg_valuesFM,
+            html_report         = "_QC",
+            mini_report         = "_QCmini",
+            fcs_QC              = "_QC",
+            fcs_highQ           = FALSE,
+            fcs_lowQ            = FALSE,
+            folder_results      = dossier_tmp
+          )
+          
+        }, error = function(e) {
+          stop(paste("Erreur flowAI pour l'échantillon", nom, ":", conditionMessage(e)))
+        })
+        
+        # res est un flowSet → on extrait le flowFrame
+        if (inherits(res, "flowSet")) {
+          res <- res[[1]]
+        }
+        
+        self$post_flowAI[[nom]] <- res
+        self$rapports_flowai[[nom]] <- dossier_tmp
+      }
+      
+      self$update_pipeline("flowAI")
+      invisible(TRUE)
+    },
+    
+    retirer_les_bordures = function(canal1, canal2, nom_echantillon = NULL) {
+      self$canaux_bordures <- c(canal1, canal2)
+      liste_source <- self$get_derniere_source()
+      noms_a_traiter <- if (is.null(nom_echantillon)) names(liste_source) else nom_echantillon
+      
+      if (is.null(noms_a_traiter) || length(noms_a_traiter) == 0) {
+        warning("Aucun échantillon trouvé à traiter pour le retrait des bordures.")
+        return(NULL)
+      }
+      
+      for (nom in noms_a_traiter) {
+        if (!is.null(liste_source[[nom]])) {
+          message("Retrait des bordures (Margins) sur : ", nom)
+          self$post_retrait_bordures[[nom]] <- PeacoQC::RemoveMargins(
+            ff       = liste_source[[nom]], 
+            channels = self$canaux_bordures
+          )
+        }
+      }
+      if (!is.null(self$update_pipeline)) self$update_pipeline("bordures", nom_echantillon)
+    },
+    
+    retirer_les_debris = function(matrice_points, canal_x, canal_y, nom_echantillon = NULL, source_nettoyage = "brutes") {
+      if (is.null(matrice_points)) stop("Aucune coordonnée de gate fournie.")
+      if (!is.matrix(matrice_points) && !is.data.frame(matrice_points)) {
+        stop("La structure de la gate doit être une matrice ou un data.frame.")
+      }
+      if (nrow(matrice_points) < 3) stop("Un polygone de filtrage nécessite au moins 3 points.")
+      
+      liste_source <- NULL
+      if (source_nettoyage == "peacoqc") {
+        liste_source <- self$post_PeacoQC
+      } else if (source_nettoyage == "flowai") {
+        liste_source <- self$post_flowAI
+      }
+      
+      if (is.null(liste_source) || length(liste_source) == 0) {
+        if (source_nettoyage %in% c("peacoqc", "flowai")) {
+          message("⚠️ [Warning] Source '", source_nettoyage, "' introuvable ou vide. Repli sur les données compensées brutes.")
+        }
+        liste_source <- self$echantillons_traites
+      }
+      
+      if (is.null(liste_source) || length(liste_source) == 0) {
+        stop("Aucune donnée disponible (brute, PeacoQC ou flowAI) pour appliquer le filtre débris.")
+      }
+      
+      matrice_points <- as.matrix(matrice_points[, 1:2])
+      colnames(matrice_points) <- c(canal_x, canal_y)
+      polygone_debris <- flowCore::polygonGate(.gate = matrice_points, filterId = "Gate_Debris")
+      if (is.null(self$gate_debris)) self$gate_debris <- list()
+      if (is.null(self$post_debris)) self$post_debris <- list()
+      
+      appliquer_le_filtrage = function(nom) {
+        flowframe_entree <- liste_source[[nom]]
+        if (is.null(flowframe_entree)) return(NULL)
+        
+        message("Application du filtre Débris (PolygonGate) via source '", source_nettoyage, "' sur : ", nom)
+        resultat_filtre <- flowCore::filter(flowframe_entree, polygone_debris)
+        self$gate_debris[[nom]] <- polygone_debris
+        self$post_debris[[nom]] <- flowframe_entree[resultat_filtre@subSet, ]
+      }
+      
+      noms_a_traiter <- if (is.null(nom_echantillon)) names(liste_source) else nom_echantillon
+      for (nom in noms_a_traiter) { 
+        appliquer_le_filtrage(nom) 
+      }
+      
+      if (!is.null(self$update_pipeline)) {
+        self$update_pipeline("debris", nom_echantillon)
+      }
+      
+      return(invisible(self))
+    },
+    
+    # Applique un gate polygonal nommé séquentiellement sur tous les échantillons.
+    # Chaque gate est empilé sur le précédent (le résultat du gate N-1 alimente le gate N).
+    # L'entrée du 1er gate est déterminée par source_nettoyage.
+    # gates_history stocke, pour chaque nom de gate, les résultats par échantillon.
+    appliquer_gate_nomme = function(nom_gate, matrice_points, canal_x, canal_y,
+                                    source_nettoyage = "brutes") {
+      if (is.null(nom_gate) || nchar(trimws(nom_gate)) == 0) stop("Le gate doit avoir un nom.")
+      if (is.null(matrice_points) || nrow(matrice_points) < 3) stop("Polygone invalide (< 3 points).")
+      
+      # Source d'entrée : dernier gate validé si disponible, sinon source QC choisie
+      if (length(self$gates_history) > 0) {
+        dernier_gate <- self$gates_history[[length(self$gates_history)]]
+        liste_source <- lapply(names(dernier_gate), function(n) dernier_gate[[n]]$post_data)
+      } else {
+        if (source_nettoyage == "peacoqc" && length(self$post_PeacoQC) > 0) {
+          liste_source <- self$post_PeacoQC
+        } else if (source_nettoyage == "flowai" && length(self$post_flowAI) > 0) {
+          liste_source <- self$post_flowAI
+        } else {
+          liste_source <- self$get_derniere_source()
+        }
+      }
+      
+      if (is.null(liste_source) || length(liste_source) == 0) {
+        stop("Aucune donnée disponible pour appliquer le gate.")
+      }
+      
+      mat_gate <- as.matrix(matrice_points[, 1:2])
+      colnames(mat_gate) <- c(canal_x, canal_y)
+      polygone <- flowCore::polygonGate(.gate = mat_gate, filterId = nom_gate)
+      
+      resultats_gate <- list()
+      for (nom in names(liste_source)) {
+        ff_entree <- liste_source[[nom]]
+        if (is.null(ff_entree)) next
+        n_avant <- nrow(flowCore::exprs(ff_entree))
+        message("Application gate '", nom_gate, "' sur : ", nom)
+        res_filtre <- flowCore::filter(ff_entree, polygone)
+        ff_apres   <- ff_entree[res_filtre@subSet, ]
+        n_apres    <- nrow(flowCore::exprs(ff_apres))
+        resultats_gate[[nom]] <- list(
+          polygone  = mat_gate,
+          canal_x   = canal_x,
+          canal_y   = canal_y,
+          post_data = ff_apres,
+          n_avant   = n_avant,
+          n_apres   = n_apres
+        )
+      }
+      
+      # Enregistre dans l'historique (écrase si même nom)
+      self$gates_history[[nom_gate]] <- resultats_gate
+      
+      # Met aussi à jour post_debris pour compatibilité avec visualiser_debris et les étapes aval
+      self$gate_debris <- lapply(resultats_gate, function(r) {
+        flowCore::polygonGate(.gate = r$polygone, filterId = nom_gate)
+      })
+      self$post_debris <- lapply(resultats_gate, function(r) r$post_data)
+      
+      return(invisible(self))
+    },
+    
+    retirer_doublets_FSC = function(facteur_sensibilite = 4, axe_discrimination = "H_A", nom_echantillon = NULL) { # Méthode statistique éliminant les agrégats cellulaires (doublets) sur l'axe Forward Scatter (FSC) en évaluant la linéarité géométrique des signaux
+      liste_fcs_source <- if (!is.null(self$post_debris) && length(self$post_debris) > 0) self$post_debris else self$get_derniere_source() # Sélectionne par défaut les données issues du filtre débris ou applique le mécanisme de repli pyramidal sur le dernier état valide
+      label_source <- if (!is.null(self$post_debris) && length(self$post_debris) > 0) "post_debris" else "source_parente" # Génère une étiquette textuelle décrivant le niveau d'origine des données pour la traçabilité du pipeline
+      
+      if (is.null(self$gate_doublets_FSC)) self$gate_doublets_FSC <- list()
+      if (is.null(self$post_doublets_FSC)) self$post_doublets_FSC <- list()
+      if (is.null(self$post_doublets_final)) self$post_doublets_final <- list()
+      
+      calculer_doublets = function(nom, lbl_src) { # Sous-fonction interne calculant de manière isolée les limites statistiques d'exclusion des agrégats pour un échantillon donné
+        flowframe_entree <- liste_fcs_source[[nom]] # Extrait l'objet flowFrame d'entrée correspondant à l'indexation de la cohorte
+        if (is.null(flowframe_entree)) return(NULL) # Quitte proprement la sous-routine si l'échantillon spécifié est introuvable en mémoire
+        matrice_exprs <- flowCore::exprs(flowframe_entree) # Extrait la matrice bidimensionnelle des expressions d'intensités brutes de toutes les cellules de l'échantillon
+        
+        if (axe_discrimination == "H_A") {
+          canal_x <- grep("FSC-H", colnames(matrice_exprs), value = TRUE, ignore.case = TRUE)[1]
+          canal_y <- grep("FSC-A", colnames(matrice_exprs), value = TRUE, ignore.case = TRUE)[1]
+        } else if (axe_discrimination == "W_A") {
+          canal_x <- grep("FSC-W", colnames(matrice_exprs), value = TRUE, ignore.case = TRUE)[1]
+          canal_y <- grep("FSC-A", colnames(matrice_exprs), value = TRUE, ignore.case = TRUE)[1]
+        } else if (axe_discrimination == "H_W") {
+          canal_x <- grep("FSC-H", colnames(matrice_exprs), value = TRUE, ignore.case = TRUE)[1]
+          canal_y <- grep("FSC-W", colnames(matrice_exprs), value = TRUE, ignore.case = TRUE)[1]
+        } else {
+          stop("axe_discrimination invalide. Choisir parmi 'H_A', 'W_A' ou 'H_W'")
+        }
+        
+        if (is.na(canal_x) || is.na(canal_y)) { # Si l'un des deux signaux morphologiques fondamentaux indispensables à l'évaluation géométrique est manquant
+          warning("Canaux FSC requis pour l'axe ", axe_discrimination, " introuvables pour ", nom, ". Étape ignorée.") # Émet un avertissement pour alerter sur l'incompatibilité de la structure du fichier FCS
+          self$post_doublets_FSC[[nom]] <- flowframe_entree # Duplique les données d'entrée sans altération pour ne pas rompre la chaîne de traitement en aval
+          return(NULL) # Interrompt la sous-routine de cet échantillon pour passer au tube suivant
+        } 
+        
+        ratio_Y_X <- matrice_exprs[, canal_y] / (matrice_exprs[, canal_x] + 1e-6) # Calcule le ratio de linéarité cellulaire en ajoutant un epsilon régulateur pour interdire les divisions critiques par zéro
+        val_mad <- stats::mad(ratio_Y_X, na.rm = TRUE) # Calcule l'écart absolu à la médiane (MAD), indicateur robuste de la dispersion de la population de cellules uniques (singlets)
+        if (val_mad == 0) val_mad <- mean(ratio_Y_X, na.rm = TRUE) * 0.05 # Securité statistique : si la dispersion est nulle (artefact), calcule une variance de substitution basée sur la moyenne
+        seuil_statistique <- stats::median(ratio_Y_X, na.rm = TRUE) + (facteur_sensibilite * val_mad) # Fixe la frontière critique d'exclusion au-delà de laquelle la déformation géométrique trahit un doublet
+        
+        self$gate_doublets_FSC[[nom]] <- list( # Sauvegarde la structure des paramètres de la coupure statistique au sein de l'environnement R6 pour les exports de métadonnées
+          type = "stat", seuil = seuil_statistique, facteur = facteur_sensibilite, # Consigne la nature mathématique du filtre, le seuil calculé et le coefficient multiplicateur appliqué
+          source = lbl_src, channels = c(canal_x, canal_y) # Enregistre la provenance des données d'entrée ainsi que le couple d'axes physiques utilisés
+        ) 
+        
+        flowframe_filtre <- flowframe_entree[ratio_Y_X < seuil_statistique & is.finite(ratio_Y_X), ] # Filtre la matrice en excluant les événements au-dessus du seuil (doublets) ou présentant des instabilités mathématiques
+        self$post_doublets_FSC[[nom]] <- flowframe_filtre # Enregistre l'échantillon purgé dans la mémoire de stockage intermédiaire dédiée aux filtres FSC
+        self$post_doublets_final[[nom]] <- flowframe_filtre # Met à jour la mémoire de stockage terminale des cellules uniques validées (singlets)
+      } 
+      
+      noms_a_traiter <- if (is.null(nom_echantillon)) names(liste_fcs_source) else nom_echantillon # Détermine la liste d'échantillons à traiter en lot (tous les fichiers ou l'identifiant exclusif fourni)
+      for (nom in noms_a_traiter) { calculer_doublets(nom, label_source) } # Parcourt et traite séquentiellement via la boucle chaque échantillon configuré dans la liste cible
+      self$update_pipeline("doublets_FSC", nom_echantillon) # Active la mise à jour des graphes d'état ou rafraîchit l'interface Shiny pour cette étape d'isolement
+    },
+    
+    retirer_doublets_SSC = function(facteur_sensibilite = 4, axe_discrimination = "H_A", nom_echantillon = NULL) { # Méthode statistique éliminant les agrégats cellulaires (doublets) sur l'axe Side Scatter (SSC) en évaluant la linéarité géométrique des signaux de granularité
+      liste_fcs_source <- if (!is.null(self$post_doublets_FSC) && length(self$post_doublets_FSC) > 0) { # Évalue si la liste issue du filtrage des doublets FSC est préalablement disponible
+        self$post_doublets_FSC # Privilégie le chaînage direct après l'isolement des singlets sur l'axe FSC
+      } else if (!is.null(self$post_debris) && length(self$post_debris) > 0) { # À défaut, évalue si la liste filtrée pour les débris est accessible
+        self$post_debris # Se connecte en aval de l'étape de filtration des débris cellulaires
+      } else { # Si aucune des structures de tri précédentes n'est peuplée ou initialisée
+        self$get_derniere_source() # Active le mécanisme de repli automatique sur le dernier niveau de traitement valide du pipeline
+      } 
+      
+      label_source <- if (!is.null(self$post_doublets_FSC) && length(self$post_doublets_FSC) > 0) { # Détermine l'origine exacte des données pour documenter l'historique d'analyse
+        "post_doublets_FSC" # Attribue le label indiquant un chaînage standard post-filtre FSC
+      } else if (!is.null(self$post_debris) && length(self$post_debris) > 0) { # Si l'étape FSC a été contournée ou omise volontairement
+        "post_debris" # Attribue le label identifiant la provenance directe du filtre débris
+      } else { # Si le script s'est replié sur une structure amont
+        "source_parente" # Attribue le label générique de traçabilité par défaut
+      } 
+      
+      if (is.null(self$gate_doublets_SSC)) self$gate_doublets_SSC <- list()
+      if (is.null(self$post_doublets_SSC)) self$post_doublets_SSC <- list()
+      if (is.null(self$post_doublets_final)) self$post_doublets_final <- list()
+      
+      calculer_doublets = function(nom, lbl_src) { # Sous-fonction interne isolant les limites de coupure statistique et triant les événements pour un échantillon individuel
+        flowframe_entree <- liste_fcs_source[[nom]] # Extrait l'objet flowFrame d'entrée indexé pour la clé de l'itération active
+        if (is.null(flowframe_entree)) return(NULL) # Quitte la sous-routine si l'échantillon de la cohorte est inexistant en mémoire vive
+        matrice_exprs <- flowCore::exprs(flowframe_entree) # Extrait sous forme de matrice bivariée les intensités de numérisation de chaque cellule
+        
+        # === ROUTAGE DYNAMIQUE DES CANAUX SSC ===
+        if (axe_discrimination == "H_A") {
+          canal_x <- grep("SSC-H", colnames(matrice_exprs), value = TRUE, ignore.case = TRUE)[1]
+          canal_y <- grep("SSC-A", colnames(matrice_exprs), value = TRUE, ignore.case = TRUE)[1]
+        } else if (axe_discrimination == "W_A") {
+          canal_x <- grep("SSC-W", colnames(matrice_exprs), value = TRUE, ignore.case = TRUE)[1]
+          canal_y <- grep("SSC-A", colnames(matrice_exprs), value = TRUE, ignore.case = TRUE)[1]
+        } else if (axe_discrimination == "H_W") {
+          canal_x <- grep("SSC-H", colnames(matrice_exprs), value = TRUE, ignore.case = TRUE)[1]
+          canal_y <- grep("SSC-W", colnames(matrice_exprs), value = TRUE, ignore.case = TRUE)[1]
+        } else {
+          stop("axe_discrimination invalide. Choisir parmi 'H_A', 'W_A' ou 'H_W'")
+        }
+        
+        if (is.na(canal_x) || is.na(canal_y)) { # Si l'un des deux signaux SSC fondamentaux pour discriminer la géométrie cellulaire est introuvable
+          warning("Canaux SSC requis pour l'axe ", axe_discrimination, " introuvables pour ", nom, ". Étape ignorée.") # Alerte l'utilisateur via un avertissement concernant la non-conformité structurelle du fichier
+          self$post_doublets_SSC[[nom]] <- flowframe_entree # Duplique les données brutes dans la structure cible pour préserver le flux algorithmique
+          return(NULL) # Interrompt proprement la sous-routine de cet échantillon pour basculer sur le tube suivant
+        } 
+        
+        ratio_Y_X <- matrice_exprs[, canal_y] / (matrice_exprs[, canal_x] + 1e-6) # Calcule le ratio de granularité en ajoutant un epsilon stabilisateur pour empêcher les divisions interdites par zéro
+        val_mad <- stats::mad(ratio_Y_X, na.rm = TRUE) # Calcule l'écart absolu à la médiane (MAD), estimateur robuste de la dispersion de la population de cellules uniques (singlets)
+        if (val_mad == 0) val_mad <- mean(ratio_Y_X, na.rm = TRUE) * 0.05 # Sécurité statistique : calcule une variance artificielle basée sur la moyenne si la dispersion réelle est nulle
+        seuil_statistique <- stats::median(ratio_Y_X, na.rm = TRUE) + (facteur_sensibilite * val_mad) # Calcule le seuil discriminant au-delà duquel la déformation temporelle du signal valide la présence d'un agrégat
+        
+        self$gate_doublets_SSC[[nom]] <- list( # Consigne la totalité des variables de tri au sein de l'environnement R6 pour les besoins de traçabilité
+          type = "stat", seuil = seuil_statistique, facteur = facteur_sensibilite, # Sauvegarde la nature du filtre, la valeur de la barrière calculée et la sensibilité appliquée
+          source = lbl_src, channels = c(canal_x, canal_y) # Enregistre l'origine des données ainsi que le couple de paramètres SSC sollicités
+        )
+        
+        flowframe_filtre <- flowframe_entree[ratio_Y_X < seuil_statistique & is.finite(ratio_Y_X), ] # Filtre la matrice en excluant les doublets (au-dessus du seuil) et les valeurs infinies aberrantes
+        self$post_doublets_SSC[[nom]] <- flowframe_filtre # Sauvegarde l'échantillon épuré dans le compartiment intermédiaire dédié aux filtres SSC
+        self$post_doublets_final[[nom]] <- flowframe_filtre # Met à jour la mémoire finale centralisée de l'objet contenant les cellules uniques (singlets) qualifiées
+      } 
+      
+      noms_a_traiter <- if (is.null(nom_echantillon)) names(liste_fcs_source) else nom_echantillon # Cible la cohorte entière si l'identifiant est omis, sinon restreint l'exécution au fichier unique spécifié
+      for (nom in noms_a_traiter) { calculer_doublets(nom, label_source) } # Parcourt et traite séquentiellement l'ensemble de la liste via une boucle d'exécution unitaire
+      self$update_pipeline("doublets_SSC", nom_echantillon) # Déclenche directement la mise à jour des graphes de suivi ou actualise l'interface graphique UI Shiny
+    },
+    
+    gate_les_doublets_FSC = function(points_utilisateur, axe_discrimination = "H_A", nom_echantillon = NULL) { # Méthode appliquant un fenêtrage polygonal manuel (PolygonGate) fourni par l'utilisateur pour discriminer et exclure les doublets sur les axes Forward Scatter
+      liste_fcs_source <- if (!is.null(self$post_debris) && length(self$post_debris) > 0) self$post_debris else self$get_derniere_source() # Sélectionne en priorité les données issues du filtre débris ou active le mécanisme de repli hiérarchique pyramidal
+      if (length(liste_fcs_source) == 0) stop("Aucune donnée source disponible pour le gating des doublets FSC.") # Sécurité : bloque l'exécution si aucune matrice cellulaire n'est localisée en mémoire vive
+      
+      premier_ff  <- liste_fcs_source[[1]] # Extrait le premier objet flowFrame disponible de la liste pour analyser sa structure technique
+      tous_canaux <- flowCore::colnames(premier_ff) # Récupère la liste complète des étiquettes de colonnes (canaux physiques de numérisation) de l'appareil
+      
+      if (axe_discrimination == "H_A") {
+        canal_x <- grep("FSC-H", tous_canaux, value = TRUE, ignore.case = TRUE)[1]
+        canal_y <- grep("FSC-A", tous_canaux, value = TRUE, ignore.case = TRUE)[1]
+      } else if (axe_discrimination == "W_A") {
+        canal_x <- grep("FSC-W", tous_canaux, value = TRUE, ignore.case = TRUE)[1]
+        canal_y <- grep("FSC-A", tous_canaux, value = TRUE, ignore.case = TRUE)[1]
+      } else if (axe_discrimination == "H_W") {
+        canal_x <- grep("FSC-H", tous_canaux, value = TRUE, ignore.case = TRUE)[1]
+        canal_y <- grep("FSC-W", tous_canaux, value = TRUE, ignore.case = TRUE)[1]
+      }
+      
+      matrice_coords <- as.matrix(points_utilisateur[, 1:2]) # Force la conversion des deux premières colonnes de coordonnées utilisateur en une matrice R standard pour l'interface flowCore
+      colnames(matrice_coords) <- c(canal_x, canal_y) # Aligne et synchronise obligatoirement les noms des colonnes de la matrice sur les canaux physiques cibles détectés
+      poly_fsc <- flowCore::polygonGate(.gate = matrice_coords, filterId = "Gate_Doublets_FSC") # Instancie l'objet géométrique formel polygonGate définissant la barrière d'inclusion des cellules uniques
+      
+      appliquer_fsc = function(nom) { # Sous-fonction encapsulant le tri topologique de point dans un polygone pour un échantillon de la cohorte
+        ff_entree  <- liste_fcs_source[[nom]] # Extrait l'objet flowFrame d'entrée correspondant à l'identifiant de l'itération active
+        if (is.null(ff_entree)) return(NULL) # Quitte proprement la sous-routine si l'échantillon spécifié est introuvable ou mal chargé
+        res_filtre <- flowCore::filter(ff_entree, poly_fsc) # Exécute le filtrage géométrique bidimensionnel pour évaluer l'appartenance de chaque événement cellulaire au polygone
+        self$gate_doublets_FSC[[nom]] <- list(type = "poly", gate = poly_fsc, channels = c(canal_x, canal_y)) # Consigne le polygone et les métadonnées de tri dans l'environnement de l'objet R6 pour traçabilité
+        ff_propre <- ff_entree[res_filtre@subSet, ] # Sous-échantillonne la matrice d'expression pour ne conserver que les cellules validées par l'indice logique TRUE (singlets)
+        self$post_doublets_FSC[[nom]]    <- ff_propre # Enregistre l'échantillon nettoyé dans la mémoire intermédiaire dédiée aux structures FSC
+        self$post_doublets_final[[nom]]  <- ff_propre # Met à jour la structure finale de stockage centralisant les cellules uniques qualifiées de l'expérience
+      } 
+      
+      noms <- if (is.null(nom_echantillon)) names(liste_fcs_source) else nom_echantillon # Cible la cohorte complète si l'identifiant est omis, ou restreint l'exécution au fichier unique spécifié
+      for (n in noms) { appliquer_fsc(n) } # Parcourt et traite séquentiellement l'ensemble de la liste via une boucle d'exécution unitaire
+      if (!is.null(self$update_pipeline)) self$update_pipeline("doublets_FSC", nom_echantillon) # Déclenche la mise à jour des graphes de suivi ou actualise l'interface graphique Shiny
+    },
+    
+    gate_les_doublets_SSC = function(points_utilisateur, axe_discrimination = "H_A", nom_echantillon = NULL) { # Méthode appliquant un fenêtrage polygonal manuel (PolygonGate) fourni par l'utilisateur pour discriminer et exclure les doublets sur les axes Side Scatter
+      liste_fcs_source <- if (!is.null(self$post_doublets_FSC) && length(self$post_doublets_FSC) > 0) { # Évalue si la liste issue du filtrage ou du gating des doublets FSC est disponible en mémoire
+        self$post_doublets_FSC # Privilégie le chaînage direct des filtres en se connectant en aval des cellules uniques isolées sur l'axe FSC
+      } else if (!is.null(self$post_debris) && length(self$post_debris) > 0) { # À défaut, évalue si la liste filtrée pour les débris cellulaires est accessible
+        self$post_debris # Connecte le flux en aval immédiat de l'étape de filtration des débris
+      } else { # Si aucune des structures de tri précédentes n'est peuplée ou initialisée
+        self$get_derniere_source() # Active le mécanisme de repli automatique sur le dernier niveau de traitement valide détecté dans le pipeline
+      } 
+      if (length(liste_fcs_source) == 0) stop("Aucune donnée source disponible pour le gating des doublets SSC.") # Sécurité : bloque l'exécution si aucune matrice cellulaire n'est localisée en mémoire vive
+      
+      premier_ff  <- liste_fcs_source[[1]] # Extrait le premier objet flowFrame disponible de la liste pour analyser sa structure technique
+      tous_canaux <- flowCore::colnames(premier_ff) # Récupère la liste complète des étiquettes de colonnes (canaux physiques de numérisation) de l'appareil
+      
+      if (axe_discrimination == "H_A") {
+        canal_x <- grep("SSC-H", tous_canaux, value = TRUE, ignore.case = TRUE)[1]
+        canal_y <- grep("SSC-A", tous_canaux, value = TRUE, ignore.case = TRUE)[1]
+      } else if (axe_discrimination == "W_A") {
+        canal_x <- grep("SSC-W", tous_canaux, value = TRUE, ignore.case = TRUE)[1]
+        canal_y <- grep("SSC-A", tous_canaux, value = TRUE, ignore.case = TRUE)[1]
+      } else if (axe_discrimination == "H_W") {
+        canal_x <- grep("SSC-H", tous_canaux, value = TRUE, ignore.case = TRUE)[1]
+        canal_y <- grep("SSC-W", tous_canaux, value = TRUE, ignore.case = TRUE)[1]
+      }
+      
+      matrice_coords <- as.matrix(points_utilisateur[, 1:2]) # Force la conversion des deux premières colonnes de coordonnées utilisateur en une matrice R standard pour l'interface flowCore
+      colnames(matrice_coords) <- c(canal_x, canal_y) # Aligne et synchronise obligatoirement les noms des colonnes de la matrice sur les canaux physiques cibles détectés
+      poly_ssc <- flowCore::polygonGate(.gate = matrice_coords, filterId = "Gate_Doublets_SSC") # Instancie l'objet géométrique formel polygonGate définissant la barrière d'inclusion des cellules uniques
+      
+      appliquer_ssc = function(nom) { # Sous-fonction encapsulant le tri topologique de point dans un polygone pour un échantillon de la cohorte
+        ff_entree <- liste_fcs_source[[nom]] # Extrait l'objet flowFrame d'entrée correspondant à l'identifiant de l'itération active
+        if (is.null(ff_entree)) return(NULL) # Quitte proprement la sous-routine si l'échantillon spécifié est introuvable ou mal chargé
+        res_filtre <- flowCore::filter(ff_entree, poly_ssc) # Exécute le filtrage géométrique bidimensionnel pour évaluer l'appartenance de chaque événement cellulaire au polygone
+        self$gate_doublets_SSC[[nom]] <- list(type = "poly", gate = poly_ssc, channels = c(canal_x, canal_y)) # Consigne le polygone et les métadonnées de tri dans l'environnement de l'objet R6 pour traçabilité
+        ff_propre <- ff_entree[res_filtre@subSet, ] # Sous-échantillonne la matrice d'expression pour ne conserver que les cellules validées par l'indice logique TRUE (singlets)
+        self$post_doublets_SSC[[nom]]   <- ff_propre # Enregistre l'échantillon nettoyé dans la mémoire intermédiaire dédiée aux structures SSC
+        self$post_doublets_final[[nom]] <- ff_propre # Met à jour la structure finale de stockage centralisant les cellules uniques qualifiées de l'expérience
+      } 
+      
+      noms <- if (is.null(nom_echantillon)) names(liste_fcs_source) else nom_echantillon # Cible la cohorte complète si l'identifiant est omis, ou restreint l'exécution au fichier unique spécifié
+      for (n in noms) { appliquer_ssc(n) } # Parcourt et traite séquentiellement l'ensemble de la liste via une boucle d'exécution unitaire
+      if (!is.null(self$update_pipeline)) self$update_pipeline("doublets_SSC", nom_echantillon) # Déclenche la mise à jour des graphes de suivi ou actualise l'interface graphique Shiny
+    },
+    
+    visualiser_peacoqc = function(nom_echantillon, max_points = 10000) { # Méthode générant un graphique cinétique comparatif pour évaluer visuellement l'efficacité du filtrage de bruit de flux opéré par PeacoQC
+      if (is.null(self$post_PeacoQC[[nom_echantillon]])) { # Évalue si la structure ou le fichier cible nettoyé par PeacoQC est absent de la mémoire vive
+        message("Pas de données PeacoQC pour ", nom_echantillon) # Notification d'avertissement en console si l'étape amont n'a pas été exécutée
+        return(NULL) # Interrompt proprement la fonction et renvoie NULL pour ne pas provoquer de plantage de l'interface
+      } 
+      
+      flowframe_initial <- self$echantillons_traites[[nom_echantillon]] # Récupère l'objet flowFrame initial d'origine (avant le processus PeacoQC)
+      flowframe_nettoye <- self$post_PeacoQC[[nom_echantillon]] # Extrait l'objet flowFrame épuré contenant uniquement la population cellulaire conforme
+      donnees_initiales <- as.data.frame(flowCore::exprs(flowframe_initial)) # Convertit la matrice des intensités d'origine en tableau de données exploitable par ggplot2
+      donnees_nettoyees <- as.data.frame(flowCore::exprs(flowframe_nettoye)) # Convertit la matrice des intensités épurées en tableau de données exploitable par ggplot2
+      canal_temps <- grep("time", colnames(donnees_initiales), value = TRUE, ignore.case = TRUE)[1] # Détecte par expression régulière le libellé de la colonne associée à la variable temporelle
+      canal_fsc   <- grep("FSC", colnames(donnees_initiales), value = TRUE, ignore.case = TRUE)[1] # Détecte par expression régulière le libellé de la colonne associée au paramètre morphologique FSC
+      if (is.na(canal_temps)) canal_temps <- colnames(donnees_initiales)[1] # Sécurité : force l'affectation de la première colonne si aucun paramètre temporel n'est trouvé
+      if (is.na(canal_fsc))   canal_fsc   <- colnames(donnees_initiales)[2] # Sécurité : force l'affectation de la deuxième colonne si aucun paramètre morphologique n'est trouvé
+      limites_temps <- range(donnees_initiales[[canal_temps]], na.rm = TRUE) # Calcule l'amplitude minimale et maximale du temps pour fixer les frontières absolues de l'axe X
+      limites_fsc   <- range(donnees_initiales[[canal_fsc]], na.rm = TRUE) # Calcule l'amplitude minimale et maximale du signal FSC pour fixer les frontières absolues de l'axe Y
+      total_evenements  <- nrow(donnees_initiales) # Dénombre le nombre total d'événements cellulaires bruts enregistrés à l'acquisition
+      evenements_gardes <- nrow(donnees_nettoyees) # Dénombre le nombre de cellules conservées post-contrôle qualité statistique
+      pourcentage_conservation <- if(total_evenements > 0) round((evenements_gardes / total_evenements) * 100, 1) else 0 # Calcule le rendement d'acquisition après filtration, arrondi au dixième
+      
+      if (!is.null(max_points) && total_evenements > max_points) { # Si la taille de l'échantillon outrepasse la limite maximale définie pour la fluidité du rendu graphique
+        
         if (!is.null(self$seed)) set.seed(self$seed)
-        donnees_nett_visu  <- donnees_nettoyees[sample(seq_len(evenements_gardes), nb_nettoye_visu), ] # Sous-échantillonne aléatoirement la matrice nettoyée au même prorata visuel
-      } else { # Si l'échantillon a été intégralement rejeté par le contrôle qualité
-        donnees_nett_visu  <- donnees_nettoyees # Assigne la structure vide directement sans calcul d'échantillonnage
+        donnees_init_visu  <- donnees_initiales[sample(seq_len(total_evenements), max_points), ] # Sous-échantillonne de manière aléatoire la matrice initiale pour alléger la charge graphique
+        
+        if (evenements_gardes > 0) { # S'il reste des cellules viables après le passage de l'algorithme PeacoQC
+          nb_nettoye_visu   <- min(evenements_gardes, max_points) # Détermine la borne supérieure optimale de points à conserver pour le rendu des données épurées
+          
+          # === SÉCURITÉ SEED : Fixe la graine avant le sous-échantillonnage nettoyé ===
+          if (!is.null(self$seed)) set.seed(self$seed)
+          donnees_nett_visu  <- donnees_nettoyees[sample(seq_len(evenements_gardes), nb_nettoye_visu), ] # Sous-échantillonne aléatoirement la matrice nettoyée au même prorata visuel
+        } else { # Si l'échantillon a été intégralement rejeté par le contrôle qualité
+          donnees_nett_visu  <- donnees_nettoyees # Assigne la structure vide directement sans calcul d'échantillonnage
+        } 
+      } else { # Si le nombre total de cellules est inférieur au seuil max_points
+        donnees_init_visu  <- donnees_initiales # Conserve l'intégralité de la matrice de départ pour la représentation graphique
+        donnees_nett_visu  <- donnees_nettoyees # Conserve l'intégralité de la matrice épurée pour la représentation graphique
       } 
-    } else { # Si le nombre total de cellules est inférieur au seuil max_points
-      donnees_init_visu  <- donnees_initiales # Conserve l'intégralité de la matrice de départ pour la représentation graphique
-      donnees_nett_visu  <- donnees_nettoyees # Conserve l'intégralité de la matrice épurée pour la représentation graphique
-    } 
-    
-    lbl_x <- if (!is.null(self$get_label)) self$get_label(flowframe_initial, canal_temps) else canal_temps # Extrait le libellé biologique de l'axe X via get_label, ou utilise le nom technique brut
-    lbl_y <- if (!is.null(self$get_label)) self$get_label(flowframe_initial, canal_fsc) else canal_fsc # Extrait le libellé biologique de l'axe Y via get_label, ou utilise le nom technique brut
-    graphique_qc <- ggplot2::ggplot() + # Initialise l'objet graphique ggplot2 vide multicouche
-      ggplot2::geom_point(data = donnees_init_visu, ggplot2::aes(x = .data[[canal_temps]], y = .data[[canal_fsc]]), # Ajoute la couche de fond représentant l'ensemble des points d'origine
-                          size = 0.2, alpha = 0.2, color = "grey70") # Paramètre les points en gris clair et transparent pour matérialiser les événements exclus ou masqués
-    if (nrow(donnees_nett_visu) > 0) { # Si la sous-matrice nettoyée contient des événements cellulaires à tracer
-      graphique_qc <- graphique_qc + # Superpose une seconde couche d'événements par-dessus le bruit de fond gris
-        ggplot2::geom_point(data = donnees_nett_visu, ggplot2::aes(x = .data[[canal_temps]], y = .data[[canal_fsc]]), # Spécifie les coordonnées cinétiques des cellules conformes validées
-                            size = 0.2, alpha = 0.4, color = "darkblue") # Paramètre les cellules saines en bleu foncé contrasté pour mettre en évidence les zones d'instabilité supprimées
-    } 
-    graphique_qc <- graphique_qc + # Finalise la mise en forme structurelle et textuelle de la figure de diagnostic
-      ggplot2::coord_cartesian(xlim = limites_temps, ylim = limites_fsc) + # Force un cadrage strict sur les limites initiales du fichier pour éviter tout effet de zoom déformant
-      ggplot2::theme_bw() + # Applique un habillage blanc structuré et épuré facilitant la lecture des densités de points
-      ggplot2::theme( # Ajuste les propriétés typographiques de la figure de contrôle
-        plot.title = ggplot2::element_text(face = "bold"), # Renforce la visibilité du titre principal en l'affichant en caractères gras
-        plot.subtitle = ggplot2::element_text(color = "darkblue", size = 11) # Distingue le sous-texte statistique en lui appliquant une coloration bleue
-      ) + # Fin des ajustements de thème
-      ggplot2::labs( # Définit l'ensemble des titres et des descriptions scientifiques entourant les axes
-        title = paste("Contrôle qualité PeacoQC :", nom_echantillon), # Affiche dynamiquement le titre de la méthode couplé au nom du fichier FCS audité
-        subtitle = paste0("Événements conservés : ", format(evenements_gardes, big.mark=" "), # Documente les métriques de tri incluant le décompte des cellules saines restantes
-                          " | ", pourcentage_conservation, "% (Affichage max : ", max_points, " pts)"), # Affiche le rendement en pourcentage et précise le niveau de sous-échantillonnage graphique appliqué
-        x = lbl_x, y = lbl_y # Attribue les libellés biologiques ou techniques finaux aux axes X et Y
-      ) 
-    
-    if (is.null(self$plots_peacoqc)) self$plots_peacoqc <- list() # Initialise la structure de liste dédiée au stockage des graphiques PeacoQC si inexistante en mémoire
-    self$plots_peacoqc[[nom_echantillon]] <- graphique_qc # Archive l'objet graphique au sein de l'environnement R6 pour permettre des exports en lot ultérieurs
-    return(graphique_qc) # Renvoie l'objet graphique complet, prêt pour affichage à l'écran ou intégration dans une interface Shiny
-  },
-    
-  visualiser_flowai = function(nom_echantillon, max_points = 10000) { # Méthode générant un graphique cinétique de contrôle qualité pour visualiser l'impact du nettoyage flowAI sur un échantillon
-    if (is.null(self$post_flowAI) || is.null(self$post_flowAI[[nom_echantillon]])) { # Vérifie si la structure ou l'échantillon ciblé par le nettoyage flowAI est manquant en mémoire
-      stop("Aucun résultat flowAI trouvé pour cet échantillon.") # Interrompt le script et exige l'exécution préalable de la méthode appliquer_flowai
-    } 
-    
-    ff_nettoye <- self$post_flowAI[[nom_echantillon]] # Extrait l'objet flowFrame épuré (contenant uniquement les cellules validées par le QC)
-    fcs_initial <- if (length(self$echantillons_traites) > 0) self$echantillons_traites[[nom_echantillon]] else self$fcs_compenses[[nom_echantillon]] # Récupère l'échantillon brut d'origine (avant QC) au sein de la structure de stockage disponible
-    exprs_initiales <- as.data.frame(flowCore::exprs(fcs_initial)) # Extrait sous forme de tableau de données R la matrice d'expression de tous les événements cellulaires initiaux
-    canal_temps <- grep("time", colnames(exprs_initiales), ignore.case = TRUE, value = TRUE)[1] # Détecte dynamiquement par expression régulière le nom du canal dédié au suivi du temps d'acquisition
-    canal_taille <- grep("FSC", colnames(exprs_initiales), ignore.case = TRUE, value = TRUE)[1] # Détecte dynamiquement par expression régulière le nom du canal de taille cellulaire relative (Forward Scatter)
-    if (is.na(canal_temps) || is.na(canal_taille)) { # Sécurité : si la détection automatique des canaux échoue ou si les libellés sont atypiques
-      canal_temps <- colnames(exprs_initiales)[ncol(exprs_initiales)] # Assigne par défaut la toute dernière colonne de la matrice comme axe temporel
-      canal_taille <- colnames(exprs_initiales)[1] # Assigne par défaut la toute première colonne de la matrice comme paramètre morphologique FSC
-    } 
-    exprs_nettoyees <- as.data.frame(flowCore::exprs(ff_nettoye)) # Extrait sous forme de tableau de données R la matrice d'expression des événements conservés post-QC
-    exprs_initiales$Status <- "Éliminé (flowAI)" # Initialise par défaut l'état de chaque événement de la matrice d'origine comme étant rejeté par le filtre
-    indices_conserves <- which(exprs_initiales[[canal_temps]] %in% exprs_nettoyees[[canal_temps]]) # Identifie par intersection les indices temporels des cellules ayant survécu au nettoyage de flowAI
-    exprs_initiales$Status[indices_conserves] <- "Conservé" # Assigne le statut de conformité aux événements cellulaires validés par l'algorithme
-    total_pts <- nrow(exprs_initiales) # Mémorise le nombre total d'événements cellulaires initialement présents dans le fichier d'acquisition
-    
-    if (total_pts > max_points) { # Si la taille de la matrice dépasse le seuil maximal de points fixé pour le tracé graphique
-      if (!is.null(self$seed)) set.seed(self$seed)
-      exprs_initiales <- exprs_initiales[sample(total_pts, max_points), ] # Échantillonne aléatoirement un nombre restreint de lignes pour optimiser le rendu graphique sans saturer la mémoire
-    } 
-    total_conserves <- length(indices_conserves) # Calcule le décompte absolu d'événements cellulaires conformes conservés post-QC
-    pourcentage_conservation <- round((total_conserves / total_pts) * 100, 1) # Déduit le rendement d'acquisition exprimé en pourcentage de cellules saines conservées
-    
-    graphique_flowai <- ggplot2::ggplot(exprs_initiales, ggplot2::aes(x = .data[[canal_temps]], y = .data[[canal_taille]], color = Status)) + # Initialise le graphique biplot Temps vs FSC
-      ggplot2::geom_point(size = 0.4, alpha = 0.6) + # Dessine le nuage de points cytométriques avec une taille fine et une légère transparence pour révéler l'empilement
-      ggplot2::scale_color_manual(values = c("Conservé" = "#1f77b4", "Éliminé (flowAI)" = "#d62728")) + # Applique un code couleur binaire contrasté (bleu pour le signal sain, rouge pour les anomalies)
-      ggplot2::theme_bw() + # Applique un habillage blanc structuré et épuré facilitant l'évaluation visuelle des coupures cinétiques
-      ggplot2::labs( # Configure les textes et légendes scientifiques entourant la figure de diagnostic
-        title = paste("Contrôle Qualité flowAI :", nom_echantillon), # Affiche le titre de l'analyse associé au nom du fichier FCS audité
-        subtitle = paste0("Événements conservés : ", format(total_conserves, big.mark=" "), " / ", 
-                          format(total_pts, big.mark=" "), " (", pourcentage_conservation, "%)"), # Affiche les métriques clés de rendement et d'élimination de la routine de QC
-        x = paste("Axe du Temps :", canal_temps), # Documente le nom exact du canal temporel de l'axe des abscisses
-        y = paste("Axe Morphologique :", canal_taille) # Documente le nom exact du canal de taille de l'axe des ordonnées
-      ) + 
-      ggplot2::theme( # Ajuste finement la typographie et la disposition des éléments de la figure
-        legend.position = "bottom", # Positionne la légende des statuts sous le graphique pour maximiser la largeur de la zone de tracé
-        plot.title    = ggplot2::element_text(face = "bold", size = 14), # Renforce l'accentuation visuelle du titre principal du diagnostic
-        legend.title  = ggplot2::element_blank() # Masque l'intitulé de la légende devenu superflu grâce à l'explicitation des étiquettes
-      ) 
-    return(graphique_flowai) # Renvoie l'objet graphique ggplot2 complet prêt pour affichage ou intégration UI Shiny
-  },
-    
-  visualiser_debris = function(nom_echantillon, max_points = 10000) { # Méthode générant un graphique bidimensionnel de densité (biplot) pour cartographier et valider l'exclusion des débris cellulaires par le polygone utilisateur
-    if (is.null(self$post_debris[[nom_echantillon]])) { # Évalue si la structure ou le fichier cible nettoyé pour les débris est absent de la mémoire vive
-      message("Pas de données Débris pour ", nom_echantillon) # Notification d'avertissement en console si l'étape de tri n'a pas été préalablement exécutée
-      return(NULL) # Interrompt proprement la fonction et renvoie NULL pour ne pas bloquer l'exécution globale
-    } 
-    
-    flowframe_avant <- if (!is.null(self$post_retrait_bordures) && length(self$post_retrait_bordures) > 0) { # Système pyramidal : vérifie la présence de données issues du retrait des bordures
-      self$post_retrait_bordures[[nom_echantillon]] # Charge prioritairement les expressions issues de l'élimination des événements de bordure saturés
-    } else if (!is.null(self$post_PeacoQC) && length(self$post_PeacoQC) > 0) { # À défaut, vérifie si l'étape PeacoQC est peuplée en mémoire vive
-      self$post_PeacoQC[[nom_echantillon]] # Oriente le flux vers la structure de données stabilisée par PeacoQC
-    } else if (!is.null(self$post_flowAI) && length(self$post_flowAI) > 0) { # À défaut, évalue la disponibilité de la structure issue du nettoyage flowAI
-      self$post_flowAI[[nom_echantillon]] # Charge les expressions issues du contrôle qualité multi-critères flowAI
-    } else { # Si aucun filtre de qualité n'a encore été appliqué sur les échantillons de la cohorte
-      self$echantillons_traites[[nom_echantillon]] # Charge la structure par défaut des expressions d'origine de l'expérience
-    } 
-    
-    if (is.null(flowframe_avant)) return(NULL) # Sécurité critique : quitte proprement la routine si aucun flowFrame antécédent valide n'est identifié
-    flowframe_apres  <- self$post_debris[[nom_echantillon]] # Récupère l'objet flowFrame épuré (contenant les événements validés à l'intérieur du polygone)
-    donnees_globales <- as.data.frame(flowCore::exprs(flowframe_avant)) # Convertit la matrice des intensités de la source d'entrée en tableau de données exploitable par ggplot2
-    total_evenements_avant <- nrow(donnees_globales) # Dénombre la population totale d'événements entrant dans l'étape de filtration des débris
-    if (!is.null(max_points) && total_evenements_avant > max_points) { # Si la taille de la population outrepasse la limite maximale définie pour la fluidité du rendu graphique
       
-      if (!is.null(self$seed)) set.seed(self$seed)
-      indices_gardes <- sample(seq_len(total_evenements_avant), max_points) # Génère un vecteur d'indices par échantillonnage aléatoire uniforme sans remise pour alléger le nuage de points
-      donnees_visu   <- donnees_globales[indices_gardes, ] # Extrait la sous-matrice d'expression correspondante dédiée à la représentation visuelle
-    } else { # Si le volume total de cellules initiales est inférieur au seuil critique max_points
-      donnees_visu   <- donnees_globales # Conserve l'intégralité de la matrice source pour le tracé graphique
-    } 
-    
-    gate_polygone    <- self$gate_debris[[nom_echantillon]] # Extrait l'objet formel polygonGate appliqué à cet échantillon au cours de la filtration
-    coordonnees_gate <- as.data.frame(gate_polygone@boundaries) # Extrait sous forme de tableau bidimensionnel les sommets géométriques (X, Y) du polygone de tri
-    colnames(coordonnees_gate) <- c("x", "y") # Renomme explicitement les colonnes du tableau pour simplifier l'intégration dans la couche ggplot2
-    canal_x <- gate_polygone@parameters[[1]] # Identifie l'identifiant technique du canal affecté à l'axe des abscisses (ex: FSC-A)
-    canal_y <- gate_polygone@parameters[[2]] # Identifie l'identifiant technique du canal affecté à l'axe des ordonnées (ex: SSC-A)
-    total_evenements_apres   <- nrow(flowCore::exprs(flowframe_apres)) # Dénombre précisément la population de cellules intactes conservée après le détourage
-    pourcentage_conservation <- if (total_evenements_avant > 0) round((total_evenements_apres / total_evenements_avant) * 100, 1) else 0 # Déduit le rendement de la filtration en pourcentage, arrondi au dixième
-    lbl_x <- if (!is.null(self$get_label)) self$get_label(flowframe_avant, canal_x) else canal_x # Extrait le libellé biologique ou l'étiquette de l'axe X via get_label, ou garde le nom brut
-    lbl_y <- if (!is.null(self$get_label)) self$get_label(flowframe_avant, canal_y) else canal_y # Extrait le libellé biologique ou l'étiquette de l'axe Y via get_label, ou garde le nom brut
-    
-    graphique_debris <- ggplot2::ggplot(donnees_visu, ggplot2::aes(x = .data[[canal_x]], y = .data[[canal_y]])) + # Initialise le biplot morphologique avec les expressions de l'échantillon sous-échantillonné
-      ggpointdensity::geom_pointdensity(size = 0.1, alpha = 0.4) + # Dessine un nuage de points dont la couleur dépend localement du nombre de voisins (estimation locale de la densité)
-      ggplot2::scale_color_gradientn(colours = c("darkblue", "blue", "cyan", "greenyellow", "yellow", "darkorange", "red")) + # Applique une échelle pseudo-spectrale (Jet) standardisée pour cartographier les gradients de population
-      ggplot2::geom_polygon(data = coordonnees_gate, ggplot2::aes(x = x, y = y), fill = NA, color = "black", linewidth = 0.6) + # Dessine les contours du polygone de gating utilisateur sous forme de ligne noire continue
-      ggplot2::coord_cartesian(xlim = c(0, max(donnees_globales[[canal_x]], na.rm = TRUE)), ylim = c(0, max(donnees_globales[[canal_y]], na.rm = TRUE))) + # Cadrage cartésien s'alignant sur le maximum de la matrice globale pour éviter d'amputer visuellement les débris hors-champ
-      ggplot2::theme_bw() + # Applique un habillage blanc structuré et épuré optimisant l'évaluation des contrastes thermiques de densité
-      ggplot2::labs( # Configure l'ensemble des métadonnées, titres et labels scientifiques entourant la figure
-        title = paste("Nettoyage des débris :", nom_echantillon), # Affiche dynamiquement le titre de la manipulation associé au code barres ou nom du tube FCS
-        subtitle = paste0("Événements conservés : ", format(total_evenements_apres, big.mark=" "), " | ", pourcentage_conservation, "%"), # Resitue les métriques d'efficacité du tri (nombre d'événements et rendement)
-        x = lbl_x, y = lbl_y # Injecte les libellés biologiques nettoyés aux axes correspondants
-      ) + 
-      ggplot2::theme(legend.position = "none", plot.title = element_text(face = "bold"), plot.subtitle = element_text(color = "darkblue", size = 11)) # Masque la barre d'échelle des densités devenue redondante et stylise le titre
-    
-    if (is.null(self$plots_debris)) self$plots_debris <- list() # Initialise la structure de liste dédiée au stockage des graphiques Débris si absente en mémoire de l'objet R6
-    self$plots_debris[[nom_echantillon]] <- graphique_debris # Archive l'objet visuel au sein du registre d'environnement de la classe R6
-    return(graphique_debris) # Renvoie l'objet graphique ggplot2 complet, prêt pour affichage immédiat ou intégration dans une interface UI Shiny
-  },
-    
-  visualiser_doublets = function(nom_echantillon, type_analyse = "FSC", max_points = 10000) { # Méthode générant un graphique bidimensionnel de densité (biplot) pour cartographier et valider l'exclusion des agrégats cellulaires (doublets) selon l'axe choisi (FSC ou SSC)
-    infos_gate <- if (type_analyse == "FSC") self$gate_doublets_FSC[[nom_echantillon]] else self$gate_doublets_SSC[[nom_echantillon]] # Extrait les paramètres et métadonnées de la barrière de tri (statistique ou polygonale) correspondant au paramètre spécifié
-    if (is.null(infos_gate)) return(NULL) # interrompt proprement la fonction si aucune information de gating n'est localisée pour cet échantillon
-    
-    ff_avant <- if (type_analyse == "FSC") { # Routage adaptatif de la source amont : si l'analyse porte sur les doublets Forward Scatter
-      if (!is.null(self$post_debris) && length(self$post_debris) > 0) self$post_debris[[nom_echantillon]] else self$get_derniere_source()[[nom_echantillon]] # Récupère les données post-débris ou applique le mécanisme de repli hiérarchique sur la dernière source valide
-    } else { # Sinon, si l'analyse porte sur les doublets Side Scatter (granularité)
-      if (!is.null(self$post_doublets_FSC) && length(self$post_doublets_FSC) > 0) { # Évalue si les cellules ont déjà subi l'exclusion des doublets sur l'axe FSC
-        self$post_doublets_FSC[[nom_echantillon]] # Charge la matrice cellulaire résultant du premier niveau d'exclusion des doublets FSC
-      } else if (!is.null(self$post_debris) && length(self$post_debris) > 0) { # À défaut, vérifie si la structure filtrée pour les débris est accessible
-        self$post_debris[[nom_echantillon]] # Connecte le flux en aval immédiat de l'étape de filtration des débris
-      } else { # Si aucun filtre intermédiaire n'est présent en mémoire de l'objet
-        self$get_derniere_source()[[nom_echantillon]] # Se replie automatiquement sur le dernier état de traitement valide disponible
+      lbl_x <- if (!is.null(self$get_label)) self$get_label(flowframe_initial, canal_temps) else canal_temps # Extrait le libellé biologique de l'axe X via get_label, ou utilise le nom technique brut
+      lbl_y <- if (!is.null(self$get_label)) self$get_label(flowframe_initial, canal_fsc) else canal_fsc # Extrait le libellé biologique de l'axe Y via get_label, ou utilise le nom technique brut
+      graphique_qc <- ggplot2::ggplot() + # Initialise l'objet graphique ggplot2 vide multicouche
+        ggplot2::geom_point(data = donnees_init_visu, ggplot2::aes(x = .data[[canal_temps]], y = .data[[canal_fsc]]), # Ajoute la couche de fond représentant l'ensemble des points d'origine
+                            size = 0.2, alpha = 0.2, color = "grey70") # Paramètre les points en gris clair et transparent pour matérialiser les événements exclus ou masqués
+      if (nrow(donnees_nett_visu) > 0) { # Si la sous-matrice nettoyée contient des événements cellulaires à tracer
+        graphique_qc <- graphique_qc + # Superpose une seconde couche d'événements par-dessus le bruit de fond gris
+          ggplot2::geom_point(data = donnees_nett_visu, ggplot2::aes(x = .data[[canal_temps]], y = .data[[canal_fsc]]), # Spécifie les coordonnées cinétiques des cellules conformes validées
+                              size = 0.2, alpha = 0.4, color = "darkblue") # Paramètre les cellules saines en bleu foncé contrasté pour mettre en évidence les zones d'instabilité supprimées
       } 
-    } 
-    if (is.null(ff_avant)) return(NULL) # Sécurité critique : quitte proprement la routine si aucun flowFrame antécédent valide n'est identifié
-    
-    ff_apres <- if (type_analyse == "FSC") self$post_doublets_FSC[[nom_echantillon]] else self$post_doublets_SSC[[nom_echantillon]] # Extrait l'objet flowFrame épuré (contenant uniquement les cellules uniques validées) associé à l'axe d'analyse courant
-    donnees_source <- as.data.frame(flowCore::exprs(ff_avant)) # Convertit la matrice des intensités de la source d'entrée en tableau de données exploitable par ggplot2
-    
-    nb_avant <- nrow(donnees_source) # Dénombre la population totale d'événements cellulaires entrant dans l'étape de discrimination des doublets
-    if (!is.null(max_points) && nb_avant > max_points) { # Si la taille de la population outrepasse la limite maximale définie pour la fluidité du rendu graphique
+      graphique_qc <- graphique_qc + # Finalise la mise en forme structurelle et textuelle de la figure de diagnostic
+        ggplot2::coord_cartesian(xlim = limites_temps, ylim = limites_fsc) + # Force un cadrage strict sur les limites initiales du fichier pour éviter tout effet de zoom déformant
+        ggplot2::theme_bw() + # Applique un habillage blanc structuré et épuré facilitant la lecture des densités de points
+        ggplot2::theme( # Ajuste les propriétés typographiques de la figure de contrôle
+          plot.title = ggplot2::element_text(face = "bold"), # Renforce la visibilité du titre principal en l'affichant en caractères gras
+          plot.subtitle = ggplot2::element_text(color = "darkblue", size = 11) # Distingue le sous-texte statistique en lui appliquant une coloration bleue
+        ) + # Fin des ajustements de thème
+        ggplot2::labs( # Définit l'ensemble des titres et des descriptions scientifiques entourant les axes
+          title = paste("Contrôle qualité PeacoQC :", nom_echantillon), # Affiche dynamiquement le titre de la méthode couplé au nom du fichier FCS audité
+          subtitle = paste0("Événements conservés : ", format(evenements_gardes, big.mark=" "), # Documente les métriques de tri incluant le décompte des cellules saines restantes
+                            " | ", pourcentage_conservation, "% (Affichage max : ", max_points, " pts)"), # Affiche le rendement en pourcentage et précise le niveau de sous-échantillonnage graphique appliqué
+          x = lbl_x, y = lbl_y # Attribue les libellés biologiques ou techniques finaux aux axes X et Y
+        ) 
       
-      if (!is.null(self$seed)) set.seed(self$seed)
-      donnees_visu <- donnees_source[sample(stats::seq_len(nb_avant), max_points), ] # Génère une sous-matrice par échantillonnage aléatoire uniforme sans remise pour alléger le nuage de points
-    } else { # Si le volume total de cellules initiales est inférieur au seuil critique max_points
-      donnees_visu <- donnees_source # Conserve l'intégralité de la matrice source pour le tracé graphique
-    } 
+      if (is.null(self$plots_peacoqc)) self$plots_peacoqc <- list() # Initialise la structure de liste dédiée au stockage des graphiques PeacoQC si inexistante en mémoire
+      self$plots_peacoqc[[nom_echantillon]] <- graphique_qc # Archive l'objet graphique au sein de l'environnement R6 pour permettre des exports en lot ultérieurs
+      return(graphique_qc) # Renvoie l'objet graphique complet, prêt pour affichage à l'écran ou intégration dans une interface Shiny
+    },
     
-    canal_x <- infos_gate$channels[1] # Extrait le nom technique du canal affecté à l'axe des abscisses (généralement le paramètre de Hauteur ou Largeur)
-    canal_y <- infos_gate$channels[2] # Extrait le nom technique du canal affecté à l'axe des ordonnées (généralement le paramètre d'Aire)
-    nb_apres    <- if (!is.null(ff_apres)) nrow(flowCore::exprs(ff_apres)) else 0 # Dénombre précisément la population de cellules uniques (singlets) conservée après application de la coupure
-    pourcentage <- if (nb_avant > 0) round((nb_apres / nb_avant) * 100, 1) else 0 # Déduit le rendement de la filtration en pourcentage, arrondi au dixième
-    limite_max  <- max(donnees_source[, c(canal_x, canal_y)], na.rm = TRUE) # Détermine la valeur maximale absolue observée sur les deux canaux pour harmoniser et proportionner les axes de la figure
-    lbl_x <- if (!is.null(self$get_label)) self$get_label(ff_avant, canal_x) else canal_x # Extrait le libellé biologique ou l'étiquette de l'axe X via get_label, ou garde le nom technique brut
-    lbl_y <- if (!is.null(self$get_label)) self$get_label(ff_avant, canal_y) else canal_y # Extrait le libellé biologique ou l'étiquette de l'axe Y via get_label, ou garde le nom technique brut
+    visualiser_flowai = function(nom_echantillon, max_points = 10000) { # Méthode générant un graphique cinétique de contrôle qualité pour visualiser l'impact du nettoyage flowAI sur un échantillon
+      if (is.null(self$post_flowAI) || is.null(self$post_flowAI[[nom_echantillon]])) { # Vérifie si la structure ou l'échantillon ciblé par le nettoyage flowAI est manquant en mémoire
+        stop("Aucun résultat flowAI trouvé pour cet échantillon.") # Interrompt le script et exige l'exécution préalable de la méthode appliquer_flowai
+      } 
+      
+      ff_nettoye <- self$post_flowAI[[nom_echantillon]] # Extrait l'objet flowFrame épuré (contenant uniquement les cellules validées par le QC)
+      fcs_initial <- self$echantillons_traites[[nom_echantillon]] # Récupère l'échantillon compensé d'origine (avant QC)
+      exprs_initiales <- as.data.frame(flowCore::exprs(fcs_initial)) # Extrait sous forme de tableau de données R la matrice d'expression de tous les événements cellulaires initiaux
+      canal_temps <- grep("time", colnames(exprs_initiales), ignore.case = TRUE, value = TRUE)[1] # Détecte dynamiquement par expression régulière le nom du canal dédié au suivi du temps d'acquisition
+      canal_taille <- grep("FSC", colnames(exprs_initiales), ignore.case = TRUE, value = TRUE)[1] # Détecte dynamiquement par expression régulière le nom du canal de taille cellulaire relative (Forward Scatter)
+      if (is.na(canal_temps) || is.na(canal_taille)) { # Sécurité : si la détection automatique des canaux échoue ou si les libellés sont atypiques
+        canal_temps <- colnames(exprs_initiales)[ncol(exprs_initiales)] # Assigne par défaut la toute dernière colonne de la matrice comme axe temporel
+        canal_taille <- colnames(exprs_initiales)[1] # Assigne par défaut la toute première colonne de la matrice comme paramètre morphologique FSC
+      } 
+      exprs_nettoyees <- as.data.frame(flowCore::exprs(ff_nettoye)) # Extrait sous forme de tableau de données R la matrice d'expression des événements conservés post-QC
+      exprs_initiales$Status <- "Éliminé (flowAI)" # Initialise par défaut l'état de chaque événement de la matrice d'origine comme étant rejeté par le filtre
+      indices_conserves <- which(exprs_initiales[[canal_temps]] %in% exprs_nettoyees[[canal_temps]]) # Identifie par intersection les indices temporels des cellules ayant survécu au nettoyage de flowAI
+      exprs_initiales$Status[indices_conserves] <- "Conservé" # Assigne le statut de conformité aux événements cellulaires validés par l'algorithme
+      total_pts <- nrow(exprs_initiales) # Mémorise le nombre total d'événements cellulaires initialement présents dans le fichier d'acquisition
+      
+      if (total_pts > max_points) { # Si la taille de la matrice dépasse le seuil maximal de points fixé pour le tracé graphique
+        if (!is.null(self$seed)) set.seed(self$seed)
+        exprs_initiales <- exprs_initiales[sample(total_pts, max_points), ] # Échantillonne aléatoirement un nombre restreint de lignes pour optimiser le rendu graphique sans saturer la mémoire
+      } 
+      total_conserves <- length(indices_conserves) # Calcule le décompte absolu d'événements cellulaires conformes conservés post-QC
+      pourcentage_conservation <- round((total_conserves / total_pts) * 100, 1) # Déduit le rendement d'acquisition exprimé en pourcentage de cellules saines conservées
+      
+      graphique_flowai <- ggplot2::ggplot(exprs_initiales, ggplot2::aes(x = .data[[canal_temps]], y = .data[[canal_taille]], color = Status)) + # Initialise le graphique biplot Temps vs FSC
+        ggplot2::geom_point(size = 0.4, alpha = 0.6) + # Dessine le nuage de points cytométriques avec une taille fine et une légère transparence pour révéler l'empilement
+        ggplot2::scale_color_manual(values = c("Conservé" = "#1f77b4", "Éliminé (flowAI)" = "#d62728")) + # Applique un code couleur binaire contrasté (bleu pour le signal sain, rouge pour les anomalies)
+        ggplot2::theme_bw() + # Applique un habillage blanc structuré et épuré facilitant l'évaluation visuelle des coupures cinétiques
+        ggplot2::labs( # Configure les textes et légendes scientifiques entourant la figure de diagnostic
+          title = paste("Contrôle Qualité flowAI :", nom_echantillon), # Affiche le titre de l'analyse associé au nom du fichier FCS audité
+          subtitle = paste0("Événements conservés : ", format(total_conserves, big.mark=" "), " / ", 
+                            format(total_pts, big.mark=" "), " (", pourcentage_conservation, "%)"), # Affiche les métriques clés de rendement et d'élimination de la routine de QC
+          x = paste("Axe du Temps :", canal_temps), # Documente le nom exact du canal temporel de l'axe des abscisses
+          y = paste("Axe Morphologique :", canal_taille) # Documente le nom exact du canal de taille de l'axe des ordonnées
+        ) + 
+        ggplot2::theme( # Ajuste finement la typographie et la disposition des éléments de la figure
+          legend.position = "bottom", # Positionne la légende des statuts sous le graphique pour maximiser la largeur de la zone de tracé
+          plot.title    = ggplot2::element_text(face = "bold", size = 14), # Renforce l'accentuation visuelle du titre principal du diagnostic
+          legend.title  = ggplot2::element_blank() # Masque l'intitulé de la légende devenu superflu grâce à l'explicitation des étiquettes
+        ) 
+      
+      if (is.null(self$plots_flowai)) self$plots_flowai <- list() # Initialise la structure de liste dédiée au stockage des graphiques flowAI si inexistante en mémoire
+      self$plots_flowai[[nom_echantillon]] <- graphique_flowai # Archive l'objet graphique au sein de l'environnement R6 pour permettre sa réutilisation dans le résumé PDF d'export
+      return(graphique_flowai) # Renvoie l'objet graphique ggplot2 complet prêt pour affichage ou intégration UI Shiny
+    },
     
-    graphique <- ggplot2::ggplot(donnees_visu, ggplot2::aes(x = .data[[canal_x]], y = .data[[canal_y]])) + # Initialise le biplot morphologique de linéarité avec les expressions de l'échantillon sous-échantillonné
-      ggpointdensity::geom_pointdensity(size = 0.1, alpha = 0.4) + # Nuage de points dont la couleur dépend localement de la densité (estimation locale du nombre de voisins)
-      ggplot2::scale_color_gradientn(colours = c("darkblue", "blue", "cyan", "greenyellow", "yellow", "darkorange", "red")) + # Applique une échelle pseudo-spectrale standardisée pour cartographier les gradients de population
-      ggplot2::coord_cartesian(xlim = c(0, limite_max), ylim = c(0, limite_max)) + # Force un cadrage isométrique et strict de l'origine jusqu'au maximum pour préserver la diagonale théorique des singlets
-      ggplot2::theme_bw() + # Applique un habillage blanc structuré et épuré optimisant l'évaluation des contrastes thermiques de densité
-      ggplot2::labs( # Configure l'ensemble des métadonnées, titres et labels scientifiques entourant la figure
-        title = paste("Retrait des doublets", type_analyse, ":", nom_echantillon), # Affiche dynamiquement le titre de la manipulation couplé au nom du fichier FCS audité
-        subtitle = paste0("Événements conservés : ", format(nb_apres, big.mark=" "), " | ", pourcentage, "%"), # Resitue les métriques d'efficacité du tri (nombre d'événements uniques et rendement)
-        x = lbl_x, y = lbl_y # Injecte les libellés biologiques nettoyés aux axes correspondants
-      ) + 
-      ggplot2::theme(legend.position = "none", plot.title = element_text(face = "bold"), plot.subtitle = element_text(color = "darkblue", size = 11)) # Masque la barre d'échelle des densités devenue redondante et stylise les titres
+    visualiser_debris = function(nom_echantillon, max_points = 10000) { # Méthode générant un graphique bidimensionnel de densité (biplot) pour cartographier et valider l'exclusion des débris cellulaires par le polygone utilisateur
+      if (is.null(self$post_debris[[nom_echantillon]])) { # Évalue si la structure ou le fichier cible nettoyé pour les débris est absent de la mémoire vive
+        message("Pas de données Débris pour ", nom_echantillon) # Notification d'avertissement en console si l'étape de tri n'a pas été préalablement exécutée
+        return(NULL) # Interrompt proprement la fonction et renvoie NULL pour ne pas bloquer l'exécution globale
+      } 
+      
+      flowframe_avant <- if (!is.null(self$post_retrait_bordures) && length(self$post_retrait_bordures) > 0) { # Système pyramidal : vérifie la présence de données issues du retrait des bordures
+        self$post_retrait_bordures[[nom_echantillon]] # Charge prioritairement les expressions issues de l'élimination des événements de bordure saturés
+      } else if (!is.null(self$post_PeacoQC) && length(self$post_PeacoQC) > 0) { # À défaut, vérifie si l'étape PeacoQC est peuplée en mémoire vive
+        self$post_PeacoQC[[nom_echantillon]] # Oriente le flux vers la structure de données stabilisée par PeacoQC
+      } else if (!is.null(self$post_flowAI) && length(self$post_flowAI) > 0) { # À défaut, évalue la disponibilité de la structure issue du nettoyage flowAI
+        self$post_flowAI[[nom_echantillon]] # Charge les expressions issues du contrôle qualité multi-critères flowAI
+      } else { # Si aucun filtre de qualité n'a encore été appliqué sur les échantillons de la cohorte
+        self$echantillons_traites[[nom_echantillon]] # Charge la structure par défaut des expressions d'origine de l'expérience
+      } 
+      
+      if (is.null(flowframe_avant)) return(NULL) # Sécurité critique : quitte proprement la routine si aucun flowFrame antécédent valide n'est identifié
+      flowframe_apres  <- self$post_debris[[nom_echantillon]] # Récupère l'objet flowFrame épuré (contenant les événements validés à l'intérieur du polygone)
+      donnees_globales <- as.data.frame(flowCore::exprs(flowframe_avant)) # Convertit la matrice des intensités de la source d'entrée en tableau de données exploitable par ggplot2
+      total_evenements_avant <- nrow(donnees_globales) # Dénombre la population totale d'événements entrant dans l'étape de filtration des débris
+      if (!is.null(max_points) && total_evenements_avant > max_points) { # Si la taille de la population outrepasse la limite maximale définie pour la fluidité du rendu graphique
+        
+        if (!is.null(self$seed)) set.seed(self$seed)
+        indices_gardes <- sample(seq_len(total_evenements_avant), max_points) # Génère un vecteur d'indices par échantillonnage aléatoire uniforme sans remise pour alléger le nuage de points
+        donnees_visu   <- donnees_globales[indices_gardes, ] # Extrait la sous-matrice d'expression correspondante dédiée à la représentation visuelle
+      } else { # Si le volume total de cellules initiales est inférieur au seuil critique max_points
+        donnees_visu   <- donnees_globales # Conserve l'intégralité de la matrice source pour le tracé graphique
+      } 
+      
+      gate_polygone    <- self$gate_debris[[nom_echantillon]] # Extrait l'objet formel polygonGate appliqué à cet échantillon au cours de la filtration
+      coordonnees_gate <- as.data.frame(gate_polygone@boundaries) # Extrait sous forme de tableau bidimensionnel les sommets géométriques (X, Y) du polygone de tri
+      colnames(coordonnees_gate) <- c("x", "y") # Renomme explicitement les colonnes du tableau pour simplifier l'intégration dans la couche ggplot2
+      params <- flowCore::parameters(gate_polygone)
+      canal_x <- params[1]
+      canal_y <- params[2] # Identifie l'identifiant technique du canal affecté à l'axe des ordonnées (ex: SSC-A)
+      total_evenements_apres   <- nrow(flowCore::exprs(flowframe_apres)) # Dénombre précisément la population de cellules intactes conservée après le détourage
+      pourcentage_conservation <- if (total_evenements_avant > 0) round((total_evenements_apres / total_evenements_avant) * 100, 1) else 0 # Déduit le rendement de la filtration en pourcentage, arrondi au dixième
+      lbl_x <- if (!is.null(self$get_label)) self$get_label(flowframe_avant, canal_x) else canal_x # Extrait le libellé biologique ou l'étiquette de l'axe X via get_label, ou garde le nom brut
+      lbl_y <- if (!is.null(self$get_label)) self$get_label(flowframe_avant, canal_y) else canal_y # Extrait le libellé biologique ou l'étiquette de l'axe Y via get_label, ou garde le nom brut
+      
+      graphique_debris <- ggplot2::ggplot(donnees_visu, ggplot2::aes(x = .data[[canal_x]], y = .data[[canal_y]])) + # Initialise le biplot morphologique avec les expressions de l'échantillon sous-échantillonné
+        ggpointdensity::geom_pointdensity(size = 0.1, alpha = 0.4) + # Dessine un nuage de points dont la couleur dépend localement du nombre de voisins (estimation locale de la densité)
+        ggplot2::scale_color_gradientn(colours = c("darkblue", "blue", "cyan", "greenyellow", "yellow", "darkorange", "red")) + # Applique une échelle pseudo-spectrale (Jet) standardisée pour cartographier les gradients de population
+        ggplot2::geom_polygon(data = coordonnees_gate, ggplot2::aes(x = x, y = y), fill = NA, color = "black", linewidth = 0.6) + # Dessine les contours du polygone de gating utilisateur sous forme de ligne noire continue
+        ggplot2::coord_cartesian(xlim = c(0, max(donnees_globales[[canal_x]], na.rm = TRUE)), ylim = c(0, max(donnees_globales[[canal_y]], na.rm = TRUE))) + # Cadrage cartésien s'alignant sur le maximum de la matrice globale pour éviter d'amputer visuellement les débris hors-champ
+        ggplot2::theme_bw() + # Applique un habillage blanc structuré et épuré optimisant l'évaluation des contrastes thermiques de densité
+        ggplot2::labs( # Configure l'ensemble des métadonnées, titres et labels scientifiques entourant la figure
+          title = paste("Nettoyage des débris :", nom_echantillon), # Affiche dynamiquement le titre de la manipulation associé au code barres ou nom du tube FCS
+          subtitle = paste0("Événements conservés : ", format(total_evenements_apres, big.mark=" "), " | ", pourcentage_conservation, "%"), # Resitue les métriques d'efficacité du tri (nombre d'événements et rendement)
+          x = lbl_x, y = lbl_y # Injecte les libellés biologiques nettoyés aux axes correspondants
+        ) + 
+        ggplot2::theme(legend.position = "none", plot.title = element_text(face = "bold"), plot.subtitle = element_text(color = "darkblue", size = 11)) # Masque la barre d'échelle des densités devenue redondante et stylise le titre
+      
+      if (is.null(self$plots_debris)) self$plots_debris <- list() # Initialise la structure de liste dédiée au stockage des graphiques Débris si absente en mémoire de l'objet R6
+      self$plots_debris[[nom_echantillon]] <- graphique_debris # Archive l'objet visuel au sein du registre d'environnement de la classe R6
+      return(graphique_debris) # Renvoie l'objet graphique ggplot2 complet, prêt pour affichage immédiat ou intégration dans une interface UI Shiny
+    },
     
-    if (infos_gate$type == "poly") { # Couche géométrique adaptative : si le filtre appliqué provient d'un gating polygonal manuel de l'utilisateur
-      coordonnees_gate <- as.data.frame(infos_gate$gate@boundaries) # Extrait sous forme de tableau bidimensionnel les sommets géométriques (X, Y) du polygone de tri manuel
-      colnames(coordonnees_gate) <- c("x", "y") # Renomme explicitement les colonnes du tableau pour simplifier l'intégration géométrique
-      graphique <- graphique + ggplot2::geom_polygon(data = coordonnees_gate, ggplot2::aes(x = x, y = y), fill = NA, color = "darkred", linewidth = 0.6) # Superpose les contours du polygone utilisateur sous forme de ligne rouge continue
-    } else if (infos_gate$type == "stat") { # Sinon, si le filtre appliqué résulte d'une coupure statistique automatisée (MAD)
-      graphique <- graphique + ggplot2::geom_abline(slope = infos_gate$seuil, intercept = 0, color = "darkred", linetype = "dashed", linewidth = 0.6) # Dessine la droite de régression critique passant par l'origine matérialisant la frontière d'exclusion
-    } 
+    visualiser_doublets = function(nom_echantillon, type_analyse = "FSC", max_points = 10000) { # Méthode générant un graphique bidimensionnel de densité (biplot) pour cartographier et valider l'exclusion des agrégats cellulaires (doublets) selon l'axe choisi (FSC ou SSC)
+      infos_gate <- if (type_analyse == "FSC") self$gate_doublets_FSC[[nom_echantillon]] else self$gate_doublets_SSC[[nom_echantillon]] # Extrait les paramètres et métadonnées de la barrière de tri (statistique ou polygonale) correspondant au paramètre spécifié
+      if (is.null(infos_gate)) return(NULL) # interrompt proprement la fonction si aucune information de gating n'est localisée pour cet échantillon
+      
+      ff_avant <- if (type_analyse == "FSC") { # Routage adaptatif de la source amont : si l'analyse porte sur les doublets Forward Scatter
+        if (!is.null(self$post_debris) && length(self$post_debris) > 0) self$post_debris[[nom_echantillon]] else self$get_derniere_source()[[nom_echantillon]] # Récupère les données post-débris ou applique le mécanisme de repli hiérarchique sur la dernière source valide
+      } else { # Sinon, si l'analyse porte sur les doublets Side Scatter (granularité)
+        if (!is.null(self$post_doublets_FSC) && length(self$post_doublets_FSC) > 0) { # Évalue si les cellules ont déjà subi l'exclusion des doublets sur l'axe FSC
+          self$post_doublets_FSC[[nom_echantillon]] # Charge la matrice cellulaire résultant du premier niveau d'exclusion des doublets FSC
+        } else if (!is.null(self$post_debris) && length(self$post_debris) > 0) { # À défaut, vérifie si la structure filtrée pour les débris est accessible
+          self$post_debris[[nom_echantillon]] # Connecte le flux en aval immédiat de l'étape de filtration des débris
+        } else { # Si aucun filtre intermédiaire n'est présent en mémoire de l'objet
+          self$get_derniere_source()[[nom_echantillon]] # Se replie automatiquement sur le dernier état de traitement valide disponible
+        } 
+      } 
+      if (is.null(ff_avant)) return(NULL) # Sécurité critique : quitte proprement la routine si aucun flowFrame antécédent valide n'est identifié
+      
+      ff_apres <- if (type_analyse == "FSC") self$post_doublets_FSC[[nom_echantillon]] else self$post_doublets_SSC[[nom_echantillon]] # Extrait l'objet flowFrame épuré (contenant uniquement les cellules uniques validées) associé à l'axe d'analyse courant
+      donnees_source <- as.data.frame(flowCore::exprs(ff_avant)) # Convertit la matrice des intensités de la source d'entrée en tableau de données exploitable par ggplot2
+      
+      nb_avant <- nrow(donnees_source) # Dénombre la population totale d'événements cellulaires entrant dans l'étape de discrimination des doublets
+      if (!is.null(max_points) && nb_avant > max_points) { # Si la taille de la population outrepasse la limite maximale définie pour la fluidité du rendu graphique
+        
+        if (!is.null(self$seed)) set.seed(self$seed)
+        donnees_visu <- donnees_source[sample(seq_len(nb_avant), max_points), ] # Génère une sous-matrice par échantillonnage aléatoire uniforme sans remise pour alléger le nuage de points
+      } else { # Si le volume total de cellules initiales est inférieur au seuil critique max_points
+        donnees_visu <- donnees_source # Conserve l'intégralité de la matrice source pour le tracé graphique
+      } 
+      
+      canal_x <- infos_gate$channels[1] # Extrait le nom technique du canal affecté à l'axe des abscisses (généralement le paramètre de Hauteur ou Largeur)
+      canal_y <- infos_gate$channels[2] # Extrait le nom technique du canal affecté à l'axe des ordonnées (généralement le paramètre d'Aire)
+      nb_apres    <- if (!is.null(ff_apres)) nrow(flowCore::exprs(ff_apres)) else 0 # Dénombre précisément la population de cellules uniques (singlets) conservée après application de la coupure
+      pourcentage <- if (nb_avant > 0) round((nb_apres / nb_avant) * 100, 1) else 0 # Déduit le rendement de la filtration en pourcentage, arrondi au dixième
+      limite_max  <- max(donnees_source[, c(canal_x, canal_y)], na.rm = TRUE) # Détermine la valeur maximale absolue observée sur les deux canaux pour harmoniser et proportionner les axes de la figure
+      lbl_x <- if (!is.null(self$get_label)) self$get_label(ff_avant, canal_x) else canal_x # Extrait le libellé biologique ou l'étiquette de l'axe X via get_label, ou garde le nom technique brut
+      lbl_y <- if (!is.null(self$get_label)) self$get_label(ff_avant, canal_y) else canal_y # Extrait le libellé biologique ou l'étiquette de l'axe Y via get_label, ou garde le nom technique brut
+      
+      # --- Détermination de l'appartenance conservé / retiré pour chaque évènement échantillonné ---
+      if (!is.null(ff_apres) && nb_apres > 0) { # Seulement si un résultat de filtration existe réellement pour cet échantillon
+        donnees_apres <- as.data.frame(flowCore::exprs(ff_apres)) # Convertit la matrice des cellules retenues (singlets) en tableau de données comparable
+        
+        colonnes_cle <- intersect(colnames(donnees_visu), colnames(donnees_apres)) # Sécurise la comparaison en ne retenant que les canaux communs aux deux tableaux
+        cle_visu  <- do.call(paste, c(lapply(colonnes_cle, function(col) donnees_visu[[col]]),  sep = "\r")) # Construit une clé composite unique par évènement à partir de l'ensemble des canaux (réduit fortement le risque de collision)
+        cle_apres <- do.call(paste, c(lapply(colonnes_cle, function(col) donnees_apres[[col]]), sep = "\r")) # Construit la même clé composite pour la population conservée en aval
+        
+        donnees_visu$statut_doublet <- ifelse(cle_visu %in% cle_apres, "Conservé", "Retiré") # Étiquette chaque évènement échantillonné selon sa présence ou non dans la population post-filtration
+      } else { # Si aucune filtration n'a encore été appliquée (ff_apres absent ou vide)
+        donnees_visu$statut_doublet <- "Conservé" # Par défaut, tout est considéré comme conservé pour ne pas fausser la lecture avant tri effectif
+      } 
+      
+      donnees_retirees   <- donnees_visu[donnees_visu$statut_doublet == "Retiré", ]   # Isole le sous-ensemble des évènements exclus par le gate de doublets
+      donnees_conservees <- donnees_visu[donnees_visu$statut_doublet == "Conservé", ] # Isole le sous-ensemble des évènements retenus (singlets) qui recevront la coloration par densité
+      
+      couleur_retire <- "darkred" # Teinte neutre et volontairement éloignée de la palette spectrale, pour signaler sans ambiguïté les évènements exclus
+      couleur_legende_conserve <- "#2C7FB8" # Nuance bleutée représentative du dégradé de densité, utilisée uniquement comme pastille de légende (n'affecte pas la coloration réelle des points)
+      
+      graphique <- ggplot2::ggplot() + # Initialise le biplot morphologique de linéarité en couches séparées afin de distinguer visuellement les évènements retirés des évènements conservés
+        { if (nrow(donnees_retirees) > 0) # N'ajoute la couche grise que si des évènements retirés existent effectivement pour cet échantillon
+          ggplot2::geom_point(data = donnees_retirees, ggplot2::aes(x = .data[[canal_x]], y = .data[[canal_y]]), color = couleur_retire, size = 0.1, alpha = 0.5) # Superpose en gris neutre les évènements exclus, sans encodage de densité, pour matérialiser leur rejet
+        } +
+        ggpointdensity::geom_pointdensity(data = donnees_conservees, ggplot2::aes(x = .data[[canal_x]], y = .data[[canal_y]]), size = 0.1, alpha = 0.4) + # Nuage de points des seuls évènements conservés, coloré localement selon la densité (estimation locale du nombre de voisins)
+        ggplot2::scale_color_gradientn(colours = c("darkblue", "blue", "cyan", "greenyellow", "yellow", "darkorange", "red")) + # Applique une échelle pseudo-spectrale standardisée pour cartographier les gradients de population conservée
+        ggplot2::coord_cartesian(xlim = c(0, limite_max), ylim = c(0, limite_max)) + # Force un cadrage isométrique et strict de l'origine jusqu'au maximum pour préserver la diagonale théorique des singlets
+        ggplot2::theme_bw() + # Applique un habillage blanc structuré et épuré optimisant l'évaluation des contrastes thermiques de densité
+        ggplot2::labs( # Configure l'ensemble des métadonnées, titres et labels scientifiques entourant la figure
+          title = paste("Retrait des doublets", type_analyse, ":", nom_echantillon), # Affiche dynamiquement le titre de la manipulation couplé au nom du fichier FCS audité
+          subtitle = paste0("Événements conservés : ", format(nb_apres, big.mark=" "), " | ", pourcentage, "%"), # Resitue les métriques d'efficacité du tri (nombre d'événements uniques et rendement)
+          x = lbl_x, y = lbl_y # Injecte les libellés biologiques nettoyés aux axes correspondants
+        ) + 
+        ggplot2::theme(legend.position = "none", plot.title = element_text(face = "bold"), plot.subtitle = element_text(color = "darkblue", size = 11)) # Masque la barre d'échelle continue des densités (redondante) et stylise les titres ; la légende conservé/retiré est gérée manuellement ci-dessous
+      
+      if (infos_gate$type == "poly") { # Couche géométrique adaptative : si le filtre appliqué provient d'un gating polygonal manuel de l'utilisateur
+        coordonnees_gate <- as.data.frame(infos_gate$gate@boundaries) # Extrait sous forme de tableau bidimensionnel les sommets géométriques (X, Y) du polygone de tri manuel
+        colnames(coordonnees_gate) <- c("x", "y") # Renomme explicitement les colonnes du tableau pour simplifier l'intégration géométrique
+        graphique <- graphique + ggplot2::geom_polygon(data = coordonnees_gate, ggplot2::aes(x = x, y = y), fill = NA, color = "darkred", linewidth = 0.6) # Superpose les contours du polygone utilisateur sous forme de ligne rouge continue
+      } 
+      # NOTE : la barre rouge pointillée (seuil statistique MAD, type == "stat") a été retirée à la demande de l'utilisateur ;
+      # la distinction conservé/retiré repose désormais uniquement sur la coloration des points et la légende manuelle ci-dessous
+      
+      # --- Légende manuelle "Conservé / Retiré", indépendante de toute échelle de couleur pour éviter les conflits avec le dégradé de densité ---
+      pas_legende <- limite_max * 0.05 # Définit un espacement vertical proportionnel entre les deux entrées de la légende manuelle
+      y_conserve  <- limite_max * 0.97 # Position verticale de la première entrée ("Conservé") en haut du cadre du graphique
+      y_retire    <- y_conserve - pas_legende # Position verticale de la seconde entrée ("Retiré"), juste en dessous de la première
+      x_pastille  <- limite_max * 0.80 # Position horizontale commune des pastilles de couleur de la légende
+      x_texte     <- limite_max * 0.83 # Position horizontale du texte explicatif, légèrement décalée à droite des pastilles
+      
+      graphique <- graphique +
+        ggplot2::annotate("point", x = x_pastille, y = y_conserve, color = couleur_legende_conserve, size = 2.2) + # Pastille représentative de la coloration des évènements conservés (teinte issue du dégradé de densité)
+        ggplot2::annotate("text", x = x_texte, y = y_conserve, label = "Conservé", hjust = 0, size = 3.2, color = "black") + # Libellé textuel associé à la pastille des évènements conservés
+        ggplot2::annotate("point", x = x_pastille, y = y_retire, color = couleur_retire, size = 2.2) + # Pastille représentative de la couleur grise attribuée aux évènements retirés
+        ggplot2::annotate("text", x = x_texte, y = y_retire, label = "Retiré", hjust = 0, size = 3.2, color = "black") # Libellé textuel associé à la pastille des évènements retirés
+      
+      if (is.null(self$plots_doublets)) self$plots_doublets <- list() # Initialise la structure de liste dédiée au stockage des graphiques de doublets si absente en mémoire de l'objet R6
+      self$plots_doublets[[paste0(nom_echantillon, "_", type_analyse)]] <- graphique # Archive l'objet visuel généré au sein du registre d'environnement de la classe R6 en indexant par échantillon et axe
+      return(graphique) # Renvoie l'objet graphique ggplot2 complet, prêt pour affichage immédiat ou intégration dans une interface UI Shiny
+    },
     
-    if (is.null(self$plots_doublets)) self$plots_doublets <- list() # Initialise la structure de liste dédiée au stockage des graphiques de doublets si absente en mémoire de l'objet R6
-    self$plots_doublets[[paste0(nom_echantillon, "_", type_analyse)]] <- graphique # Archive l'objet visuel généré au sein du registre d'environnement de la classe R6 en indexant par échantillon et axe
-    return(graphique) # Renvoie l'objet graphique ggplot2 complet, prêt pour affichage immédiat ou intégration dans une interface UI Shiny
-  },
     
-  retirer_les_cellules_mortes = function(canal_fsc = "FSC-A", marqueur_viabilite, points_utilisateur, nom_echantillon = NULL) { # Méthode appliquant un fenêtrage polygonal manuel (PolygonGate) pour isoler les cellules vivantes et exclure celles incorporant le marqueur de viabilité
-    if (is.null(points_utilisateur)) stop("Aucun point fourni pour la viabilité.") # Sécurité : bloque le script si la structure contenant les coordonnées du polygone est absente
-    if (nrow(points_utilisateur) < 3) stop("Un polygone de viabilité nécessite au moins 3 points.") # Sécurité mathématique : exige au moins trois sommets pour pouvoir fermer l'aire géométrique bidimensionnelle
+    retirer_les_cellules_mortes = function(canal_fsc = "FSC-A", marqueur_viabilite,
+                                           points_utilisateur, nom_echantillon = NULL) {
+      
+      if (is.null(points_utilisateur)) stop("Aucun point fourni pour la viabilité.")
+      if (nrow(points_utilisateur) < 3) stop("Un polygone nécessite ≥ 3 points.")
+      
+      # Source avant viabilité : transformation > doublets > débris > brut
+      liste_fcs_source <- if (!is.null(self$post_transformation) && length(self$post_transformation) > 0) {
+        self$post_transformation
+      } else if (!is.null(self$post_doublets_final) && length(self$post_doublets_final) > 0) {
+        self$post_doublets_final
+      } else if (!is.null(self$post_debris) && length(self$post_debris) > 0) {
+        self$post_debris
+      } else {
+        self$get_derniere_source()
+      }
+      
+      if (is.null(self$gate_viabilite)) self$gate_viabilite <- list()
+      if (is.null(self$post_viabilite)) self$post_viabilite <- list()
+      
+      matrice_coordonnees <- as.matrix(points_utilisateur[, 1:2])
+      colnames(matrice_coordonnees) <- c(canal_fsc, marqueur_viabilite)
+      
+      polygone_viabilite <- flowCore::polygonGate(.gate = matrice_coordonnees, filterId = "Gate_Viabilite")
+      
+      appliquer_le_gate_vivantes = function(nom) {
+        ff <- liste_fcs_source[[nom]]
+        if (is.null(ff)) return(NULL)
+        
+        resultat_filtrage <- flowCore::filter(ff, polygone_viabilite)
+        
+        self$gate_viabilite[[nom]] <- polygone_viabilite
+        self$post_viabilite[[nom]] <- ff[resultat_filtrage@subSet, ]
+      }
+      
+      echantillons <- if (is.null(nom_echantillon)) names(liste_fcs_source) else nom_echantillon
+      for (nom in echantillons) appliquer_le_gate_vivantes(nom)
+      
+      self$update_pipeline("viabilite", nom_echantillon)
+    },
     
-    liste_fcs_source <- if (!is.null(self$post_doublets_final) && length(self$post_doublets_final) > 0) { # Évalue si la structure finale des cellules uniques (singlets) est préalablement complétée
-      self$post_doublets_final # Privilégie le chaînage standard en se connectant immédiatement en aval de l'exclusion des doublets
-    } else if (!is.null(self$post_debris) && length(self$post_debris) > 0) { # À défaut, évalue si la liste épurée pour les débris cellulaires est accessible
-      self$post_debris # Connecte le flux en aval de l'étape de filtration des débris si l'exclusion des doublets n'a pas été faite
-    } else { # Si aucun des compartiments de tri précédents n'est peuplée ou initialisé en mémoire
-      self$get_derniere_source() # Active le mécanisme de repli automatique sur le dernier niveau de traitement valide détecté dans le pipeline
-    } # Fin de la sélection séquentielle de la liste source
-    if (length(liste_fcs_source) == 0) stop("Aucune donnée source disponible pour l'analyse de viabilité.") # Sécurité : interrompt l'exécution si aucune matrice cellulaire n'est localisée en mémoire vive
-    if (is.null(self$gate_viabilite)) self$gate_viabilite <- list()
-    if (is.null(self$post_viabilite)) self$post_viabilite <- list()
+    visualiser_viabilite = function(nom_echantillon, max_points = 10000) {
+      
+      if (is.null(self$post_viabilite[[nom_echantillon]])) {
+        message("Pas de données Viabilité pour ", nom_echantillon)
+        return(NULL)
+      }
+      
+      # Source "avant" gating : si une version transformée existe, on l'utilise
+      flowframe_avant <- if (!is.null(self$post_transformation) &&
+                             !is.null(self$post_transformation[[nom_echantillon]])) {
+        self$post_transformation[[nom_echantillon]]
+      } else if (!is.null(self$post_doublets_final[[nom_echantillon]])) {
+        self$post_doublets_final[[nom_echantillon]]
+      } else if (!is.null(self$post_debris[[nom_echantillon]])) {
+        self$post_debris[[nom_echantillon]]
+      } else {
+        self$get_derniere_source()[[nom_echantillon]]
+      }
+      
+      if (is.null(flowframe_avant)) return(NULL)
+      
+      donnees_globales <- as.data.frame(flowCore::exprs(flowframe_avant))
+      
+      total_evenements_avant <- nrow(donnees_globales)
+      if (!is.null(max_points) && total_evenements_avant > max_points) {
+        if (!is.null(self$seed)) set.seed(self$seed)
+        indices_gardes <- sample(seq_len(total_evenements_avant), max_points)
+        donnees_visu <- donnees_globales[indices_gardes, ]
+      } else {
+        donnees_visu <- donnees_globales
+      }
+      
+      gate_polygone <- self$gate_viabilite[[nom_echantillon]]
+      
+      if (inherits(gate_polygone, "polygonGate")) {
+        bound <- gate_polygone@boundaries
+        if (is.null(dim(bound)) || ncol(bound) != 2) {
+          stop("Le gate polygonal ne contient pas une matrice Nx2 de boundaries.")
+        }
+        coordonnees_gate <- data.frame(
+          x = bound[, 1],
+          y = bound[, 2]
+        )
+        noms_canaux <- colnames(bound)
+      } else if (inherits(gate_polygone, "rectangleGate")) {
+        mins <- gate_polygone@min
+        maxs <- gate_polygone@max
+        noms_canaux <- names(mins)
+        coordonnees_gate <- data.frame(
+          x = c(mins[1], maxs[1], maxs[1], mins[1]),
+          y = c(mins[2], mins[2], maxs[2], maxs[2])
+        )
+      } else if (inherits(gate_polygone, "filterResult")) {
+        gate_interne <- gate_polygone@filter
+        if (inherits(gate_interne, "polygonGate")) {
+          bound <- gate_interne@boundaries
+          coordonnees_gate <- data.frame(
+            x = bound[, 1],
+            y = bound[, 2]
+          )
+          noms_canaux <- colnames(bound)
+        } else if (inherits(gate_interne, "rectangleGate")) {
+          mins <- gate_interne@min
+          maxs <- gate_interne@max
+          noms_canaux <- names(mins)
+          coordonnees_gate <- data.frame(
+            x = c(mins[1], maxs[1], maxs[1], mins[1]),
+            y = c(mins[2], mins[2], maxs[2], maxs[2])
+          )
+        } else {
+          stop("Type de gate non supporté : ", class(gate_interne))
+        }
+      } else {
+        stop("Type de gate non supporté : ", class(gate_polygone))
+      }
+      
+      canal_x <- as.character(noms_canaux[1])
+      canal_y <- as.character(noms_canaux[2])
+      
+      
+      if (!(canal_x %in% colnames(donnees_visu))) {
+        stop("Canal X introuvable dans les données : ", canal_x,
+             "\nColonnes disponibles : ", paste(colnames(donnees_visu), collapse=", "))
+      }
+      if (!(canal_y %in% colnames(donnees_visu))) {
+        stop("Canal Y introuvable dans les données : ", canal_y,
+             "\nColonnes disponibles : ", paste(colnames(donnees_visu), collapse=", "))
+      }
+      
+      flowframe_apres <- self$post_viabilite[[nom_echantillon]]
+      total_evenements_apres <- nrow(flowCore::exprs(flowframe_apres))
+      pourcentage_conservation <- round((total_evenements_apres / total_evenements_avant) * 100, 1)
+      
+      lbl_x <- if (!is.null(self$get_label)) self$get_label(flowframe_avant, canal_x) else canal_x
+      lbl_y <- if (!is.null(self$get_label)) self$get_label(flowframe_avant, canal_y) else canal_y
+      
+      graphique_viabilite <- ggplot2::ggplot(
+        donnees_visu,
+        ggplot2::aes(x = .data[[canal_x]], y = .data[[canal_y]])
+      ) +
+        ggpointdensity::geom_pointdensity(size = 0.1, alpha = 0.4) +
+        ggplot2::scale_color_gradientn(
+          colours = c("darkblue", "blue", "cyan", "greenyellow", "yellow", "darkorange", "red")
+        ) +
+        ggplot2::geom_polygon(
+          data = coordonnees_gate,
+          ggplot2::aes(x = x, y = y),
+          fill = NA, color = "grey20", linewidth = 0.6
+        ) +
+        ggplot2::coord_cartesian(
+          xlim = range(donnees_globales[[canal_x]], na.rm = TRUE),
+          ylim = range(donnees_globales[[canal_y]], na.rm = TRUE)
+        ) +
+        ggplot2::theme_bw() +
+        ggplot2::labs(
+          title = paste("Retrait des cellules mortes :", nom_echantillon),
+          subtitle = paste0(
+            "Cellules vivantes : ", format(total_evenements_apres, big.mark = " "),
+            " | ", pourcentage_conservation, "%"
+          ),
+          x = lbl_x, y = lbl_y
+        ) +
+        ggplot2::theme(
+          legend.position = "none",
+          plot.title = ggplot2::element_text(face = "bold"),
+          plot.subtitle = ggplot2::element_text(color = "darkblue", size = 11)
+        )
+      
+      if (is.null(self$plots_viabilite)) self$plots_viabilite <- list()
+      self$plots_viabilite[[nom_echantillon]] <- graphique_viabilite
+      
+      return(graphique_viabilite)
+    },
     
-    matrice_coordonnees <- as.matrix(points_utilisateur[, 1:2]) # Force la conversion des deux premières colonnes de coordonnées utilisateur en une matrice R standard pour l'interface flowCore
-    colnames(matrice_coordonnees) <- c(canal_fsc, marqueur_viabilite) # Aligne et synchronise obligatoirement les noms des colonnes de la matrice sur les axes physiques cibles détectés (FSC et canal de fluorescence du dye)
-    polygone_viabilite <- flowCore::polygonGate(.gate = matrice_coordonnees, filterId = "Gate_Viabilite") # Instancie l'objet géométrique formel polygonGate définissant la barrière d'inclusion des cellules viables
     
-    appliquer_le_gate_vivantes = function(nom) { # Sous-fonction encapsulant le tri topologique de point dans un polygone pour un échantillon de la cohorte
-      flowframe_entree <- liste_fcs_source[[nom]] # Extrait l'objet flowFrame d'entrée correspondant à l'identifiant de l'itération active
-      if (is.null(flowframe_entree)) return(NULL) # Quitte proprement la sous-routine si l'échantillon spécifié est introuvable ou mal chargé
-      resultat_filtrage <- flowCore::filter(flowframe_entree, polygone_viabilite) # Exécute le filtrage géométrique bidimensionnel pour évaluer l'appartenance de chaque événement cellulaire au polygone
-      self$gate_viabilite[[nom]] <- polygone_viabilite # Consigne le polygone de tri dans l'environnement de l'objet R6 pour permettre des réaffichages graphiques ultérieurs
-      self$post_viabilite[[nom]] <- flowframe_entree[resultat_filtrage@subSet, ] # Sous-échantillonne la matrice d'expression pour ne conserver que les cellules validées par l'indice logique TRUE (cellules vivantes)
-    } 
+    transformation_arcsinh = function(canaux = "", echantillon = NULL, cofactor = 400) {
+      
+      noms_a_traiter <- if (is.null(echantillon)) names(self$echantillons_traites) else echantillon
+      
+      arc_sinh_transform <- function(x, cf) {
+        asinh(x / cf)
+      }
+      
+      self$cofactor_transformation <- cofactor
+      
+      for (nom in noms_a_traiter) {
+        ff <- if (!is.null(self$post_doublets_final[[nom]])) {
+          self$post_doublets_final[[nom]]
+        } else if (!is.null(self$post_debris[[nom]])) {
+          self$post_debris[[nom]]
+        } else {
+          self$echantillons_traites[[nom]]
+        }
+        
+        if (is.null(ff)) next
+        
+        matrice_exprs <- flowCore::exprs(ff)
+        
+        canaux_a_transformer <- if (canaux[1] == "") colnames(matrice_exprs) else canaux
+        canaux_existants <- intersect(canaux_a_transformer, colnames(matrice_exprs))
+        
+        if (length(canaux_existants) == 0) next
+        
+        matrice_exprs[, canaux_existants] <- arc_sinh_transform(matrice_exprs[, canaux_existants], cofactor)
+        
+        ff_transforme <- ff
+        flowCore::exprs(ff_transforme) <- matrice_exprs
+        
+        if (is.null(self$post_transformation)) self$post_transformation <- list()
+        self$post_transformation[[nom]] <- ff_transforme
+      }
+      
+      invisible(self)
+    },
     
-    echantillons_a_traiter <- if (is.null(nom_echantillon)) names(liste_fcs_source) else nom_echantillon # Cible la cohorte complète si l'identifiant est omis, ou restreint l'exécution au fichier unique spécifié
-    for (nom in echantillons_a_traiter) { appliquer_le_gate_vivantes(nom) } # Parcourt et traite séquentiellement l'ensemble de la liste via une boucle d'exécution unitaire
-    self$update_pipeline("viabilite", nom_echantillon) # Active la mise à jour des graphes d'état ou rafraîchit l'interface Shiny pour cette étape d'isolement
-  }, 
-    
-  visualiser_viabilite = function(nom_echantillon, max_points = 10000) { # Méthode générant un graphique bidimensionnel de densité (biplot) pour cartographier et valider l'isolement des cellules viables par le polygone utilisateur
-    if (is.null(self$post_viabilite[[nom_echantillon]])) { # Évalue si la structure ou le fichier cible nettoyé pour la viabilité est absent de la mémoire vive
-      message("Pas de données Viabilité pour ", nom_echantillon) # Notification d'avertissement en console si l'étape de gating n'a pas été préalablement exécutée
-      return(NULL) # Interrompt proprement la fonction et renvoie NULL pour ne pas bloquer l'exécution globale
-    } 
-    
-    flowframe_avant <- if (!is.null(self$post_doublets_final) && length(self$post_doublets_final) > 0) { # Système pyramidal : évalue si les cellules proviennent du stockage terminal des singlets validés
-      self$post_doublets_final[[nom_echantillon]] # Charge les expressions issues du processus d'exclusion des doublets
-    } else if (!is.null(self$post_debris) && length(self$post_debris) > 0) { # À défaut, vérifie si la structure épurée pour les débris cellulaires est accessible
-      self$post_debris[[nom_echantillon]] # Oriente le flux vers les données épurées des débris et bruits de fond électroniques
-    } else { # Si aucun filtre morphologique intermédiaire n'est présent en mémoire de l'objet R6
-      self$get_derniere_source()[[nom_echantillon]] # Se replie automatiquement sur le dernier état de traitement valide disponible dans le pipeline
-    } 
-    if (is.null(flowframe_avant)) return(NULL) # Sécurité critique : quitte proprement la routine si aucun flowFrame antécédent valide n'est identifié
-    
-    flowframe_apres  <- self$post_viabilite[[nom_echantillon]] # Récupère l'objet flowFrame épuré (contenant les cellules viables localisées à l'intérieur du polygone)
-    donnees_globales <- as.data.frame(flowCore::exprs(flowframe_avant)) # Convertit la matrice des intensités de la source d'entrée en tableau de données exploitable par ggplot2
-    
-    total_evenements_avant <- nrow(donnees_globales) # Dénombre la population totale d'événements entrant dans l'étape d'isolement de viabilité
-    if (!is.null(max_points) && total_evenements_avant > max_points) { # Si la taille de la population outrepasse la limite maximale définie pour la fluidité du rendu graphique
-
-      if (!is.null(self$seed)) set.seed(self$seed)
-      indices_gardes <- sample(stats::seq_len(total_evenements_avant), max_points) # Génère un vecteur d'indices par échantillonnage aléatoire uniforme sans remise pour alléger le nuage de points
-      donnees_visu   <- donnees_globales[indices_gardes, ] # Extrait la sous-matrice d'expression correspondante dédiée à la représentation visuelle
-    } else { # Si le volume total de cellules initiales est inférieur au seuil critique max_points
-      donnees_visu   <- donnees_globales # Conserve l'intégralité de la matrice source pour le tracé graphique
+    creer_gate = function(nom_gate, type = "polygon", axes = c("FSC-A", "SSC-A"), points = NULL) {
+      # Validation de la structure de stockage
+      if (is.null(self$gates_personnalisees)) self$gates_personnalisees <- list()
+      
+      # Création de la porte selon le type
+      if (type == "polygon") {
+        if (is.null(points) || nrow(points) < 3) stop("Un polygone nécessite au moins 3 points.")
+        gate <- flowCore::polygonGate(.gate = as.matrix(points[, 1:2]), filterId = nom_gate)
+        
+      } else if (type == "rectangle") {
+        if (is.null(points) || length(points) != 4) stop("Le rectangle nécessite c(minX, maxX, minY, maxY).")
+        gate <- flowCore::rectangleGate(filterId = nom_gate, 
+                                        .gate = matrix(c(points[1], points[2], points[3], points[4]), 
+                                                       ncol = 2, byrow = TRUE, 
+                                                       dimnames = list(NULL, axes)))
+      } else {
+        stop("Type de gate invalide : utilisez 'polygon' ou 'rectangle'.")
+      }
+      
+      # Sauvegarde
+      self$gates_personnalisees[[nom_gate]] <- list(gate = gate, axes = axes, type = type)
+      
+      message("Succès : Gate '", nom_gate, "' créée sur les axes ", paste(axes, collapse="/"), ".")
+      return(invisible(self))
     }
     
-    gate_polygone    <- self$gate_viabilite[[nom_echantillon]] # Extrait l'objet formel polygonGate appliqué à cet échantillon au cours de la filtration
-    coordonnees_gate <- as.data.frame(gate_polygone@boundaries) # Extrait sous forme de tableau bidimensionnel les sommets géométriques (X, Y) du polygone de viabilité utilisateur
-    colnames(coordonnees_gate) <- c("x", "y") # Renomme explicitement les colonnes du tableau pour simplifier l'intégration dans la couche ggplot2
-    canal_x <- gate_polygone@parameters[[1]] # Identifie l'identifiant technique du canal affecté à l'axe des abscisses (ex: FSC-A)
-    canal_y <- gate_polygone@parameters[[2]] # Identifie l'identifiant technique du canal affecté à l'axe des ordonnées (ex: l'index du marqueur de viabilité)
-    total_evenements_apres   <- nrow(flowCore::exprs(flowframe_apres)) # Dénombre précisément la population de cellules intactes et vivantes conservée après le détourage
-    pourcentage_conservation <- if (total_evenements_avant > 0) round((total_evenements_apres / total_evenements_avant) * 100, 1) else 0 # Déduit le rendement de la filtration en pourcentage, arrondi au dixième
-    lbl_x <- if (!is.null(self$get_label)) self$get_label(flowframe_avant, canal_x) else canal_x # Extrait le libellé biologique ou l'étiquette de l'axe X via get_label, ou garde le nom technique brut
-    lbl_y <- if (!is.null(self$get_label)) self$get_label(flowframe_avant, canal_y) else canal_y # Extrait le libellé biologique ou l'étiquette de l'axe Y via get_label, ou garde le nom technique brut
     
-    graphique_viabilite <- ggplot2::ggplot(donnees_visu, ggplot2::aes(x = .data[[canal_x]], y = .data[[canal_y]])) + # Initialise le biplot de viabilité avec les expressions de l'échantillon sous-échantillonné
-      ggpointdensity::geom_pointdensity(size = 0.1, alpha = 0.4) + # Dessine un nuage de points dont la couleur dépend localement de la densité (estimation locale du nombre de voisins)
-      ggplot2::scale_color_gradientn(colours = c("darkblue", "blue", "cyan", "greenyellow", "yellow", "darkorange", "red")) + # Applique une échelle pseudo-spectrale standardisée pour cartographier les gradients de population
-      ggplot2::geom_polygon(data = coordonnees_gate, ggplot2::aes(x = x, y = y), fill = NA, color = "grey20", linewidth = 0.6) + # Dessine les contours du polygone de viabilité utilisateur sous forme de ligne grise foncée continue
-      ggplot2::coord_cartesian(xlim = range(donnees_globales[[canal_x]], na.rm = TRUE), ylim = range(donnees_globales[[canal_y]], na.rm = TRUE)) + # Ajuste dynamiquement le zoom cartésien sur l'étendue des données réelles de l'échantillon d'entrée
-      ggplot2::theme_bw() + # Applique un habillage blanc structuré et épuré optimisant l'évaluation des contrastes thermiques de densité
-      ggplot2::labs( # Configure l'ensemble des métadonnées, titres et labels scientifiques entourant la figure
-        title = paste("Retrait des cellules mortes :", nom_echantillon), # Affiche dynamiquement le titre de la manipulation associé au nom du tube FCS audité
-        subtitle = paste0("Cellules vivantes : ", format(total_evenements_apres, big.mark=" "), " | ", pourcentage_conservation, "%"), # Resitue les métriques d'efficacité du tri (nombre d'événements vivants et rendement)
-        x = lbl_x, y = lbl_y # Injecte les libellés biologiques nettoyés aux axes correspondants
-      ) + 
-      ggplot2::theme(legend.position = "none", plot.title = element_text(face = "bold"), plot.subtitle = element_text(color = "darkblue", size = 11)) # Masque la barre d'échelle des densités devenue redondante et stylise les titres
-    
-    if (is.null(self$plots_viabilite)) self$plots_viabilite <- list() # Initialise la structure de liste dédiée au stockage des graphiques de viabilité si absente en mémoire de l'objet R6
-    self$plots_viabilite[[nom_echantillon]] <- graphique_viabilite # Archive l'objet visuel généré au sein du registre d'environnement de la classe R6
-    return(graphique_viabilite) # Renvoie l'objet graphique ggplot2 complet, prêt pour affichage immédiat ou intégration dans une interface UI Shiny
-  }
   ),
   
   private = list(df_control_file = NULL)
