@@ -140,11 +140,9 @@ compensation_ui <- function(id) {
                 class = "gate-instructions",
                 icon("hand-pointer"),
                 " Faites glisser les lignes verticales directement sur le graphique pour ajuster les bornes. ",
-                tags$b("Bleu = négatif / Unstained"), " — ",
-                tags$b("Rouge = monomarqué (positif)"), ".",
                 br(),
-                icon("info-circle"),
-                " Les champs numériques à gauche se synchronisent automatiquement."
+                tags$b("Bleu = négatif / Unstained"), " — ",
+                tags$b("Rouge = monomarqué (positif)"), "."
               )
             )
           ),
@@ -180,8 +178,13 @@ compensation_ui <- function(id) {
                  wellPanel(
                    h4("Paramètres de Compensation"),
                    
-                   # 1. Bouton de calcul en premier
+                   # 1. Bouton de calcul (avec contrôles) OU import direct depuis les métadonnées FCS (sans contrôles)
                    uiOutput(ns("ui_btn_calculer_spillover")),
+                   
+                   hr(),
+                   
+                   # 1bis. Import manuel de la matrice depuis les métadonnées d'un échantillon
+                   uiOutput(ns("ui_btn_importer_spillover_fcs")),
                    
                    hr(),
                    
@@ -191,8 +194,6 @@ compensation_ui <- function(id) {
                    hr(),
                    
                    # 2 bis. Personnalisation de l'affichage (ordre des canaux / transposition)
-                   h5(tagList(icon("table"), " Personnaliser l'affichage"),
-                      style = "color:#605ca8;"),
                    h5(tagList(icon("table"), " Personnaliser l'affichage"), style = "color:#605ca8;"),
                    selectizeInput(
                      ns("select_ordre_canaux"),
@@ -300,6 +301,7 @@ compensation_ui <- function(id) {
           column(width = 3,
                  wellPanel(
                    h4("Paramètres de Visualisation"),
+                   uiOutput(ns("ui_info_trans_defaut")),
                    actionButton(ns("btn_apply_compensation"), "Appliquer la compensation",
                                 class = "btn-warning", icon = icon("gears"), style = "width:100%"),
                    hr(),
@@ -310,8 +312,7 @@ compensation_ui <- function(id) {
                      selectInput(ns("canal_x"), "Canal X :", choices = NULL),
                      selectInput(ns("canal_y"), "Canal Y :", choices = NULL)
                    ),
-                   radioButtons(ns("affichage_type"), "Type d'affichage :",
-                                choices = c("Both", "Before compensation only", "After compensation only"))
+                   uiOutput(ns("ui_affichage_type"))
                  )
           ),
           # --- Colonne de Droite : Visualisation ---
@@ -409,24 +410,34 @@ compensation_server <- function(id, pipeline, pipeline_version) {
     # SECTION 1 — TRANSFORMATION
     # ════════════════════════════════════════════════════════════════════════
     
+    # Y a-t-il des tubes contrôles chargés ? Sinon, on retombe sur les échantillons
+    # directement (import "sans contrôles", ex : données déjà compensées).
+    a_des_controles <- function(p) !is.null(p$tubes_monomarques) && length(p$tubes_monomarques) > 0
+    
     output$ui_trans_file <- renderUI({
       p <- carrot_obj()
-      req(!is.null(p$tubes_monomarques), length(p$tubes_monomarques) > 0)
-      selectInput(ns("trans_file_sel"), "Tube à visualiser :",
-                  choices = names(p$tubes_monomarques))
+      if (a_des_controles(p)) {
+        choix <- names(p$tubes_monomarques)
+        label <- "Tube à visualiser :"
+      } else {
+        req(length(p$echantillons) > 0)
+        choix <- names(p$echantillons)
+        label <- "Échantillon à visualiser :"
+      }
+      selectInput(ns("trans_file_sel"), label, choices = choix)
     })
     
     output$ui_trans_cx <- renderUI({
       p <- carrot_obj()
-      req(!is.null(p$tubes_monomarques), length(p$tubes_monomarques) > 0)
       choices <- get_canaux_filtres(p)
+      req(length(choices) > 0)
       selectInput(ns("trans_cx"), "Axe X :", choices = choices)
     })
     
     output$ui_trans_cy <- renderUI({
       p <- carrot_obj()
-      req(!is.null(p$tubes_monomarques), length(p$tubes_monomarques) > 0)
       choices <- get_canaux_filtres(p)
+      req(length(choices) > 0)
       selectInput(ns("trans_cy"), "Axe Y :", choices = choices,
                   selected = choices[min(2, length(choices))])
     })
@@ -455,18 +466,70 @@ compensation_server <- function(id, pipeline, pipeline_version) {
     output$plot_transformation <- renderPlot({
       trans_done()
       req(input$trans_file_sel, input$trans_cx, input$trans_cy)
+      
       p <- pipeline()
-      fcs_t <- p$monomarques_trans[[input$trans_file_sel]]
-      validate(need(!is.null(fcs_t),
-                    "Cliquez sur 'Appliquer la transformation'."))
+      
+      # récupération du FCS transformé
+      fcs_t <- if (!is.null(p$monomarques_trans) && input$trans_file_sel %in% names(p$monomarques_trans)) {
+        p$monomarques_trans[[input$trans_file_sel]]
+      } else if (!is.null(p$trans_list) && input$trans_file_sel %in% names(p$echantillons)) {
+        flowCore::transform(p$echantillons[[input$trans_file_sel]], p$trans_list)
+      } else {
+        NULL
+      }
+      
+      validate(need(!is.null(fcs_t), "Cliquez sur 'Appliquer la transformation'."))
+      
+      # extraction des deux paramètres
       mat <- data.frame(
         x = flowCore::exprs(fcs_t)[, input$trans_cx],
         y = flowCore::exprs(fcs_t)[, input$trans_cy]
       )
-      ggplot2::ggplot(mat, ggplot2::aes(x = x, y = y)) +
-        ggpointdensity::geom_pointdensity(size = 0.2) +
-        ggplot2::theme_bw()
+      
+      # ---- DENSITÉ → RASTER ----
+      
+      # grille 300x300 (ajuste si tu veux)
+      nx <- 300
+      ny <- 300
+      
+      x_breaks <- seq(min(mat$x), max(mat$x), length.out = nx + 1)
+      y_breaks <- seq(min(mat$y), max(mat$y), length.out = ny + 1)
+      
+      # binning 2D
+      df_binned <- mat |>
+        dplyr::mutate(
+          x_bin = cut(x, breaks = x_breaks, include.lowest = TRUE),
+          y_bin = cut(y, breaks = y_breaks, include.lowest = TRUE)
+        ) |>
+        dplyr::count(x_bin, y_bin, name = "density") |>
+        tidyr::drop_na()
+      
+      # centres des bins
+      x_centers <- (head(x_breaks, -1) + tail(x_breaks, -1)) / 2
+      y_centers <- (head(y_breaks, -1) + tail(y_breaks, -1)) / 2
+      
+      df_binned <- df_binned |>
+        dplyr::mutate(
+          x = x_centers[as.integer(x_bin)],
+          y = y_centers[as.integer(y_bin)]
+        )
+      
+      # création du raster
+      r <- raster::rasterFromXYZ(df_binned[, c("x", "y", "density")])
+      
+      # ---- PALETTE CARROT ----
+      cols <- c("darkblue", "blue", "cyan", "greenyellow", "yellow", "darkorange", "red")
+      
+      # affichage instantané
+      plot(
+        r,
+        col = cols,
+        main = paste("Densité", input$trans_cx, "vs", input$trans_cy),
+        xlab = input$trans_cx,
+        ylab = input$trans_cy
+      )
     })
+    
     
     # ========================================================================
     # SECTION 2 — GATING INTERACTIF
@@ -827,8 +890,24 @@ compensation_server <- function(id, pipeline, pipeline_version) {
     # ════════════════════════════════════════════════════════════════════════
     spillover_trigger <- reactiveVal(0)
     
-    # Le bouton de calcul se base sur les gates validés
+    # Le bouton de calcul se base sur les gates validés (workflow "avec contrôles").
+    # Si aucun tube contrôle n'a été importé, on informe simplement l'utilisateur de
+    # l'état de la matrice (importée depuis les métadonnées FCS ou absente).
     output$ui_btn_calculer_spillover <- renderUI({
+      p <- carrot_obj()
+      
+      if (!a_des_controles(p)) {
+        if (!is.null(p$S_matrix)) {
+          return(div(class="alert alert-info", style="font-size:11px; padding:5px 9px;",
+                     icon("check-circle"),
+                     " Matrice de compensation importée depuis les métadonnées FCS. Modifiez-la ci-contre puis appliquez-la dans l'onglet Biplots."))
+        } else {
+          return(div(class="alert alert-warning", style="font-size:11px; padding:5px 9px;",
+                     icon("exclamation-triangle"),
+                     " Aucun tube contrôle et aucune matrice détectée dans les métadonnées FCS. Utilisez le bouton ci-dessous pour tenter un import manuel, ou chargez des tubes monomarqués/unstained."))
+        }
+      }
+      
       gv     <- gates_valides() # Assurez-vous que gates_valides() est accessible ici
       canaux <- canaux_monomarques()
       ok     <- length(canaux) > 0 && all(canaux %in% names(gv))
@@ -844,6 +923,38 @@ compensation_server <- function(id, pipeline, pipeline_version) {
         div(class="alert alert-warning", style="font-size:11px; padding:5px 9px;",
             icon("lock"), " Veuillez définir tous les gates dans l'onglet précédent.")
       }
+    })
+    
+    # ── Import manuel de la matrice de spillover depuis les métadonnées FCS ────
+    # Utile quand aucun tube contrôle n'est disponible : on va chercher la matrice
+    # (mot-clé $SPILLOVER/$SPILL) directement dans un échantillon déjà compensé.
+    output$ui_btn_importer_spillover_fcs <- renderUI({
+      p <- carrot_obj()
+      if (a_des_controles(p) || length(p$echantillons) == 0) return(NULL)
+      tagList(
+        selectInput(ns("sel_echantillon_import_spill"), "Échantillon source :",
+                    choices = names(p$echantillons)),
+        actionButton(ns("btn_importer_spillover_fcs"),
+                     "Importer depuis les métadonnées FCS",
+                     class = "btn-info btn-block", icon = icon("file-import"))
+      )
+    })
+    
+    observeEvent(input$btn_importer_spillover_fcs, {
+      p <- pipeline()
+      req(input$sel_echantillon_import_spill)
+      tryCatch({
+        resultat <- p$importer_spillover_fcs(nom_echantillon = input$sel_echantillon_import_spill)
+        pipeline(p)
+        spillover_trigger(spillover_trigger() + 1)
+        if (isTRUE(resultat$succes)) {
+          showNotification(paste("✔", resultat$message), type = "message")
+        } else {
+          showNotification(resultat$message, type = "warning", duration = 12)
+        }
+      }, error = function(e) {
+        showNotification(paste("Erreur :", conditionMessage(e)), type = "error")
+      })
     })
     
     # L'observeEvent du calcul
@@ -876,6 +987,7 @@ compensation_server <- function(id, pipeline, pipeline_version) {
     # Observateur pour initialiser/mettre à jour les choix du selectize quand la matrice change
     observe({
       spillover_trigger()
+      pipeline_version()
       p <- pipeline()
       req(!is.null(p$S_matrix))
       canaux <- rownames(p$S_matrix)
@@ -926,6 +1038,7 @@ compensation_server <- function(id, pipeline, pipeline_version) {
     # Matrice réellement affichée à l'écran
     mat_affichee <- reactive({
       spillover_trigger()
+      pipeline_version()
       req(input$sel_echantillon)
       
       p <- pipeline()
@@ -1146,6 +1259,11 @@ compensation_server <- function(id, pipeline, pipeline_version) {
     output$ui_btn_comparer_medianes <- renderUI({
       spillover_trigger()
       p <- pipeline()
+      if (!a_des_controles(p)) {
+        return(div(class = "alert alert-info", style = "font-size:11px; padding:5px 9px;",
+                   icon("info-circle"),
+                   " La comparaison des médianes n'est pas disponible : elle nécessite des gates positifs/négatifs issus de tubes contrôles (monomarqués/unstained), qui ne sont pas présents ici (import sans contrôles)."))
+      }
       if (is.null(p$S_matrix)) {
         return(div(class = "alert alert-warning", style = "font-size:11px; padding:5px 9px;",
                    icon("lock"), " Calculez d'abord la matrice de spillover dans l'onglet précédent."))
@@ -1157,6 +1275,10 @@ compensation_server <- function(id, pipeline, pipeline_version) {
     observeEvent(input$btn_comparer_medianes, {
       p <- pipeline()
       req(input$sel_echantillon_medianes)
+      if (!a_des_controles(p)) {
+        showNotification("La comparaison des médianes nécessite des tubes contrôles (monomarqués/unstained).", type = "warning")
+        return(invisible(NULL))
+      }
       withProgress(message = "Comparaison des médianes en cours...", value = 0.5, {
         tryCatch({
           p$comparer_medianes_spillover(nom_echantillon = input$sel_echantillon_medianes)
@@ -1173,7 +1295,9 @@ compensation_server <- function(id, pipeline, pipeline_version) {
     resultat_medianes <- reactive({
       medianes_trigger()
       req(input$sel_echantillon_medianes)
-      p   <- pipeline()
+      p <- pipeline()
+      validate(need(a_des_controles(p),
+                    "Fonctionnalité indisponible : la comparaison des médianes nécessite des tubes contrôles (monomarqués/unstained)."))
       res <- p$comparaison_medianes[[input$sel_echantillon_medianes]]
       validate(need(!is.null(res), "Cliquez sur 'Comparer les médianes' pour lancer le calcul."))
       res
@@ -1202,11 +1326,13 @@ compensation_server <- function(id, pipeline, pipeline_version) {
     }
     
     output$dt_medianes_avant <- renderDT({
-      afficher_matrice_medianes(resultat_medianes()$avant$ecart)
+      res <- resultat_medianes() # évalué ici, en tant qu'instruction de haut niveau : le validate() se propage proprement
+      afficher_matrice_medianes(res$avant$ecart)
     })
     
     output$dt_medianes_apres <- renderDT({
-      afficher_matrice_medianes(resultat_medianes()$apres$ecart)
+      res <- resultat_medianes() # évalué ici, en tant qu'instruction de haut niveau : le validate() se propage proprement
+      afficher_matrice_medianes(res$apres$ecart)
     })
     
     # ════════════════════════════════════════════════════════════════════════
@@ -1239,6 +1365,36 @@ compensation_server <- function(id, pipeline, pipeline_version) {
       req(length(p$echantillons) > 0)
       selectInput(ns("sel_echantillon_plot"), "Sélectionner l'échantillon :", 
                   choices = names(p$echantillons))
+    })
+    
+    # ── Info : transformation par défaut appliquée automatiquement (workflow sans contrôles) ──
+    output$ui_info_trans_defaut <- renderUI({
+      p <- carrot_obj()
+      if (!a_des_controles(p) && !is.null(p$trans_list)) {
+        div(class = "alert alert-info", style = "font-size:11px; padding:5px 9px;",
+            icon("info-circle"),
+            paste0(" Transformation Arcsinh par défaut appliquée (cofacteur ", p$cofacteur_defaut,
+                   "). Ajustable dans l'onglet Transformation si besoin."))
+      } else {
+        NULL
+      }
+    })
+    
+    # ── Type d'affichage : dynamique selon le mode (vue d'ensemble ou paire simple) ──
+    # En mode "Vue d'ensemble" (toutes les combinaisons de canaux), l'option "Both"
+    # n'a pas de sens ici (elle ne renverrait qu'une grille de paires avant/après
+    # combinées deux à deux, pas l'ensemble complet des plots avant OU après) :
+    # on ne propose donc que "Avant" ou "Après" dans ce mode.
+    output$ui_affichage_type <- renderUI({
+      choix_precedent <- input$affichage_type
+      if (isTRUE(input$mode_ensemble)) {
+        choix <- c("Before compensation only", "After compensation only")
+        selection <- if (!is.null(choix_precedent) && choix_precedent %in% choix) choix_precedent else choix[1]
+      } else {
+        choix <- c("Both", "Before compensation only", "After compensation only")
+        selection <- if (!is.null(choix_precedent) && choix_precedent %in% choix) choix_precedent else "Both"
+      }
+      radioButtons(ns("affichage_type"), "Type d'affichage :", choices = choix, selected = selection)
     })
     
     # 2. Application de la compensation — utilise la matrice propre à chaque échantillon

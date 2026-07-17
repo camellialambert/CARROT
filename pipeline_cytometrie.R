@@ -1,7 +1,105 @@
 library(R6)
 library(ggplot2)
 library(ggpointdensity)
+library(raster)
 library(flowCore)
+
+# ─────────────────────────────────────────────────────────────────────────
+# Calcule une densité 2D rapide par binning raster (remplace un calcul de
+# densité "par point" type ggpointdensity, coûteux avec beaucoup d'événements,
+# ou un simple comptage par bin non régularisé qui peut casser l'alignement
+# de la grille quand des cellules sont vides).
+#
+# Principe :
+#   1. On définit une grille RÉGULIÈRE et COMPLÈTE (res x res) sur (xlim, ylim)
+#      via raster::raster() — contrairement à raster::rasterFromXYZ(), qui
+#      déduit la grille des seules coordonnées présentes et peut se désaligner
+#      dès qu'il manque des cellules vides (densité = 0).
+#   2. On compte les événements par cellule avec raster::rasterize().
+#   3. On lisse légèrement (moyenne glissante) pour un rendu visuel continu,
+#      proche d'une estimation de densité classique (type kde2d), mais en
+#      coût O(N) + coût fixe sur la grille, au lieu de O(N log N) / O(N²).
+#
+# Retourne un data.frame (X, Y, densite) prêt pour ggplot2::geom_raster(),
+# ou NULL si pas assez de points exploitables.
+# ─────────────────────────────────────────────────────────────────────────
+calculer_densite_raster <- function(x, y, xlim, ylim, res = 200, lissage = TRUE) {
+  ok <- is.finite(x) & is.finite(y)
+  x <- x[ok]; y <- y[ok]
+  if (length(x) < 2) return(NULL)
+  
+  # Sécurise des bornes dégénérées (ex : xlim[1] == xlim[2])
+  if (diff(xlim) == 0) xlim <- xlim + c(-0.5, 0.5)
+  if (diff(ylim) == 0) ylim <- ylim + c(-0.5, 0.5)
+  
+  r_vide <- raster::raster(xmn = xlim[1], xmx = xlim[2],
+                           ymn = ylim[1], ymx = ylim[2],
+                           nrows = res, ncols = res)
+  r_densite <- raster::rasterize(cbind(x, y), r_vide, fun = "count", background = 0)
+  
+  if (isTRUE(lissage)) {
+    # Moyenne glissante 3x3 : lisse la grille sans coût significatif (grille fixe, indépendante de N)
+    r_densite <- raster::focal(r_densite, w = matrix(1, 3, 3), fun = mean, na.rm = TRUE, pad = TRUE)
+  }
+  
+  df <- as.data.frame(r_densite, xy = TRUE)
+  names(df) <- c("X", "Y", "densite")
+  df <- df[!is.na(df$densite) & df$densite > 0, , drop = FALSE]
+  if (nrow(df) == 0) return(NULL)
+  df
+}
+
+# Palette pseudo-spectrale (type "Jet") utilisée pour TOUS les graphiques de densité
+# de l'application (compensation, prétraitement, gating interactif), afin de garder
+# un rendu visuel cohérent partout.
+PALETTE_DENSITE <- c("darkblue", "blue", "cyan", "greenyellow", "yellow", "darkorange", "red")
+
+# Équivalent de PALETTE_DENSITE au format attendu par plotly (liste de paires
+# [fraction, couleur] réparties uniformément de 0 à 1), pour les graphiques de
+# gating interactifs (heatmap plotly) du module de prétraitement.
+COLORSCALE_DENSITE_PLOTLY <- local({
+  n <- length(PALETTE_DENSITE)
+  lapply(seq_len(n), function(i) list((i - 1) / (n - 1), PALETTE_DENSITE[i]))
+})
+
+# ─────────────────────────────────────────────────────────────────────────
+# Variante de calculer_densite_raster() pour les graphiques plotly (heatmap) :
+# retourne la grille COMPLÈTE (x, y, z) plutôt qu'un data.frame filtré, car
+# plotly::add_trace(type = "heatmap") a besoin d'une matrice rectangulaire
+# complète (les cellules vides sont conservées à 0, affichées dans la couleur
+# la plus froide de la palette plutôt que d'être trouées).
+# Retourne list(x, y, z) ou NULL si pas assez de points exploitables.
+# ─────────────────────────────────────────────────────────────────────────
+calculer_densite_matrice_plotly <- function(x, y, xlim, ylim, res = 150, lissage = TRUE) {
+  ok <- is.finite(x) & is.finite(y)
+  x <- x[ok]; y <- y[ok]
+  if (length(x) < 2) return(NULL)
+  
+  if (diff(xlim) == 0) xlim <- xlim + c(-0.5, 0.5)
+  if (diff(ylim) == 0) ylim <- ylim + c(-0.5, 0.5)
+  
+  r_vide    <- raster::raster(xmn = xlim[1], xmx = xlim[2],
+                              ymn = ylim[1], ymx = ylim[2],
+                              nrows = res, ncols = res)
+  r_densite <- raster::rasterize(cbind(x, y), r_vide, fun = "count", background = 0)
+  
+  if (isTRUE(lissage)) {
+    r_densite <- raster::focal(r_densite, w = matrix(1, 3, 3), fun = mean, na.rm = TRUE, pad = TRUE)
+  }
+  
+  # raster::as.matrix() renvoie la ligne 1 = y max (convention SIG, du haut vers le bas) ;
+  # plotly attend au contraire y croissant du bas vers le haut : on inverse l'ordre des lignes.
+  mat <- as.matrix(r_densite)
+  mat <- mat[nrow(mat):1, , drop = FALSE]
+  mat[is.na(mat)] <- 0
+  
+  x_bornes  <- seq(xlim[1], xlim[2], length.out = res + 1)
+  y_bornes  <- seq(ylim[1], ylim[2], length.out = res + 1)
+  x_centres <- (head(x_bornes, -1) + tail(x_bornes, -1)) / 2
+  y_centres <- (head(y_bornes, -1) + tail(y_bornes, -1)) / 2
+  
+  list(x = x_centres, y = y_centres, z = mat)
+}
 
 CARROT <- R6Class(
   classname = "CARROT",
@@ -81,14 +179,24 @@ CARROT <- R6Class(
     pipeline_callback = NULL,
     
     #pour siny
-    config_marqueurs = NULL,
+    config_marqueurs = NULL, # data.frame brut (lignes = tubes/échantillons, colonnes = canaux) des annotations marqueurs saisies par l'utilisateur
+    dictionnaire_marqueurs = NULL, # vecteur nommé canal -> marqueur biologique, dérivé de config_marqueurs, utilisé par get_label() pour tous les libellés d'axes
+    
+    #pour l'import sans fichiers contrôles (échantillons déjà compensés / unmixés)
+    sans_controles = FALSE, # TRUE si l'utilisateur n'a fourni aucun tube monomarqué/unstained
+    deja_traite = FALSE, # TRUE si l'utilisateur indique que ses échantillons sont déjà compensés (conventionnel) ou unmixés (spectral)
+    cofacteur_defaut = 150, # cofacteur Arcsinh utilisé par défaut pour construire trans_list automatiquement en l'absence de contrôles (ajustable ensuite via l'onglet Transformation)
     
     
     #initialisation de la classe
-    initialize = function(df_monomarques = NULL, df_echantillons = NULL, chemin_racine = NULL, mode = "Conventionnel") { # initialiser la classe R6 
+    initialize = function(df_monomarques = NULL, df_echantillons = NULL, chemin_racine = NULL, mode = "Conventionnel", deja_traite = FALSE) { # initialiser la classe R6 
       self$mode <- mode # Enregistre le mode utilisé (Conventionnel ou Spectral)
-      self$chemins_monomarques  <- df_monomarques # Enregistre les chemins et métadonnées des fichiers contrôles (monomarqués et unstained)
+      # Un data.frame de 0 ligne est traité comme une absence de contrôles
+      if (!is.null(df_monomarques) && nrow(df_monomarques) == 0) df_monomarques <- NULL
+      self$chemins_monomarques  <- df_monomarques # Enregistre les chemins et métadonnées des fichiers contrôles (monomarqués et unstained), NULL si aucun contrôle fourni
       self$chemins_echantillons <- df_echantillons # Enregistre les chemins et métadonnées des fichiers échantillons
+      self$sans_controles <- is.null(self$chemins_monomarques) # Mémorise si l'utilisateur travaille sans tubes monomarqués/unstained
+      self$deja_traite    <- isTRUE(deja_traite) # Mémorise si les échantillons sont annoncés comme déjà compensés/unmixés
       
       if (self$mode == "Conventionnel") { # Si le mode utilisé est Conventionnel
         self$dossier_racine   <- NULL # Alors on n'a pas besoin de dossier_racine puisqu'AutoSpectral ne sera pas utilisé
@@ -120,24 +228,112 @@ CARROT <- R6Class(
     
     
     charger_fcs = function() {
-      self$tubes_monomarques <- lapply(seq_len(nrow(self$chemins_monomarques)), function(i) {
-        row <- self$chemins_monomarques[i, ]
-        flowCore::read.FCS(row$chemin, transformation = FALSE, truncate_max_range = FALSE)
-      })
-      noms_tubes <- sapply(seq_len(nrow(self$chemins_monomarques)), function(i) {
-        row <- self$chemins_monomarques[i, ]
-        if (!is.na(row$type) && row$type == "Unstained") return("TUBE_UNSTAINED")
-        return(row$canal)
-      })
-      names(self$tubes_monomarques) <- noms_tubes
+      # ── Tubes contrôles (monomarqués / unstained) : optionnels ──────────────
+      # Si l'utilisateur n'a fourni aucun fichier contrôle (échantillons déjà
+      # compensés ou déjà unmixés), on saute simplement cette étape.
+      if (!is.null(self$chemins_monomarques) && nrow(self$chemins_monomarques) > 0) {
+        self$tubes_monomarques <- lapply(seq_len(nrow(self$chemins_monomarques)), function(i) {
+          row <- self$chemins_monomarques[i, ]
+          flowCore::read.FCS(row$chemin, transformation = FALSE, truncate_max_range = FALSE)
+        })
+        noms_tubes <- sapply(seq_len(nrow(self$chemins_monomarques)), function(i) {
+          row <- self$chemins_monomarques[i, ]
+          if (!is.na(row$type) && row$type == "Unstained") return("TUBE_UNSTAINED")
+          return(row$canal)
+        })
+        names(self$tubes_monomarques) <- noms_tubes
+        self$sans_controles <- FALSE
+      } else {
+        self$tubes_monomarques <- list()
+        self$sans_controles <- TRUE
+      }
+      
+      # ── Échantillons biologiques : toujours requis ───────────────────────────
       self$echantillons = lapply(self$chemins_echantillons$chemin, function(f) {
         flowCore::read.FCS(f, transformation = FALSE, truncate_max_range = FALSE)
       }) 
       names(self$echantillons) <- self$chemins_echantillons$tube_name
+      
+      # ── Import automatique de la matrice de spillover ────────────────────────
+      # Si aucun contrôle n'a été fourni et que l'utilisateur a indiqué que ses
+      # échantillons sont déjà compensés, on tente de récupérer la matrice
+      # directement depuis les métadonnées FCS (mot-clé $SPILLOVER / $SPILL).
+      if (self$sans_controles && self$mode == "Conventionnel" && self$deja_traite) {
+        invisible(tryCatch(self$importer_spillover_fcs(), error = function(e) NULL))
+      }
+      
+      # ── Transformation par défaut (workflow sans contrôles) ──────────────────
+      # Sans tubes monomarqués, l'onglet "Transformation" n'est pas une étape
+      # obligatoire pour l'utilisateur : on construit donc immédiatement une
+      # transformation Arcsinh par défaut, afin que l'onglet Biplots (appliquer
+      # la matrice de compensation + visualiser) fonctionne dès l'import, sans
+      # étape intermédiaire. L'utilisateur peut toujours ajuster le cofacteur
+      # ensuite via l'onglet Transformation (cela reconstruira trans_list).
+      if (self$sans_controles) {
+        invisible(tryCatch(self$transformer_fcs(cofacteur = self$cofacteur_defaut),
+                           error = function(e) NULL))
+      }
     },
     
-    get_label = function(fcs, canal) { # Permet d'extraire à partir des métadonnées du fichier FCS le nom des marqueurs biologiques
-      if (is.null(fcs) || is.na(canal) || canal == "") return(canal) # Si on n'a ni fichier FCS ni canal donné, on retourne le nom du canal par défaut
+    # Recherche et importe la matrice de compensation embarquée dans les métadonnées
+    # d'un échantillon FCS déjà compensé. Utile quand aucun tube monomarqué/unstained
+    # n'a été fourni à l'import. Retourne une liste :
+    #   $succes  : TRUE si une matrice a été trouvée ET importée
+    #   $message : explication (utile pour le diagnostic côté interface)
+    importer_spillover_fcs = function(nom_echantillon = NULL) {
+      if (is.null(self$echantillons) || length(self$echantillons) == 0) {
+        stop("Aucun échantillon chargé.")
+      }
+      nom <- if (!is.null(nom_echantillon)) nom_echantillon else names(self$echantillons)[1]
+      fcs <- self$echantillons[[nom]]
+      if (is.null(fcs)) stop("Échantillon introuvable : ", nom)
+      
+      mat <- extraire_spillover_depuis_fcs(fcs)
+      
+      if (is.null(mat)) {
+        cles_trouvees <- lister_cles_spillover_fcs(fcs)
+        if (length(cles_trouvees) == 0) {
+          return(list(succes = FALSE,
+                      message = "Aucun mot-clé de compensation (SPILL/SPILLOVER/COMP) n'a été trouvé dans les métadonnées de ce fichier FCS."))
+        } else {
+          return(list(succes = FALSE,
+                      message = paste0("Mot-clé(s) détecté(s) mais non exploitable(s) : ",
+                                       paste(cles_trouvees, collapse = ", "),
+                                       ". Vérifiez le format (attendu : \"n,chan1,...,chanN,v11,...,vNN\").")))
+        }
+      }
+      
+      # On ne conserve que les canaux réellement présents dans l'échantillon
+      canaux_valides <- intersect(rownames(mat), flowCore::colnames(fcs))
+      if (length(canaux_valides) == 0) {
+        return(list(succes = FALSE,
+                    message = paste0("Une matrice a été trouvée (canaux : ",
+                                     paste(rownames(mat), collapse = ", "),
+                                     ") mais aucun de ces canaux ne correspond aux paramètres de l'échantillon (",
+                                     paste(flowCore::colnames(fcs), collapse = ", "), ").")))
+      }
+      
+      mat <- mat[canaux_valides, canaux_valides, drop = FALSE]
+      
+      self$S_matrix <- mat
+      self$canaux   <- canaux_valides
+      return(list(succes = TRUE,
+                  message = paste0("Matrice importée pour ", length(canaux_valides), " canaux.")))
+    },
+    
+    get_label = function(fcs, canal) { # Permet d'extraire le nom des marqueurs biologiques à afficher sur les axes des graphiques
+      if (is.na(canal) || canal == "") return(canal) # Si aucun canal n'est donné, on retourne tel quel
+      
+      # Priorité à l'annotation manuelle de l'utilisateur (onglet "Configuration Marqueurs"),
+      # car elle prime sur la description brute embarquée dans le fichier FCS.
+      if (!is.null(self$dictionnaire_marqueurs) && canal %in% names(self$dictionnaire_marqueurs)) {
+        marqueur_manuel <- self$dictionnaire_marqueurs[[canal]]
+        if (!is.null(marqueur_manuel) && !is.na(marqueur_manuel) && nchar(trimws(marqueur_manuel)) > 0) {
+          return(paste0(canal, " | ", marqueur_manuel))
+        }
+      }
+      
+      if (is.null(fcs)) return(canal) # Sans fichier FCS de référence, impossible d'aller chercher plus loin
       param_data <- flowCore::pData(flowCore::parameters(fcs)) # On accède aux métadonnées du fichier FCS, spécifiquement dans la table des paramètres
       if (is.null(param_data) || !any(colnames(param_data) == "name") || !any(colnames(param_data) == "desc")) { # Vérifie que la table des paramètres n'est pas vide et que les colonnes indispensables "name" et "desc" existent bien
         return(canal) # Si la structure des métadonnées est incomplète, on retourne le nom du canal brut par sécurité
@@ -153,6 +349,25 @@ CARROT <- R6Class(
         return(canal) # Si le marqueur n'est pas renseigné dans le fichier FCS, on retourne uniquement le nom du canal brut
       }
       return(paste0(canal, " | ", marqueur)) # Concatène et retourne le résultat sous un format propre (ex: "V3-A | CD4")
+    },
+    
+    # Enregistre la table d'annotation Marqueurs/Fluorochromes (onglet "Configuration Marqueurs")
+    # et en dérive un dictionnaire canal -> marqueur utilisé ensuite par get_label() pour tous
+    # les libellés d'axes (biplots, gates, QC, prétraitement...).
+    definir_config_marqueurs = function(df_config) {
+      self$config_marqueurs <- df_config
+      if (is.null(df_config) || nrow(df_config) == 0 || ncol(df_config) == 0) {
+        self$dictionnaire_marqueurs <- NULL
+        return(invisible(NULL))
+      }
+      dict <- sapply(colnames(df_config), function(cx) {
+        valeurs <- trimws(as.character(df_config[[cx]]))
+        valeurs <- valeurs[!is.na(valeurs) & nchar(valeurs) > 0]
+        if (length(valeurs) > 0) valeurs[1] else NA_character_
+      })
+      dict <- dict[!is.na(dict)]
+      self$dictionnaire_marqueurs <- as.list(dict)
+      invisible(self$dictionnaire_marqueurs)
     },
     
     update_pipeline = function(etape, nom_echantillon = NULL) { # méthode qui permet de savoir à quelle étape on se situe
@@ -183,35 +398,44 @@ CARROT <- R6Class(
     
     transformer_fcs = function(cofacteur) {
       
-      # Vérifie que les tubes sont chargés
-      if (is.null(self$tubes_monomarques) || length(self$tubes_monomarques) == 0) {
-        stop("Aucun tube monomarqué chargé.")
-      }
+      avec_controles <- !is.null(self$tubes_monomarques) && length(self$tubes_monomarques) > 0
       
-      # Recalcule les canaux fluo depuis le premier tube chargé
-      # (plus fiable que self$canaux qui peut être NULL si init sans arguments)
-      tous_canaux <- flowCore::colnames(self$tubes_monomarques[[1]])
+      if (avec_controles) {
+        # Recalcule les canaux fluo depuis le premier tube chargé
+        # (plus fiable que self$canaux qui peut être NULL si init sans arguments)
+        tous_canaux <- flowCore::colnames(self$tubes_monomarques[[1]])
+      } else if (!is.null(self$echantillons) && length(self$echantillons) > 0) {
+        # Pas de contrôles : on dérive les canaux directement des échantillons
+        # (cas d'un import sans tubes monomarqués/unstained, ex: données déjà compensées)
+        tous_canaux <- flowCore::colnames(self$echantillons[[1]])
+      } else {
+        stop("Aucun tube monomarqué ni échantillon chargé.")
+      }
       canaux_fluo <- tous_canaux[!grepl("fsc|ssc|time", tous_canaux, ignore.case = TRUE)]
       
       arsinh_fun <- flowCore::arcsinhTransform(a = 0, b = 1/cofacteur, c = 0)
       
-      self$monomarques_trans <- lapply(self$tubes_monomarques, function(fcs) {
-        canaux_presents <- intersect(canaux_fluo, flowCore::colnames(fcs))
-        if (length(canaux_presents) > 0) {
-          funs_locales <- lapply(seq_along(canaux_presents), function(x) arsinh_fun)
-          local_trans  <- flowCore::transformList(
-            from = canaux_presents,
-            tfun = funs_locales,
-            to   = canaux_presents
-          )
-          return(flowCore::transform(fcs, local_trans))
-        } else {
-          return(fcs)
-        }
-      })
-      names(self$monomarques_trans) <- names(self$tubes_monomarques)
+      if (avec_controles) {
+        self$monomarques_trans <- lapply(self$tubes_monomarques, function(fcs) {
+          canaux_presents <- intersect(canaux_fluo, flowCore::colnames(fcs))
+          if (length(canaux_presents) > 0) {
+            funs_locales <- lapply(seq_along(canaux_presents), function(x) arsinh_fun)
+            local_trans  <- flowCore::transformList(
+              from = canaux_presents,
+              tfun = funs_locales,
+              to   = canaux_presents
+            )
+            return(flowCore::transform(fcs, local_trans))
+          } else {
+            return(fcs)
+          }
+        })
+        names(self$monomarques_trans) <- names(self$tubes_monomarques)
+      } else {
+        self$monomarques_trans <- NULL
+      }
       
-      # Met aussi à jour trans_list pour que controler_monomarques puisse l'utiliser
+      # Met aussi à jour trans_list pour que controler_monomarques / visualiser_compensation puisse l'utiliser
       funs_globales    <- lapply(seq_along(canaux_fluo), function(x) arsinh_fun)
       self$trans_list  <- flowCore::transformList(
         from = canaux_fluo,
@@ -387,7 +611,7 @@ CARROT <- R6Class(
       return(resultat) # Renvoie la liste des résultats comparatifs
     },
     
-    controler_monomarques = function(fichier_monomarque, canal_x, canal_y, max_points = 10000) { # Méthode générant un graphique biplot comparatif avant/après compensation pour contrôler le spillover
+    controler_monomarques = function(fichier_monomarque, canal_x, canal_y, max_points = 200000) { # Méthode générant un graphique biplot comparatif avant/après compensation pour contrôler le spillover
       if (is.null(canal_x) || canal_x == "" || is.null(canal_y) || canal_y == "") return(NULL) # Intercepte et arrête la fonction si l'un des deux canaux d'acquisition n'est pas renseigné
       fcs_brut_original  <- self$tubes_monomarques[[fichier_monomarque]] # Récupère le fichier d'acquisition FCS brut d'origine correspondant au tube monomarqué
       fcs_compense_brut  <- flowCore::compensate(fcs_brut_original, self$S_matrix) # Applique la matrice de spillover calculée pour soustraire mathématiquement les fluorescences croisées
@@ -427,9 +651,16 @@ CARROT <- R6Class(
       limite_y <- range(c(df_avant[[canal_y]], df_apres[[canal_y]]), na.rm = TRUE) + c(-0.5, 0.5) # Calcule des limites d'affichage identiques en ordonnée pour les deux graphiques
       
       creer_affichage_comparatif = function(df_points, titre_plot, valeur_spill, lab_x, lab_y, cx, cy) { # Sous-fonction standardisant le style visuel des figures ggplot2
-        ggplot(df_points, aes(x = .data[[cx]], y = .data[[cy]])) + # Initialise la figure graphique biplot
-          ggpointdensity::geom_pointdensity(size = 0.2, alpha = 0.6) + # Dessine un nuage de points dont la couleur dépend de la densité locale de cellules (évite l'effet de saturation)
-          scale_color_gradientn(colours = c("darkblue", "blue", "cyan", "greenyellow", "yellow", "darkorange", "red")) + # Applique une palette de couleurs pseudo-spectrale allant du bleu (faible densité) au rouge (forte densité)
+        # Densité calculée par binning raster (rapide, indépendant du nombre d'événements)
+        # plutôt que par ggpointdensity (densité par point, coûteuse avec beaucoup d'événements).
+        df_densite <- calculer_densite_raster(df_points[[cx]], df_points[[cy]], limite_x, limite_y)
+        if (is.null(df_densite)) {
+          return(ggplot() + theme_bw() +
+                   labs(title = titre_plot, subtitle = "Pas assez d'événements pour tracer la densité", x = lab_x, y = lab_y))
+        }
+        ggplot(df_densite, aes(x = X, y = Y, fill = densite)) + # Initialise la figure biplot à partir de la grille de densité
+          geom_raster(interpolate = TRUE) + # Affiche la densité sous forme d'image raster (rapide, même avec beaucoup d'événements)
+          scale_fill_gradientn(colours = PALETTE_DENSITE) + # Applique une palette de couleurs pseudo-spectrale allant du bleu (faible densité) au rouge (forte densité)
           coord_cartesian(xlim = limite_x, ylim = limite_y) + # Verrouille les fenêtres d'affichage pour aligner visuellement les deux graphiques côte à côte
           theme_bw() + theme(legend.position = "none") + # Applique un arrière-plan blanc et masque la légende de l'échelle colorimétrique
           labs(title = titre_plot, subtitle = paste0("Spillover : ", valeur_spill, " %"), x = lab_x, y = lab_y) # Assigne le titre, la valeur calculée du spillover et les axes
@@ -459,54 +690,69 @@ CARROT <- R6Class(
       names(self$echantillons_traites) <- names(self$echantillons)
     },
     
-    visualiser_compensation = function(nom_echantillon, canal_x, canal_y, max_points = 10000, affichage = "Both") {
+    visualiser_compensation = function(nom_echantillon, canal_x, canal_y, affichage = "Both") {
       local_trans <- self$trans_list
       fcs_source  <- self$echantillons[[nom_echantillon]]
       
-      # ── Cas "ALL" : retourne une liste nommée de plots (rendu géré côté Shiny) ──
+      # ───────────────────────────────────────────────
+      # Cas "ALL" : toutes les combinaisons fluo
+      # ───────────────────────────────────────────────
       if (canal_x == "ALL" || canal_y == "ALL") {
+        # "Both" n'est pas autorisé en vue d'ensemble : on ne peut afficher ici que
+        # l'ensemble des plots "avant" OU l'ensemble des plots "après", jamais les
+        # deux combinés par paire (l'interface Shiny empêche déjà cette sélection,
+        # ce garde-fou couvre tout appel direct à la méthode).
+        if (identical(affichage, "Both")) {
+          stop("Le mode 'Vue d'ensemble' ne permet pas l'affichage 'Both' : choisissez 'Before compensation only' ou 'After compensation only'.")
+        }
+        
         tous_canaux  <- flowCore::colnames(fcs_source)
         canaux_fluo  <- tous_canaux[!grepl("FSC|SSC|Time", tous_canaux, ignore.case = TRUE)]
         combinaisons <- expand.grid(x = canaux_fluo, y = canaux_fluo, stringsAsFactors = FALSE)
-        combinaisons <- combinaisons[combinaisons$x != combinaisons$y, ]
+        # x < y : ne garde qu'une seule orientation par paire de canaux (évite le
+        # doublon "A en X / B en Y" ET "B en X / A en Y", qui montrent la même
+        # information biologique retournée)
+        combinaisons <- combinaisons[combinaisons$x < combinaisons$y, ]
         
         plots_list <- lapply(seq_len(nrow(combinaisons)), function(i) {
           self$visualiser_compensation(
             nom_echantillon,
             combinaisons$x[i],
             combinaisons$y[i],
-            max_points,
-            affichage
+            affichage = affichage
           )
         })
+        
         plots_list <- Filter(Negate(is.null), plots_list)
         if (length(plots_list) == 0) return(NULL)
-        # On retourne la liste brute : Shiny s'occupe de la mise en page scrollable
+        
         return(structure(plots_list, class = c("carrot_plots_list", "list")))
       }
       
-      # ── Cas simple : une paire de canaux ──
+      # ───────────────────────────────────────────────
+      # Cas simple : une paire de canaux
+      # ───────────────────────────────────────────────
       label_x <- self$get_label(fcs_source, canal_x)
       label_y <- self$get_label(fcs_source, canal_y)
       
-      # Extraction sécurisée + transformation + sous-échantillonnage
       extraire_matrice <- function(fcs, cx, cy) {
         if (is.null(fcs)) return(NULL)
         if (!(cx %in% flowCore::colnames(fcs)) || !(cy %in% flowCore::colnames(fcs))) return(NULL)
         
         fcs_trans <- flowCore::transform(fcs, local_trans)
         mat       <- flowCore::exprs(fcs_trans)[, c(cx, cy), drop = FALSE]
-        idx       <- sample(seq_len(nrow(mat)), min(nrow(mat), max_points))
-        as.data.frame(mat[idx, , drop = FALSE])
+        
+        # → ICI : on garde TOUS les évènements
+        as.data.frame(mat)
       }
       
       df_avant <- if (affichage %in% c("Both", "Before compensation only"))
-        extraire_matrice(self$echantillons[[nom_echantillon]],         canal_x, canal_y) else NULL
+        extraire_matrice(self$echantillons[[nom_echantillon]], canal_x, canal_y) else NULL
       
       df_apres <- if (affichage %in% c("Both", "After compensation only"))
         extraire_matrice(self$echantillons_traites[[nom_echantillon]], canal_x, canal_y) else NULL
       
-      # Limites communes pour que les deux plots soient comparables
+      # Limites communes
       all_data <- rbind(df_avant, df_apres)
       if (!is.null(all_data) && nrow(all_data) > 0) {
         lim_x <- range(all_data[, 1], na.rm = TRUE)
@@ -516,14 +762,41 @@ CARROT <- R6Class(
         lim_y <- c(0, 1)
       }
       
-      creer_plot <- function(donnees_df, titre) {
-        if (is.null(donnees_df) || nrow(donnees_df) == 0) return(NULL)
-        colnames(donnees_df) <- c("X", "Y")
+      # ───────────────────────────────────────────────
+      # Fonction interne : densité → raster → ggplot
+      # ───────────────────────────────────────────────
+      creer_plot_raster <- function(df, titre) {
+        if (is.null(df) || nrow(df) == 0) return(NULL)
+        colnames(df) <- c("X", "Y")
         
-        ggplot2::ggplot(donnees_df, ggplot2::aes(x = X, y = Y)) +
-          ggpointdensity::geom_pointdensity(size = 0.2, alpha = 0.5) +
-          ggplot2::scale_color_gradientn(
-            colours = c("darkblue", "blue", "cyan", "greenyellow", "yellow", "darkorange", "red")
+        # Résolution de la grille (pixels plus petits si ↑)
+        resolution <- 400
+        
+        x_breaks <- seq(lim_x[1], lim_x[2], length.out = resolution + 1)
+        y_breaks <- seq(lim_y[1], lim_y[2], length.out = resolution + 1)
+        
+        df_binned <- df |>
+          dplyr::mutate(
+            x_bin = cut(X, breaks = x_breaks, include.lowest = TRUE),
+            y_bin = cut(Y, breaks = y_breaks, include.lowest = TRUE)
+          ) |>
+          dplyr::count(x_bin, y_bin, name = "densite") |>
+          tidyr::drop_na()
+        
+        # centres des bins
+        x_centers <- (head(x_breaks, -1) + tail(x_breaks, -1)) / 2
+        y_centers <- (head(y_breaks, -1) + tail(y_breaks, -1)) / 2
+        
+        df_binned <- df_binned |>
+          dplyr::mutate(
+            X = x_centers[as.integer(x_bin)],
+            Y = y_centers[as.integer(y_bin)]
+          )
+        
+        ggplot2::ggplot(df_binned, ggplot2::aes(x = X, y = Y, fill = densite)) +
+          ggplot2::geom_raster(interpolate = TRUE) +
+          ggplot2::scale_fill_gradientn(
+            colours = PALETTE_DENSITE
           ) +
           ggplot2::coord_cartesian(xlim = lim_x, ylim = lim_y) +
           ggplot2::theme_bw() +
@@ -531,13 +804,12 @@ CARROT <- R6Class(
           ggplot2::labs(title = titre, x = label_x, y = label_y)
       }
       
-      plot_avant <- creer_plot(df_avant, paste(nom_echantillon, "- Avant"))
-      plot_apres <- creer_plot(df_apres, paste(nom_echantillon, "- Après"))
+      # Création des deux plots
+      plot_avant <- creer_plot_raster(df_avant, paste(nom_echantillon, "- Avant"))
+      plot_apres <- creer_plot_raster(df_apres, paste(nom_echantillon, "- Après"))
       
-      # Rendu selon le nombre de plots disponibles
+      # Rendu final
       if (affichage == "Both") {
-        # Si l'un des deux est NULL (ex: compensation pas encore appliquée),
-        # on affiche seulement ce qui est disponible
         plots_valides <- Filter(Negate(is.null), list(plot_avant, plot_apres))
         if (length(plots_valides) == 0) return(NULL)
         if (length(plots_valides) == 1) return(plots_valides[[1]])
@@ -1119,7 +1391,7 @@ CARROT <- R6Class(
       graphique_unmixing <- ggplot(df, aes(x = Axe_X, y = Axe_Y)) + # Initialise la figure graphique biplot
         ggpointdensity::geom_pointdensity(size = 0.2, alpha = 0.5) + # Dessine un nuage de points dont la couleur dépend de la densité locale de cellules (évite l'effet de saturation visuelle)
         scale_color_gradientn( # Configure la palette colorimétrique pour exprimer le gradient de concentration cellulaire
-          colours = c("darkblue", "blue", "cyan", "greenyellow", "yellow", "darkorange", "red"), # Applique un dégradé pseudo-spectral standard allant du bleu (faible densité) au rouge (forte densité)
+          colours = PALETTE_DENSITE, # Applique un dégradé pseudo-spectral standard allant du bleu (faible densité) au rouge (forte densité)
           name = "Densité" # Définit le titre affiché au-dessus de la légende de l'échelle colorimétrique
         ) + 
         theme_bw() + # Applique un arrière-plan blanc épuré avec une grille de lecture grise discrète
@@ -1797,65 +2069,119 @@ CARROT <- R6Class(
       return(graphique_flowai) # Renvoie l'objet graphique ggplot2 complet prêt pour affichage ou intégration UI Shiny
     },
     
-    visualiser_debris = function(nom_echantillon, max_points = 10000) { # Méthode générant un graphique bidimensionnel de densité (biplot) pour cartographier et valider l'exclusion des débris cellulaires par le polygone utilisateur
-      if (is.null(self$post_debris[[nom_echantillon]])) { # Évalue si la structure ou le fichier cible nettoyé pour les débris est absent de la mémoire vive
-        message("Pas de données Débris pour ", nom_echantillon) # Notification d'avertissement en console si l'étape de tri n'a pas été préalablement exécutée
-        return(NULL) # Interrompt proprement la fonction et renvoie NULL pour ne pas bloquer l'exécution globale
-      } 
+    visualiser_debris = function(nom_echantillon) {
       
-      flowframe_avant <- if (!is.null(self$post_retrait_bordures) && length(self$post_retrait_bordures) > 0) { # Système pyramidal : vérifie la présence de données issues du retrait des bordures
-        self$post_retrait_bordures[[nom_echantillon]] # Charge prioritairement les expressions issues de l'élimination des événements de bordure saturés
-      } else if (!is.null(self$post_PeacoQC) && length(self$post_PeacoQC) > 0) { # À défaut, vérifie si l'étape PeacoQC est peuplée en mémoire vive
-        self$post_PeacoQC[[nom_echantillon]] # Oriente le flux vers la structure de données stabilisée par PeacoQC
-      } else if (!is.null(self$post_flowAI) && length(self$post_flowAI) > 0) { # À défaut, évalue la disponibilité de la structure issue du nettoyage flowAI
-        self$post_flowAI[[nom_echantillon]] # Charge les expressions issues du contrôle qualité multi-critères flowAI
-      } else { # Si aucun filtre de qualité n'a encore été appliqué sur les échantillons de la cohorte
-        self$echantillons_traites[[nom_echantillon]] # Charge la structure par défaut des expressions d'origine de l'expérience
-      } 
+      # ───────────────────────────────────────────────
+      # 1. Vérification des données disponibles
+      # ───────────────────────────────────────────────
+      if (is.null(self$post_debris[[nom_echantillon]])) {
+        message("Pas de données Débris pour ", nom_echantillon)
+        return(NULL)
+      }
       
-      if (is.null(flowframe_avant)) return(NULL) # Sécurité critique : quitte proprement la routine si aucun flowFrame antécédent valide n'est identifié
-      flowframe_apres  <- self$post_debris[[nom_echantillon]] # Récupère l'objet flowFrame épuré (contenant les événements validés à l'intérieur du polygone)
-      donnees_globales <- as.data.frame(flowCore::exprs(flowframe_avant)) # Convertit la matrice des intensités de la source d'entrée en tableau de données exploitable par ggplot2
-      total_evenements_avant <- nrow(donnees_globales) # Dénombre la population totale d'événements entrant dans l'étape de filtration des débris
-      if (!is.null(max_points) && total_evenements_avant > max_points) { # Si la taille de la population outrepasse la limite maximale définie pour la fluidité du rendu graphique
-        
-        if (!is.null(self$seed)) set.seed(self$seed)
-        indices_gardes <- sample(seq_len(total_evenements_avant), max_points) # Génère un vecteur d'indices par échantillonnage aléatoire uniforme sans remise pour alléger le nuage de points
-        donnees_visu   <- donnees_globales[indices_gardes, ] # Extrait la sous-matrice d'expression correspondante dédiée à la représentation visuelle
-      } else { # Si le volume total de cellules initiales est inférieur au seuil critique max_points
-        donnees_visu   <- donnees_globales # Conserve l'intégralité de la matrice source pour le tracé graphique
-      } 
+      # Sélection de la source "avant débris"
+      flowframe_avant <- if (!is.null(self$post_retrait_bordures) && length(self$post_retrait_bordures) > 0) {
+        self$post_retrait_bordures[[nom_echantillon]]
+      } else if (!is.null(self$post_PeacoQC) && length(self$post_PeacoQC) > 0) {
+        self$post_PeacoQC[[nom_echantillon]]
+      } else if (!is.null(self$post_flowAI) && length(self$post_flowAI) > 0) {
+        self$post_flowAI[[nom_echantillon]]
+      } else {
+        self$echantillons_traites[[nom_echantillon]]
+      }
       
-      gate_polygone    <- self$gate_debris[[nom_echantillon]] # Extrait l'objet formel polygonGate appliqué à cet échantillon au cours de la filtration
-      coordonnees_gate <- as.data.frame(gate_polygone@boundaries) # Extrait sous forme de tableau bidimensionnel les sommets géométriques (X, Y) du polygone de tri
-      colnames(coordonnees_gate) <- c("x", "y") # Renomme explicitement les colonnes du tableau pour simplifier l'intégration dans la couche ggplot2
-      params <- flowCore::parameters(gate_polygone)
-      canal_x <- params[1]
-      canal_y <- params[2] # Identifie l'identifiant technique du canal affecté à l'axe des ordonnées (ex: SSC-A)
-      total_evenements_apres   <- nrow(flowCore::exprs(flowframe_apres)) # Dénombre précisément la population de cellules intactes conservée après le détourage
-      pourcentage_conservation <- if (total_evenements_avant > 0) round((total_evenements_apres / total_evenements_avant) * 100, 1) else 0 # Déduit le rendement de la filtration en pourcentage, arrondi au dixième
-      lbl_x <- if (!is.null(self$get_label)) self$get_label(flowframe_avant, canal_x) else canal_x # Extrait le libellé biologique ou l'étiquette de l'axe X via get_label, ou garde le nom brut
-      lbl_y <- if (!is.null(self$get_label)) self$get_label(flowframe_avant, canal_y) else canal_y # Extrait le libellé biologique ou l'étiquette de l'axe Y via get_label, ou garde le nom brut
+      if (is.null(flowframe_avant)) return(NULL)
       
-      graphique_debris <- ggplot2::ggplot(donnees_visu, ggplot2::aes(x = .data[[canal_x]], y = .data[[canal_y]])) + # Initialise le biplot morphologique avec les expressions de l'échantillon sous-échantillonné
-        ggpointdensity::geom_pointdensity(size = 0.1, alpha = 0.4) + # Dessine un nuage de points dont la couleur dépend localement du nombre de voisins (estimation locale de la densité)
-        ggplot2::scale_color_gradientn(colours = c("darkblue", "blue", "cyan", "greenyellow", "yellow", "darkorange", "red")) + # Applique une échelle pseudo-spectrale (Jet) standardisée pour cartographier les gradients de population
-        ggplot2::geom_polygon(data = coordonnees_gate, ggplot2::aes(x = x, y = y), fill = NA, color = "black", linewidth = 0.6) + # Dessine les contours du polygone de gating utilisateur sous forme de ligne noire continue
-        ggplot2::coord_cartesian(xlim = c(0, max(donnees_globales[[canal_x]], na.rm = TRUE)), ylim = c(0, max(donnees_globales[[canal_y]], na.rm = TRUE))) + # Cadrage cartésien s'alignant sur le maximum de la matrice globale pour éviter d'amputer visuellement les débris hors-champ
-        ggplot2::theme_bw() + # Applique un habillage blanc structuré et épuré optimisant l'évaluation des contrastes thermiques de densité
-        ggplot2::labs( # Configure l'ensemble des métadonnées, titres et labels scientifiques entourant la figure
-          title = paste("Nettoyage des débris :", nom_echantillon), # Affiche dynamiquement le titre de la manipulation associé au code barres ou nom du tube FCS
-          subtitle = paste0("Événements conservés : ", format(total_evenements_apres, big.mark=" "), " | ", pourcentage_conservation, "%"), # Resitue les métriques d'efficacité du tri (nombre d'événements et rendement)
-          x = lbl_x, y = lbl_y # Injecte les libellés biologiques nettoyés aux axes correspondants
-        ) + 
-        ggplot2::theme(legend.position = "none", plot.title = element_text(face = "bold"), plot.subtitle = element_text(color = "darkblue", size = 11)) # Masque la barre d'échelle des densités devenue redondante et stylise le titre
+      flowframe_apres <- self$post_debris[[nom_echantillon]]
+      donnees_globales <- as.data.frame(flowCore::exprs(flowframe_avant))
       
-      if (is.null(self$plots_debris)) self$plots_debris <- list() # Initialise la structure de liste dédiée au stockage des graphiques Débris si absente en mémoire de l'objet R6
-      self$plots_debris[[nom_echantillon]] <- graphique_debris # Archive l'objet visuel au sein du registre d'environnement de la classe R6
-      return(graphique_debris) # Renvoie l'objet graphique ggplot2 complet, prêt pour affichage immédiat ou intégration dans une interface UI Shiny
+      # ───────────────────────────────────────────────
+      # 2. Extraction du polygone de gating
+      # ───────────────────────────────────────────────
+      gate_polygone    <- self$gate_debris[[nom_echantillon]]
+      coordonnees_gate <- as.data.frame(gate_polygone@boundaries)
+      colnames(coordonnees_gate) <- c("x", "y")
+      
+      params   <- flowCore::parameters(gate_polygone)
+      canal_x  <- params[1]
+      canal_y  <- params[2]
+      
+      total_evenements_avant <- nrow(donnees_globales)
+      total_evenements_apres <- nrow(flowCore::exprs(flowframe_apres))
+      pourcentage_conservation <- if (total_evenements_avant > 0)
+        round((total_evenements_apres / total_evenements_avant) * 100, 1) else 0
+      
+      lbl_x <- self$get_label(flowframe_avant, canal_x)
+      lbl_y <- self$get_label(flowframe_avant, canal_y)
+      
+      lim_x_globale <- c(0, max(donnees_globales[[canal_x]], na.rm = TRUE))
+      lim_y_globale <- c(0, max(donnees_globales[[canal_y]], na.rm = TRUE))
+      
+      # ───────────────────────────────────────────────
+      # 3. Densité haute résolution (pixels plus petits)
+      # ───────────────────────────────────────────────
+      resolution <- 800   # 400 = standard, 800 = fin, 1200 = ultra-fin
+      
+      x_breaks <- seq(lim_x_globale[1], lim_x_globale[2], length.out = resolution + 1)
+      y_breaks <- seq(lim_y_globale[1], lim_y_globale[2], length.out = resolution + 1)
+      
+      df_binned <- donnees_globales |>
+        dplyr::mutate(
+          x_bin = cut(.data[[canal_x]], breaks = x_breaks, include.lowest = TRUE),
+          y_bin = cut(.data[[canal_y]], breaks = y_breaks, include.lowest = TRUE)
+        ) |>
+        dplyr::count(x_bin, y_bin, name = "densite") |>
+        tidyr::drop_na()
+      
+      # centres des bins
+      x_centers <- (head(x_breaks, -1) + tail(x_breaks, -1)) / 2
+      y_centers <- (head(y_breaks, -1) + tail(y_breaks, -1)) / 2
+      
+      df_binned <- df_binned |>
+        dplyr::mutate(
+          X = x_centers[as.integer(x_bin)],
+          Y = y_centers[as.integer(y_bin)]
+        )
+      
+      # ───────────────────────────────────────────────
+      # 4. Construction du graphique (geom_tile)
+      # ───────────────────────────────────────────────
+      graphique_debris <- ggplot2::ggplot(df_binned, ggplot2::aes(x = X, y = Y, fill = densite)) +
+        ggplot2::geom_tile() +   # ← pixels réguliers, plus fins
+        ggplot2::scale_fill_gradientn(colours = PALETTE_DENSITE) +
+        ggplot2::geom_polygon(
+          data = coordonnees_gate,
+          ggplot2::aes(x = x, y = y),
+          fill = NA, color = "black", linewidth = 0.6,
+          inherit.aes = FALSE
+        ) +
+        ggplot2::coord_cartesian(xlim = lim_x_globale, ylim = lim_y_globale) +
+        ggplot2::theme_bw() +
+        ggplot2::theme(
+          legend.position = "none",
+          plot.title = element_text(face = "bold"),
+          plot.subtitle = element_text(color = "darkblue", size = 11)
+        ) +
+        ggplot2::labs(
+          title = paste("Nettoyage des débris :", nom_echantillon),
+          subtitle = paste0(
+            "Événements conservés : ",
+            format(total_evenements_apres, big.mark = " "),
+            " | ", pourcentage_conservation, "%"
+          ),
+          x = lbl_x, y = lbl_y
+        )
+      
+      # ───────────────────────────────────────────────
+      # 5. Stockage dans l'objet CARROT
+      # ───────────────────────────────────────────────
+      if (is.null(self$plots_debris)) self$plots_debris <- list()
+      self$plots_debris[[nom_echantillon]] <- graphique_debris
+      
+      return(graphique_debris)
     },
     
-    visualiser_doublets = function(nom_echantillon, type_analyse = "FSC", max_points = 10000) { # Méthode générant un graphique bidimensionnel de densité (biplot) pour cartographier et valider l'exclusion des agrégats cellulaires (doublets) selon l'axe choisi (FSC ou SSC)
+    visualiser_doublets = function(nom_echantillon, type_analyse = "FSC", max_points = 200000) { # Méthode générant un graphique bidimensionnel de densité (biplot) pour cartographier et valider l'exclusion des agrégats cellulaires (doublets) selon l'axe choisi (FSC ou SSC)
       infos_gate <- if (type_analyse == "FSC") self$gate_doublets_FSC[[nom_echantillon]] else self$gate_doublets_SSC[[nom_echantillon]] # Extrait les paramètres et métadonnées de la barrière de tri (statistique ou polygonale) correspondant au paramètre spécifié
       if (is.null(infos_gate)) return(NULL) # interrompt proprement la fonction si aucune information de gating n'est localisée pour cet échantillon
       
@@ -1911,12 +2237,21 @@ CARROT <- R6Class(
       couleur_retire <- "darkred" # Teinte neutre et volontairement éloignée de la palette spectrale, pour signaler sans ambiguïté les évènements exclus
       couleur_legende_conserve <- "#2C7FB8" # Nuance bleutée représentative du dégradé de densité, utilisée uniquement comme pastille de légende (n'affecte pas la coloration réelle des points)
       
-      graphique <- ggplot2::ggplot() + # Initialise le biplot morphologique de linéarité en couches séparées afin de distinguer visuellement les évènements retirés des évènements conservés
-        { if (nrow(donnees_retirees) > 0) # N'ajoute la couche grise que si des évènements retirés existent effectivement pour cet échantillon
-          ggplot2::geom_point(data = donnees_retirees, ggplot2::aes(x = .data[[canal_x]], y = .data[[canal_y]]), color = couleur_retire, size = 0.1, alpha = 0.5) # Superpose en gris neutre les évènements exclus, sans encodage de densité, pour matérialiser leur rejet
-        } +
-        ggpointdensity::geom_pointdensity(data = donnees_conservees, ggplot2::aes(x = .data[[canal_x]], y = .data[[canal_y]]), size = 0.1, alpha = 0.4) + # Nuage de points des seuls évènements conservés, coloré localement selon la densité (estimation locale du nombre de voisins)
-        ggplot2::scale_color_gradientn(colours = c("darkblue", "blue", "cyan", "greenyellow", "yellow", "darkorange", "red")) + # Applique une échelle pseudo-spectrale standardisée pour cartographier les gradients de population conservée
+      # Densité (population conservée) calculée par binning raster (rapide, indépendant du
+      # nombre d'événements) plutôt que par ggpointdensity (densité par point, coûteuse).
+      df_densite_cons <- calculer_densite_raster(donnees_conservees[[canal_x]], donnees_conservees[[canal_y]], c(0, limite_max), c(0, limite_max))
+      
+      graphique <- ggplot2::ggplot() # Initialise le biplot morphologique de linéarité en couches séparées afin de distinguer visuellement les évènements retirés des évènements conservés
+      if (!is.null(df_densite_cons)) {
+        graphique <- graphique +
+          ggplot2::geom_raster(data = df_densite_cons, ggplot2::aes(x = X, y = Y, fill = densite), interpolate = TRUE) + # Affiche la densité des évènements conservés sous forme d'image raster (rapide, même avec beaucoup d'événements)
+          ggplot2::scale_fill_gradientn(colours = PALETTE_DENSITE) # Applique l'échelle pseudo-spectrale standardisée pour cartographier les gradients de population conservée
+      }
+      if (nrow(donnees_retirees) > 0) { # N'ajoute la couche des évènements retirés que si elle est non vide pour cet échantillon
+        graphique <- graphique +
+          ggplot2::geom_point(data = donnees_retirees, ggplot2::aes(x = .data[[canal_x]], y = .data[[canal_y]]), color = couleur_retire, size = 0.3, alpha = 0.6) # Superpose en rouge foncé les évènements exclus, par-dessus la densité (raster opaque), pour matérialiser leur rejet
+      }
+      graphique <- graphique +
         ggplot2::coord_cartesian(xlim = c(0, limite_max), ylim = c(0, limite_max)) + # Force un cadrage isométrique et strict de l'origine jusqu'au maximum pour préserver la diagonale théorique des singlets
         ggplot2::theme_bw() + # Applique un habillage blanc structuré et épuré optimisant l'évaluation des contrastes thermiques de densité
         ggplot2::labs( # Configure l'ensemble des métadonnées, titres et labels scientifiques entourant la figure
@@ -1994,7 +2329,7 @@ CARROT <- R6Class(
       self$update_pipeline("viabilite", nom_echantillon)
     },
     
-    visualiser_viabilite = function(nom_echantillon, max_points = 10000) {
+    visualiser_viabilite = function(nom_echantillon, max_points = 200000) {
       
       if (is.null(self$post_viabilite[[nom_echantillon]])) {
         message("Pas de données Viabilité pour ", nom_echantillon)
@@ -2090,37 +2425,49 @@ CARROT <- R6Class(
       lbl_x <- if (!is.null(self$get_label)) self$get_label(flowframe_avant, canal_x) else canal_x
       lbl_y <- if (!is.null(self$get_label)) self$get_label(flowframe_avant, canal_y) else canal_y
       
-      graphique_viabilite <- ggplot2::ggplot(
-        donnees_visu,
-        ggplot2::aes(x = .data[[canal_x]], y = .data[[canal_y]])
-      ) +
-        ggpointdensity::geom_pointdensity(size = 0.1, alpha = 0.4) +
-        ggplot2::scale_color_gradientn(
-          colours = c("darkblue", "blue", "cyan", "greenyellow", "yellow", "darkorange", "red")
+      lim_x_viab <- range(donnees_globales[[canal_x]], na.rm = TRUE)
+      lim_y_viab <- range(donnees_globales[[canal_y]], na.rm = TRUE)
+      
+      # Densité calculée par binning raster (rapide, indépendant du nombre d'événements)
+      # plutôt que par ggpointdensity (densité par point, coûteuse avec beaucoup d'événements).
+      df_densite_viab <- calculer_densite_raster(donnees_visu[[canal_x]], donnees_visu[[canal_y]], lim_x_viab, lim_y_viab)
+      
+      graphique_viabilite <- if (is.null(df_densite_viab)) {
+        ggplot2::ggplot() + ggplot2::theme_bw() +
+          ggplot2::labs(title = paste("Retrait des cellules mortes :", nom_echantillon), subtitle = "Pas assez d'événements pour tracer la densité", x = lbl_x, y = lbl_y)
+      } else {
+        ggplot2::ggplot(
+          df_densite_viab,
+          ggplot2::aes(x = X, y = Y, fill = densite)
         ) +
-        ggplot2::geom_polygon(
-          data = coordonnees_gate,
-          ggplot2::aes(x = x, y = y),
-          fill = NA, color = "grey20", linewidth = 0.6
-        ) +
-        ggplot2::coord_cartesian(
-          xlim = range(donnees_globales[[canal_x]], na.rm = TRUE),
-          ylim = range(donnees_globales[[canal_y]], na.rm = TRUE)
-        ) +
-        ggplot2::theme_bw() +
-        ggplot2::labs(
-          title = paste("Retrait des cellules mortes :", nom_echantillon),
-          subtitle = paste0(
-            "Cellules vivantes : ", format(total_evenements_apres, big.mark = " "),
-            " | ", pourcentage_conservation, "%"
-          ),
-          x = lbl_x, y = lbl_y
-        ) +
-        ggplot2::theme(
-          legend.position = "none",
-          plot.title = ggplot2::element_text(face = "bold"),
-          plot.subtitle = ggplot2::element_text(color = "darkblue", size = 11)
-        )
+          ggplot2::geom_raster(interpolate = TRUE) +
+          ggplot2::scale_fill_gradientn(
+            colours = PALETTE_DENSITE
+          ) +
+          ggplot2::geom_polygon(
+            data = coordonnees_gate,
+            ggplot2::aes(x = x, y = y),
+            fill = NA, color = "grey20", linewidth = 0.6, inherit.aes = FALSE
+          ) +
+          ggplot2::coord_cartesian(
+            xlim = lim_x_viab,
+            ylim = lim_y_viab
+          ) +
+          ggplot2::theme_bw() +
+          ggplot2::labs(
+            title = paste("Retrait des cellules mortes :", nom_echantillon),
+            subtitle = paste0(
+              "Cellules vivantes : ", format(total_evenements_apres, big.mark = " "),
+              " | ", pourcentage_conservation, "%"
+            ),
+            x = lbl_x, y = lbl_y
+          ) +
+          ggplot2::theme(
+            legend.position = "none",
+            plot.title = ggplot2::element_text(face = "bold"),
+            plot.subtitle = ggplot2::element_text(color = "darkblue", size = 11)
+          )
+      }
       
       if (is.null(self$plots_viabilite)) self$plots_viabilite <- list()
       self$plots_viabilite[[nom_echantillon]] <- graphique_viabilite

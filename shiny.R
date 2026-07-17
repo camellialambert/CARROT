@@ -80,6 +80,7 @@ server <- function(input, output, session) {
   pretraitement_server("mon_module_pretrait",
                        pipeline         = my_pipeline,
                        pipeline_version = my_pipeline_version)
+  
 }
 
 shinyApp(ui, server)

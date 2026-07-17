@@ -12,8 +12,12 @@ import_data_ui <- function(id) {
                       box(width = 12, status = "primary", solidHeader = TRUE,
                           title = "Console d'Importation",
                           h4("1. Chargement des fichiers"),
-                          fileInput(ns("files_controls"), "Tubes Monomarqués", multiple = TRUE, accept = ".fcs"),
+                          fileInput(ns("files_controls"), "Tubes Monomarqués / Unstained (optionnel)", multiple = TRUE, accept = ".fcs"),
                           fileInput(ns("files_samples"),  "Échantillons Biologiques", multiple = TRUE, accept = ".fcs"),
+                          div(style = "color:gray; font-size:12px; margin-top:-8px;",
+                              icon("info-circle"),
+                              " Si vos échantillons sont déjà compensés (conventionnel) ou déjà unmixés (spectral), ",
+                              "vous pouvez ne charger que les échantillons et passer directement aux étapes suivantes."),
                           hr(),
                           h4("2. Choix du Cytomètre"),
                           selectInput(ns("cyto_type"), "Technologie :", choices = c("Conventionnel", "Spectral")),
@@ -145,19 +149,34 @@ import_data_server <- function(id, pipeline, pipeline_version,canaux) {
     })
     
     observeEvent(input$init_r6, {
-      req(rv$r_df_mono, rv$r_df_ech)
+      # Seuls les échantillons biologiques sont obligatoires : les tubes contrôles
+      # (monomarqués / unstained) sont optionnels, notamment quand les échantillons
+      # sont déjà compensés (conventionnel) ou déjà unmixés (spectral).
+      req(rv$r_df_ech)
       
       p <- pipeline()
-      p$mode <- input$cyto_type
-      p$chemins_monomarques  <- rv$r_df_mono
-      p$chemins_echantillons <- rv$r_df_ech
+      p$initialize(
+        df_monomarques  = rv$r_df_mono,       # NULL si aucun tube contrôle n'a été chargé
+        df_echantillons = rv$r_df_ech,
+        mode            = input$cyto_type,
+        deja_traite     = identical(input$deja_compense, "oui")
+      )
       
       withProgress(message = "Chargement...", value = 0.2, {
         tryCatch({
           p$charger_fcs()
           pipeline(p)
           pipeline_version(pipeline_version() + 1L)
-          showNotification("Initialisation effectuée.", type = "message")
+          
+          if (is.null(rv$r_df_mono) && isTRUE(p$deja_traite) && p$mode == "Conventionnel") {
+            if (!is.null(p$S_matrix)) {
+              showNotification("Initialisation effectuée : matrice de compensation détectée dans les métadonnées FCS (onglet Compensation).", type = "message", duration = 8)
+            } else {
+              showNotification("Initialisation effectuée. Aucune matrice de compensation n'a été trouvée dans les métadonnées FCS : vous pourrez la définir manuellement dans l'onglet Compensation.", type = "warning", duration = 8)
+            }
+          } else {
+            showNotification("Initialisation effectuée.", type = "message")
+          }
         }, error = function(e) {
           showNotification(paste("Erreur :", conditionMessage(e)), type = "error")
         })
@@ -222,7 +241,11 @@ import_data_server <- function(id, pipeline, pipeline_version,canaux) {
     })
     
     # ── Matrice marqueurs ──────────────────────────────────────────────────
-    matrice_marqueurs_rv <- reactiveVal(NULL)
+    # IMPORTANT : les colonnes de matrice_marqueurs_rv restent indexées par le nom de
+    # CANAL brut (ex: "PE-A"), pas par le libellé affiché, afin de pouvoir reconstruire
+    # un dictionnaire canal -> marqueur exploitable par get_label() une fois enregistré.
+    matrice_marqueurs_rv     <- reactiveVal(NULL)
+    canal_labels_affiches_rv <- reactiveVal(NULL) # libellés "jolis" (ex: "PE-A | CD4") utilisés uniquement pour l'affichage DT
     
     observeEvent(rv$r_df_ech, {
       req(rv$r_df_ech)
@@ -245,16 +268,28 @@ import_data_server <- function(id, pipeline, pipeline_version,canaux) {
             mat[i, cx] <- if (nchar(trimws(marqueur_extrait)) > 0) marqueur_extrait else cx
           }
         }
-        lbs_ref       <- get_labels_from_fcs(fcs_ref)
-        colnames(mat) <- sapply(cx_fluo, function(cx) { l <- lbs_ref[[cx]]; if (!is.null(l)) l else cx })
-        matrice_marqueurs_rv(as.data.frame(mat, stringsAsFactors = FALSE))
+        lbs_ref <- get_labels_from_fcs(fcs_ref)
+        # Les colonnes de la matrice restent les canaux bruts (cx_fluo) ; on ne conserve
+        # les libellés "jolis" que pour l'affichage (colnames = ... dans renderDT).
+        canal_labels_affiches_rv(sapply(cx_fluo, function(cx) { l <- lbs_ref[[cx]]; if (!is.null(l)) l else cx }))
+        matrice_marqueurs_rv(as.data.frame(mat, stringsAsFactors = FALSE, check.names = FALSE))
       }, error = function(e) NULL)
     })
     
     output$table_matrice_marqueurs <- renderDT({
-      req(matrice_marqueurs_rv())
-      datatable(matrice_marqueurs_rv(), editable = list(target = "cell"),
+      df <- matrice_marqueurs_rv()
+      req(df)
+      labels_affiches <- canal_labels_affiches_rv()
+      # IMPORTANT : DT interprète un vecteur de colnames NOMMÉ comme un mapping
+      # "Nouveau nom" = "Nom existant dans les données" (voir doc DT::datatable).
+      # Comme labels_affiches est un vecteur nommé (noms = canaux), il faut le
+      # "dénommer" (unname) avant de le passer, sinon DT tente de faire correspondre
+      # ces noms aux colonnes réelles du data.frame et échoue avec l'erreur
+      # "Some column names in the 'escape' argument not found in data".
+      entetes <- if (!is.null(labels_affiches)) unname(c("Tube", labels_affiches)) else colnames(df)
+      datatable(df, editable = list(target = "cell"),
                 rownames = TRUE, selection = "none",
+                colnames = entetes,
                 options  = list(scrollX = TRUE, pageLength = 20, dom = "ft"))
     })
     
@@ -270,9 +305,13 @@ import_data_server <- function(id, pipeline, pipeline_version,canaux) {
       req(data_to_save)
       p <- pipeline()
       if (inherits(p, "R6")) {
-        p$config_marqueurs <- data_to_save
+        # p$definir_config_marqueurs() enregistre la table ET reconstruit le dictionnaire
+        # canal -> marqueur utilisé ensuite par get_label() pour tous les libellés d'axes
+        # (biplots de compensation, gates, QC, prétraitement...).
+        p$definir_config_marqueurs(data_to_save)
         pipeline(p)
-        showNotification("Configuration enregistrée.", type = "message")
+        pipeline_version(pipeline_version() + 1L)
+        showNotification("Configuration enregistrée : les libellés des graphiques utiliseront désormais ces annotations.", type = "message")
       } else {
         showNotification("Erreur : Pipeline non valide.", type = "error")
       }
