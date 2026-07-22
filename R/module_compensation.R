@@ -30,6 +30,11 @@ compensation_ui <- function(id) {
       .gate-instructions b { color:#0077b6; }
     ")),
     
+    # Bannière informative si les échantillons ont été importés comme déjà
+    # compensés : cette étape devient optionnelle car echantillons_traites
+    # est déjà alimenté par le pipeline (cf. pipeline_cytometrie.R::charger_fcs()).
+    uiOutput(ns("banniere_deja_traite")),
+    
     tabBox(
       title = tagList(icon("sliders-h"), "Outils de Compensation"),
       id = ns("comp_steps"), width = 12,
@@ -405,6 +410,18 @@ compensation_server <- function(id, pipeline, pipeline_version) {
     
     # ── Signaux locaux ────────────────────────────────────────────────────────
     trans_done <- reactiveVal(0L)   # incrémenté après transformer_fcs()
+    
+    # ── Bannière : échantillons déjà compensés à l'import ──────────────────────
+    output$banniere_deja_traite <- renderUI({
+      p <- carrot_obj()
+      req(p)
+      if (isTRUE(p$deja_traite) && length(p$echantillons_traites) > 0) {
+        div(class = "alert alert-info", style = "margin-bottom:10px;",
+            icon("info-circle"),
+            " Vos échantillons ont été importés comme déjà compensés : cette étape de compensation est optionnelle. ",
+            "Vous pouvez passer directement aux onglets QC et Prétraitement.")
+      }
+    })
     
     # ════════════════════════════════════════════════════════════════════════
     # SECTION 1 — TRANSFORMATION

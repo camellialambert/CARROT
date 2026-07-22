@@ -223,6 +223,21 @@ CARROT <- R6Class(
         invisible(tryCatch(self$transformer_fcs(cofacteur = self$cofacteur_defaut),
                            error = function(e) NULL))
       }
+      
+      # ── Transition directe vers echantillons_traites ────────────────────────
+      # Si l'utilisateur a répondu "Oui" à "Données déjà compensées/démixées ?",
+      # les fichiers importés sont, par définition, déjà dans leur état final
+      # (compensation conventionnelle ou unmixing spectral déjà appliqués en
+      # amont, hors de l'application). On ne doit donc PAS repasser par
+      # self$compenser() (qui réappliquerait une matrice de compensation sur des
+      # données déjà compensées) ni par le pipeline AutoSpectral : on copie
+      # simplement self$echantillons tel quel dans self$echantillons_traites,
+      # qu'il y ait ou non des tubes contrôles associés. C'est ce champ que lisent
+      # ensuite les modules QC et Prétraitement, quel que soit le type de
+      # cytomètre (Conventionnel ou Spectral).
+      if (isTRUE(self$deja_traite)) {
+        self$echantillons_traites <- self$echantillons
+      }
     },
     
     importer_spillover_fcs = function(nom_echantillon = NULL) {

@@ -15,6 +15,11 @@ demixage_ui <- function(id) {
   tagList(
     useShinyjs(),
     
+    # Bannière informative si les échantillons ont été importés comme déjà
+    # démixés : cette étape devient optionnelle car echantillons_traites
+    # est déjà alimenté par le pipeline (cf. pipeline_cytometrie.R::charger_fcs()).
+    uiOutput(ns("banniere_deja_traite")),
+    
     tabBox(
       title = tagList(icon("dna"), " AutoSpectral - Démixage Spectral"),
       id = ns("tabs_demix"), width = 12,
@@ -372,6 +377,18 @@ demixage_server <- function(id, pipeline, pipeline_version) {
     shinyFiles::shinyDirChoose(input, "dir_root", roots = volumes, session = session)
     shinyFiles::shinyDirChoose(input, "dir_monomarques", roots = volumes, session = session)
     shinyFiles::shinyDirChoose(input, "dir_echantillons", roots = volumes, session = session)
+    
+    # ── Bannière : échantillons déjà démixés à l'import ────────────────────────
+    output$banniere_deja_traite <- renderUI({
+      p <- pipeline()
+      req(p)
+      if (isTRUE(p$deja_traite) && length(p$echantillons_traites) > 0) {
+        div(class = "alert alert-info", style = "margin-bottom:10px;",
+            icon("info-circle"),
+            " Vos échantillons ont été importés comme déjà démixés : cette étape de démixage est optionnelle. ",
+            "Vous pouvez passer directement aux onglets QC et Prétraitement.")
+      }
+    })
     
     # Chemin du dossier des échantillons (nécessaire pour unmix_folder / unmix_fcs)
     dossier_echantillons_path <- reactiveVal(NULL)
