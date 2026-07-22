@@ -35,9 +35,8 @@ compensation_ui <- function(id) {
     # est déjà alimenté par le pipeline (cf. pipeline_cytometrie.R::charger_fcs()).
     uiOutput(ns("banniere_deja_traite")),
     
-    tabBox(
-      title = tagList(icon("sliders-h"), "Outils de Compensation"),
-      id = ns("comp_steps"), width = 12,
+    tabsetPanel(
+      id = ns("comp_steps"),
       
       # ══════════════════════════════════════════════════════════════════════
       # ONGLET 1 — TRANSFORMATION (en premier)
@@ -389,7 +388,7 @@ compensation_ui <- function(id) {
         )
       )
       
-    ) # /tabBox
+    ) # /tabsetPanel
   )
 }
 

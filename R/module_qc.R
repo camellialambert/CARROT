@@ -21,9 +21,8 @@ qc_ui <- function(id) {
       .qc-instructions b { color:#0077b6; }
     ")),
     
-    tabBox(
-      title = tagList(icon("broom"), "Contrôle Qualité"),
-      id = ns("qc_steps"), width = 12,
+    tabsetPanel(
+      id = ns("qc_steps"),
       
       # ══════════════════════════════════════════════════════════════════════
       # ONGLET 1 — PeacoQC
@@ -239,7 +238,7 @@ qc_ui <- function(id) {
         )
       )
       
-    ) # /tabBox
+    ) # /tabsetPanel
   )
 }
 

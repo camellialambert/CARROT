@@ -19,10 +19,8 @@ demixage_ui <- function(id) {
     # démixés : cette étape devient optionnelle car echantillons_traites
     # est déjà alimenté par le pipeline (cf. pipeline_cytometrie.R::charger_fcs()).
     uiOutput(ns("banniere_deja_traite")),
-    
-    tabBox(
-      title = tagList(icon("dna"), " AutoSpectral - Démixage Spectral"),
-      id = ns("tabs_demix"), width = 12,
+    tabsetPanel(
+      id = ns("tabs_demix"),
       
       # ───────────────────────────────────────────────────────────────
       # ONGLET 1 — PARAMÈTRES
@@ -359,7 +357,7 @@ demixage_ui <- function(id) {
           )
         )
       )
-    )
+    ) # /tabsetPanel
   )
 }
 

@@ -47,9 +47,8 @@ pretraitement_ui <- function(id) {
       }
     ")),
     
-    tabBox(
-      title = tagList(icon("filter"), "Prétraitement"),
-      id = ns("pretrait_steps"), width = 12,
+    tabsetPanel(
+      id = ns("pretrait_steps"),
       
       # ══════════════════════════════════════════════════════════════════════
       # ONGLET — RETRAIT DES DÉBRIS
@@ -370,7 +369,7 @@ pretraitement_ui <- function(id) {
         )
       )
       
-    ) # /tabBox
+    ) # /tabsetPanel
   )
 }
 
