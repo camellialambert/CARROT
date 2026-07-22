@@ -3,6 +3,9 @@ library(shinydashboard)
 library(shinyjs)
 library(plotly)
 
+RES_PIXELS_GATING    <- 80
+TAILLE_PIXEL_GATING  <- 5
+
 # ══════════════════════════════════════════════════════════════════════════════
 # UI
 # ══════════════════════════════════════════════════════════════════════════════
@@ -212,8 +215,6 @@ pretraitement_ui <- function(id) {
                    # ── Méthode par gating manuel ────────────────────────────
                    conditionalPanel(
                      condition = paste0("input['", ns("methode_doublet"), "'] == 'gate'"),
-                     numericInput(ns("doublet_max_points"), "Points affichés :",
-                                  value = 10000, min = 1000, step = 1000),
                      div(class = "pretrait-instr",
                          icon("hand-pointer"),
                          " Cliquez sur le graphique pour ajouter des sommets. ",
@@ -315,8 +316,6 @@ pretraitement_ui <- function(id) {
                      hr(),
                      h4("2. Gating des cellules vivantes"),
                      uiOutput(ns("ui_select_echantillon_viabilite")),
-                     numericInput(ns("viabilite_max_points"), "Points affichés :",
-                                  value = 10000, min = 1000, step = 1000),
                      div(class = "pretrait-instr",
                          icon("hand-pointer"),
                          " Cliquez sur le graphique pour ajouter des sommets autour des cellules ",
@@ -570,18 +569,22 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
       lbl_x <- p_obj$get_label(fcs, input$canal_x_debris)
       lbl_y <- p_obj$get_label(fcs, input$canal_y_debris)
       
-      # Densité par binning raster (rapide, indépendant du nombre d'événements affichés),
-      # rendue en heatmap plotly avec la même palette pseudo-spectrale que le reste de l'app,
-      # plutôt qu'un nuage de points uni (plus lourd à afficher/interagir avec beaucoup d'événements).
+      # Densité par binning raster (rapide, indépendant du nombre d'événements affichés).
+      # Rendue en petits ronds colorés par densité (mode "scatter" classique, même famille
+      # que le tracé du gate, pour éviter tout ralentissement dû au mélange SVG/WebGL) plutôt
+      # qu'en heatmap plotly : on évite ainsi tout lissage/interpolation qui brouillerait les
+      # frontières entre zones.
       lim_x <- range(df$X, na.rm = TRUE)
       lim_y <- range(df$Y, na.rm = TRUE)
-      dens  <- calculer_densite_matrice_plotly(df$X, df$Y, lim_x, lim_y)
+      dens  <- calculer_densite_raster(df$X, df$Y, lim_x, lim_y, res = RES_PIXELS_GATING, lissage = FALSE)
       
       plt <- plot_ly(source = ns("plot_gate_dessin"))
       if (!is.null(dens)) {
         plt <- plt %>%
-          add_trace(x = dens$x, y = dens$y, z = dens$z, type = "heatmap",
-                    colorscale = COLORSCALE_DENSITE_PLOTLY, showscale = FALSE,
+          add_trace(data = dens, x = ~X, y = ~Y, type = "scatter", mode = "markers",
+                    marker = list(symbol = "circle", size = TAILLE_PIXEL_GATING,
+                                  color = ~densite, colorscale = COLORSCALE_DENSITE_PLOTLY,
+                                  line = list(width = 0)),
                     hoverinfo = "none")
       } else {
         plt <- plt %>%
@@ -931,11 +934,9 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
       canaux <- resoudre_canaux_doublet(flowCore::colnames(fcs), etape, axe)
       req(!is.na(canaux["x"]), !is.na(canaux["y"]))
       mat <- flowCore::exprs(fcs)[, c(canaux["x"], canaux["y"]), drop = FALSE]
-      n    <- nrow(mat)
-      nmax <- input$doublet_max_points %||% 10000
-      if (!is.null(p$seed)) set.seed(p$seed)
-      idx <- if (n > nmax) sample(seq_len(n), nmax) else seq_len(n)
-      df  <- as.data.frame(mat[idx, , drop = FALSE])
+      # Pas de sous-échantillonnage : la densité par binning raster reste rapide
+      # indépendamment du nombre d'événements.
+      df  <- as.data.frame(mat)
       colnames(df) <- c("X", "Y")
       attr(df, "canal_x") <- unname(canaux["x"])
       attr(df, "canal_y") <- unname(canaux["y"])
@@ -999,17 +1000,22 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
       lbl_x <- p_obj$get_label(fcs, attr(df, "canal_x"))
       lbl_y <- p_obj$get_label(fcs, attr(df, "canal_y"))
       
-      # Densité par binning raster, rendue en heatmap plotly (même palette que le reste
-      # de l'app), plutôt qu'un nuage de points uni.
+      # Densité par binning raster (rapide, indépendant du nombre d'événements affichés).
+      # Rendue en petits ronds colorés par densité (mode "scatter" classique, même famille
+      # que le tracé du gate, pour éviter tout ralentissement dû au mélange SVG/WebGL) plutôt
+      # qu'en heatmap plotly : on évite ainsi tout lissage/interpolation qui brouillerait les
+      # frontières entre zones.
       lim_x <- range(df$X, na.rm = TRUE)
       lim_y <- range(df$Y, na.rm = TRUE)
-      dens  <- calculer_densite_matrice_plotly(df$X, df$Y, lim_x, lim_y)
+      dens  <- calculer_densite_raster(df$X, df$Y, lim_x, lim_y, res = RES_PIXELS_GATING, lissage = FALSE)
       
       plt <- plot_ly(source = ns("plot_gate_doublet_dessin"))
       if (!is.null(dens)) {
         plt <- plt %>%
-          add_trace(x = dens$x, y = dens$y, z = dens$z, type = "heatmap",
-                    colorscale = COLORSCALE_DENSITE_PLOTLY, showscale = FALSE,
+          add_trace(data = dens, x = ~X, y = ~Y, type = "scatter", mode = "markers",
+                    marker = list(symbol = "circle", size = TAILLE_PIXEL_GATING,
+                                  color = ~densite, colorscale = COLORSCALE_DENSITE_PLOTLY,
+                                  line = list(width = 0)),
                     hoverinfo = "none")
       } else {
         plt <- plt %>%
@@ -1177,8 +1183,7 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
       
       res <- tryCatch(
         p$visualiser_doublets(nom_echantillon = input$sel_ech_doublet,
-                              type_analyse     = etape,
-                              max_points       = input$doublet_max_points %||% 10000),
+                              type_analyse     = etape),
         error = function(e) { showNotification(conditionMessage(e), type = "error"); NULL }
       )
       
@@ -1332,11 +1337,9 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
       cx   <- resoudre_canal_fsc_viabilite(cols)
       req(!is.na(cx), canal %in% cols)
       mat <- flowCore::exprs(fcs)[, c(cx, canal), drop = FALSE]
-      n    <- nrow(mat)
-      nmax <- input$viabilite_max_points %||% 10000
-      if (!is.null(p$seed)) set.seed(p$seed)
-      idx <- if (n > nmax) sample(seq_len(n), nmax) else seq_len(n)
-      df  <- as.data.frame(mat[idx, , drop = FALSE])
+      # Pas de sous-échantillonnage : la densité par binning raster reste rapide
+      # indépendamment du nombre d'événements.
+      df  <- as.data.frame(mat)
       colnames(df) <- c("X", "Y")
       attr(df, "canal_x") <- cx
       attr(df, "canal_y") <- canal
@@ -1393,17 +1396,22 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
       lbl_x <- p_obj$get_label(fcs, attr(df, "canal_x"))
       lbl_y <- p_obj$get_label(fcs, attr(df, "canal_y"))
       
-      # Densité par binning raster, rendue en heatmap plotly (même palette que le reste
-      # de l'app), plutôt qu'un nuage de points uni.
+      # Densité par binning raster (rapide, indépendant du nombre d'événements affichés).
+      # Rendue en petits ronds colorés par densité (mode "scatter" classique, même famille
+      # que le tracé du gate, pour éviter tout ralentissement dû au mélange SVG/WebGL) plutôt
+      # qu'en heatmap plotly : on évite ainsi tout lissage/interpolation qui brouillerait les
+      # frontières entre zones.
       lim_x <- range(df$X, na.rm = TRUE)
       lim_y <- range(df$Y, na.rm = TRUE)
-      dens  <- calculer_densite_matrice_plotly(df$X, df$Y, lim_x, lim_y)
+      dens  <- calculer_densite_raster(df$X, df$Y, lim_x, lim_y, res = RES_PIXELS_GATING, lissage = FALSE)
       
       plt <- plot_ly(source = ns("plot_gate_viabilite_dessin"))
       if (!is.null(dens)) {
         plt <- plt %>%
-          add_trace(x = dens$x, y = dens$y, z = dens$z, type = "heatmap",
-                    colorscale = COLORSCALE_DENSITE_PLOTLY, showscale = FALSE,
+          add_trace(data = dens, x = ~X, y = ~Y, type = "scatter", mode = "markers",
+                    marker = list(symbol = "circle", size = TAILLE_PIXEL_GATING,
+                                  color = ~densite, colorscale = COLORSCALE_DENSITE_PLOTLY,
+                                  line = list(width = 0)),
                     hoverinfo = "none")
       } else {
         plt <- plt %>%
@@ -1542,8 +1550,7 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
       req(input$sel_ech_viabilite)
       
       res <- tryCatch(
-        p$visualiser_viabilite(nom_echantillon = input$sel_ech_viabilite,
-                               max_points       = input$viabilite_max_points %||% 10000),
+        p$visualiser_viabilite(nom_echantillon = input$sel_ech_viabilite),
         error = function(e) { showNotification(conditionMessage(e), type = "error"); NULL }
       )
       

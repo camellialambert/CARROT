@@ -1,20 +1,3 @@
-library(shiny)
-library(shinydashboard)
-library(shinyjs)
-library(DT)
-library(plotly)
-
-options(shiny.maxRequestSize = 1000 * 1024^2) # 100 MB
-
-source("~/Desktop/Institut_Cochin/Code/CARROT/pipeline_cytometrie.R")
-source("~/Desktop/Institut_Cochin/Code/CARROT/R/module_import.R.R")
-source("~/Desktop/Institut_Cochin/Code/CARROT/R/utils.R")
-source("~/Desktop/Institut_Cochin/Code/CARROT/R/module_compensation.R")
-source("~/Desktop/Institut_Cochin/Code/CARROT/R/module_demixage.R")
-source("~/Desktop/Institut_Cochin/Code/CARROT/R/module_qc.R")
-source("~/Desktop/Institut_Cochin/Code/CARROT/R/module_pretraitement.R")
-
-
 CANAUX_CONNUS <- c(
   "", 
   "7-AAD", 
@@ -52,16 +35,16 @@ CANAUX_CONNUS <- c(
   "BUV661-A",
   "BUV737-A",
   "BUV805-A",
-  "BV 421-A",
-  "BV 480-A",
-  "BV 510-A",
-  "BV 570-A",
-  "BV 605-A",
-  "BV 650-A",
-  "BV 711-A",
-  "BV 750-A",
-  "BV 786-A",
-  "BV 805-A",
+  "BV421-A",
+  "BV480-A",
+  "BV510-A",
+  "BV570-A",
+  "BV605-A",
+  "BV650-A",
+  "BV711-A",
+  "BV750-A",
+  "BV786-A",
+  "BV805-A",
   "DyLight 680-A",
   "DyLight 800-A",
   "DAPI-A",
@@ -121,7 +104,7 @@ CANAUX_CONNUS <- c(
   "PE-Fire 744-A",
   "PE-Fire 810-A",
   "PerCP-A",
-  "PerCP-Cy5-5-A",
+  "PerCP-Cy5.5-A",
   "PerCP-eFluor 710-A",
   "PerCP-Fire 780-A",
   "PerCP-Fire 806-A",
@@ -369,71 +352,3 @@ CANAUX_CONNUS <- c(
   "Ghost Violet 510-A",
   "Ghost Violet 540-A"
 )
-
-
-ui <- dashboardPage(
-  skin = "purple",
-  dashboardHeader(title = "CARROT"),
-  dashboardSidebar(
-    sidebarMenu(
-      id = "tabs_sidebar",
-      menuItem("Importation",    tabName = "import_tab",       icon = icon("file-import")),
-      menuItem("Compensation",   tabName = "compensation_tab", icon = icon("calculator")),
-      menuItem("Unmixing",       tabName = "unmixing_tab",     icon = icon("bolt")),
-      menuItem("Quality Control",tabName = "nettoyage_tab",    icon = icon("broom")),
-      menuItem("Prétraitement",  tabName = "pretraitement_tab",icon = icon("filter")),
-      menuItem("Analyses",       tabName = "analyses_tab",     icon = icon("chart-pie"))
-    )
-  ),
-  dashboardBody(
-    useShinyjs(),
-    tags$head(tags$style(HTML("
-      .datatables, .dataTables_wrapper, table.dataTable tbody td { color: black !important; }
-      .disabled-tab  { pointer-events: none; opacity: 0.4; }
-      .btn-purple    { color: white; background-color: #605ca8; border-color: #555299; }
-    "))),
-    tabItems(
-      tabItem(tabName = "import_tab",
-              import_data_ui("mon_module_import")),
-      tabItem(tabName = "compensation_tab",
-              compensation_ui("mon_module_comp")),
-      tabItem(tabName = "nettoyage_tab",
-              qc_ui("mon_module_qc")),
-      tabItem(tabName = "pretraitement_tab",
-              pretraitement_ui("mon_module_pretrait")),
-      tabItem(tabName = "unmixing_tab",  
-              demixage_ui("mon_module_demixage")),
-      tabItem(tabName = "analyses_tab",  "Analyses statistiques en attente.")
-    )
-  )
-)
-
-server <- function(input, output, session) {
-  
-  # ── Deux reactiveVal partagés entre les modules ──
-  my_pipeline         <- reactiveVal(CARROT$new())
-  my_pipeline_version <- reactiveVal(0L)          # s'incrémente après charger_fcs()
-  
-  import_data_server("mon_module_import",
-                     pipeline  = my_pipeline,
-                     pipeline_version = my_pipeline_version,
-                     canaux = CANAUX_CONNUS)
-  
-  compensation_server("mon_module_comp",
-                      pipeline         = my_pipeline,
-                      pipeline_version = my_pipeline_version)
-  
-  demixage_server("mon_module_demixage",
-                  pipeline         = my_pipeline,
-                  pipeline_version = my_pipeline_version)
-  
-  qc_server("mon_module_qc",
-            pipeline         = my_pipeline,
-            pipeline_version = my_pipeline_version)
-  
-  pretraitement_server("mon_module_pretrait",
-                       pipeline         = my_pipeline,
-                       pipeline_version = my_pipeline_version)
-}
-
-shinyApp(ui, server)

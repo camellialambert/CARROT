@@ -3,32 +3,13 @@ library(ggplot2)
 library(ggpointdensity)
 library(raster)
 library(flowCore)
+library(base64enc)
 
-# ─────────────────────────────────────────────────────────────────────────
-# Calcule une densité 2D rapide par binning raster (remplace un calcul de
-# densité "par point" type ggpointdensity, coûteux avec beaucoup d'événements,
-# ou un simple comptage par bin non régularisé qui peut casser l'alignement
-# de la grille quand des cellules sont vides).
-#
-# Principe :
-#   1. On définit une grille RÉGULIÈRE et COMPLÈTE (res x res) sur (xlim, ylim)
-#      via raster::raster() — contrairement à raster::rasterFromXYZ(), qui
-#      déduit la grille des seules coordonnées présentes et peut se désaligner
-#      dès qu'il manque des cellules vides (densité = 0).
-#   2. On compte les événements par cellule avec raster::rasterize().
-#   3. On lisse légèrement (moyenne glissante) pour un rendu visuel continu,
-#      proche d'une estimation de densité classique (type kde2d), mais en
-#      coût O(N) + coût fixe sur la grille, au lieu de O(N log N) / O(N²).
-#
-# Retourne un data.frame (X, Y, densite) prêt pour ggplot2::geom_raster(),
-# ou NULL si pas assez de points exploitables.
-# ─────────────────────────────────────────────────────────────────────────
-calculer_densite_raster <- function(x, y, xlim, ylim, res = 200, lissage = TRUE) {
+calculer_densite_raster <- function(x, y, xlim, ylim, res = 800, lissage = FALSE) {
   ok <- is.finite(x) & is.finite(y)
   x <- x[ok]; y <- y[ok]
   if (length(x) < 2) return(NULL)
   
-  # Sécurise des bornes dégénérées (ex : xlim[1] == xlim[2])
   if (diff(xlim) == 0) xlim <- xlim + c(-0.5, 0.5)
   if (diff(ylim) == 0) ylim <- ylim + c(-0.5, 0.5)
   
@@ -38,7 +19,6 @@ calculer_densite_raster <- function(x, y, xlim, ylim, res = 200, lissage = TRUE)
   r_densite <- raster::rasterize(cbind(x, y), r_vide, fun = "count", background = 0)
   
   if (isTRUE(lissage)) {
-    # Moyenne glissante 3x3 : lisse la grille sans coût significatif (grille fixe, indépendante de N)
     r_densite <- raster::focal(r_densite, w = matrix(1, 3, 3), fun = mean, na.rm = TRUE, pad = TRUE)
   }
   
@@ -49,56 +29,33 @@ calculer_densite_raster <- function(x, y, xlim, ylim, res = 200, lissage = TRUE)
   df
 }
 
-# Palette pseudo-spectrale (type "Jet") utilisée pour TOUS les graphiques de densité
-# de l'application (compensation, prétraitement, gating interactif), afin de garder
-# un rendu visuel cohérent partout.
 PALETTE_DENSITE <- c("darkblue", "blue", "cyan", "greenyellow", "yellow", "darkorange", "red")
 
-# Équivalent de PALETTE_DENSITE au format attendu par plotly (liste de paires
-# [fraction, couleur] réparties uniformément de 0 à 1), pour les graphiques de
-# gating interactifs (heatmap plotly) du module de prétraitement.
 COLORSCALE_DENSITE_PLOTLY <- local({
   n <- length(PALETTE_DENSITE)
   lapply(seq_len(n), function(i) list((i - 1) / (n - 1), PALETTE_DENSITE[i]))
 })
 
-# ─────────────────────────────────────────────────────────────────────────
-# Variante de calculer_densite_raster() pour les graphiques plotly (heatmap) :
-# retourne la grille COMPLÈTE (x, y, z) plutôt qu'un data.frame filtré, car
-# plotly::add_trace(type = "heatmap") a besoin d'une matrice rectangulaire
-# complète (les cellules vides sont conservées à 0, affichées dans la couleur
-# la plus froide de la palette plutôt que d'être trouées).
-# Retourne list(x, y, z) ou NULL si pas assez de points exploitables.
-# ─────────────────────────────────────────────────────────────────────────
-calculer_densite_matrice_plotly <- function(x, y, xlim, ylim, res = 150, lissage = TRUE) {
-  ok <- is.finite(x) & is.finite(y)
-  x <- x[ok]; y <- y[ok]
-  if (length(x) < 2) return(NULL)
+
+generer_image_densite_base64 <- function(x, y, xlim, ylim, res = 800, largeur_px = 600, hauteur_px = 600) {
+  df <- calculer_densite_raster(x, y, xlim, ylim, res = res, lissage = FALSE)
+  if (is.null(df)) return(NULL)
   
-  if (diff(xlim) == 0) xlim <- xlim + c(-0.5, 0.5)
-  if (diff(ylim) == 0) ylim <- ylim + c(-0.5, 0.5)
+  g <- ggplot2::ggplot(df, ggplot2::aes(x = X, y = Y, fill = densite)) +
+    ggplot2::geom_raster() +
+    ggplot2::scale_fill_gradientn(colours = PALETTE_DENSITE) +
+    ggplot2::scale_x_continuous(limits = xlim, expand = c(0, 0)) +
+    ggplot2::scale_y_continuous(limits = ylim, expand = c(0, 0)) +
+    ggplot2::theme_void() +
+    ggplot2::theme(legend.position = "none",
+                   plot.margin = ggplot2::margin(0, 0, 0, 0))
   
-  r_vide    <- raster::raster(xmn = xlim[1], xmx = xlim[2],
-                              ymn = ylim[1], ymx = ylim[2],
-                              nrows = res, ncols = res)
-  r_densite <- raster::rasterize(cbind(x, y), r_vide, fun = "count", background = 0)
+  fichier_tmp <- tempfile(fileext = ".png")
+  on.exit(unlink(fichier_tmp), add = TRUE)
+  ggplot2::ggsave(fichier_tmp, plot = g, width = largeur_px / 96, height = hauteur_px / 96,
+                  dpi = 96, bg = "transparent")
   
-  if (isTRUE(lissage)) {
-    r_densite <- raster::focal(r_densite, w = matrix(1, 3, 3), fun = mean, na.rm = TRUE, pad = TRUE)
-  }
-  
-  # raster::as.matrix() renvoie la ligne 1 = y max (convention SIG, du haut vers le bas) ;
-  # plotly attend au contraire y croissant du bas vers le haut : on inverse l'ordre des lignes.
-  mat <- as.matrix(r_densite)
-  mat <- mat[nrow(mat):1, , drop = FALSE]
-  mat[is.na(mat)] <- 0
-  
-  x_bornes  <- seq(xlim[1], xlim[2], length.out = res + 1)
-  y_bornes  <- seq(ylim[1], ylim[2], length.out = res + 1)
-  x_centres <- (head(x_bornes, -1) + tail(x_bornes, -1)) / 2
-  y_centres <- (head(y_bornes, -1) + tail(y_bornes, -1)) / 2
-  
-  list(x = x_centres, y = y_centres, z = mat)
+  base64enc::dataURI(file = fichier_tmp, mime = "image/png")
 }
 
 CARROT <- R6Class(
@@ -130,8 +87,12 @@ CARROT <- R6Class(
     
     # Variable de l'unmixing
     dossier_racine = NULL, # nom du dossier dans lequel l'utilisateur souhaite accueillir les sorties d'AutoSpectral
+    dossier_monomarques = NULL,
+    dossier_echantillons = NULL,
+    dossier_controles_asp = NULL, # dossier de travail isolé ne contenant QUE les fichiers monomarqués/unstained réellement sélectionnés à l'import (voir preparer_dossier_controles_asp) : empêche AutoSpectral de scanner tout un dossier source et d'y confondre échantillons, contrôles non sélectionnés ou fichiers d'une expérience précédente
     asp_control_file = "fcs_control_file.csv", # nom du fichier d'entrée d'AutoSpectral
     asp_config = NULL, # paramètres de configuration d'AutoSpectral
+    asp_correspondance_incomplete = FALSE, # TRUE si AutoSpectral a signalé des fluorophores/marqueurs "No match" lors de create.control.file() (non bloquant : à corriger manuellement dans le tableau puis à enregistrer)
     flow.control = NULL, # liste des fichiers controles après l'étape de nettoyage
     gates = list(), # liste des gates réealisés
     spectra = NULL, # résultat de la fonction get.spectra d'AutoSpectral
@@ -254,32 +215,16 @@ CARROT <- R6Class(
       }) 
       names(self$echantillons) <- self$chemins_echantillons$tube_name
       
-      # ── Import automatique de la matrice de spillover ────────────────────────
-      # Si aucun contrôle n'a été fourni et que l'utilisateur a indiqué que ses
-      # échantillons sont déjà compensés, on tente de récupérer la matrice
-      # directement depuis les métadonnées FCS (mot-clé $SPILLOVER / $SPILL).
       if (self$sans_controles && self$mode == "Conventionnel" && self$deja_traite) {
         invisible(tryCatch(self$importer_spillover_fcs(), error = function(e) NULL))
       }
       
-      # ── Transformation par défaut (workflow sans contrôles) ──────────────────
-      # Sans tubes monomarqués, l'onglet "Transformation" n'est pas une étape
-      # obligatoire pour l'utilisateur : on construit donc immédiatement une
-      # transformation Arcsinh par défaut, afin que l'onglet Biplots (appliquer
-      # la matrice de compensation + visualiser) fonctionne dès l'import, sans
-      # étape intermédiaire. L'utilisateur peut toujours ajuster le cofacteur
-      # ensuite via l'onglet Transformation (cela reconstruira trans_list).
       if (self$sans_controles) {
         invisible(tryCatch(self$transformer_fcs(cofacteur = self$cofacteur_defaut),
                            error = function(e) NULL))
       }
     },
     
-    # Recherche et importe la matrice de compensation embarquée dans les métadonnées
-    # d'un échantillon FCS déjà compensé. Utile quand aucun tube monomarqué/unstained
-    # n'a été fourni à l'import. Retourne une liste :
-    #   $succes  : TRUE si une matrice a été trouvée ET importée
-    #   $message : explication (utile pour le diagnostic côté interface)
     importer_spillover_fcs = function(nom_echantillon = NULL) {
       if (is.null(self$echantillons) || length(self$echantillons) == 0) {
         stop("Aucun échantillon chargé.")
@@ -351,9 +296,7 @@ CARROT <- R6Class(
       return(paste0(canal, " | ", marqueur)) # Concatène et retourne le résultat sous un format propre (ex: "V3-A | CD4")
     },
     
-    # Enregistre la table d'annotation Marqueurs/Fluorochromes (onglet "Configuration Marqueurs")
-    # et en dérive un dictionnaire canal -> marqueur utilisé ensuite par get_label() pour tous
-    # les libellés d'axes (biplots, gates, QC, prétraitement...).
+    
     definir_config_marqueurs = function(df_config) {
       self$config_marqueurs <- df_config
       if (is.null(df_config) || nrow(df_config) == 0 || ncol(df_config) == 0) {
@@ -997,427 +940,446 @@ CARROT <- R6Class(
     
     # type cytometre = a8, s8, a5se, aurora, id7000, mosaic, opteon, xenith, minimal, auroraNL
     
-    lancer_asp = function(type_cytometre = "aurora") { # Méthode initialisant le pipeline AutoSpectral en générant le fichier de configuration CSV requis pour le démixage spectral
-      if (self$mode != "Spectral") { # Vérifie si la classe R6 n'est pas configurée pour traiter de la cytométrie spectrale
-        stop("Cette méthode nécessite le mode 'Spectral'.") # Bloque l'exécution car cette opération est obsolète et incompatible avec le mode conventionnel
-      } 
-      self$asp_config <- AutoSpectral::get.autospectral.param(cytometer = type_cytometre) # Charge les spécifications optiques et les constantes algorithmiques propres au modèle de cytomètre choisi (ex: Cytek Aurora)
-      control_dir <- path.expand(dirname(self$chemins_monomarques$chemin[1])) # Extrait et standardise le chemin absolu du dossier système contenant les fichiers de contrôles monomarqués
-      fichier_csv <- file.path(path.expand(self$dossier_racine), "fcs_control_file") # Construit le chemin absolu complet de destination pour le fichier de configuration sans son extension
-      if (file.exists(paste0(fichier_csv, ".csv"))) { # Détecte si un ancien fichier de configuration CSV portant le même nom existe déjà dans le dossier racine
-        file.remove(paste0(fichier_csv, ".csv")) # Supprime physiquement l'ancien fichier pour éviter tout conflit de métadonnées ou d'écrasement partiel
-      } 
-      AutoSpectral::create.control.file( # Applique la fonction native d'AutoSpectral pour scanner le dossier et mapper automatiquement les fluorophores
-        control.dir = control_dir, # Spécifie le répertoire source où le script doit analyser les signatures spectrales des témoins
-        asp = self$asp_config, # Fournit la liste des constantes de configuration du cytomètre chargée précédemment
-        filename = fichier_csv # Indique l'adresse cible où le nouveau fichier binaire de contrôle CSV doit être écrit et sauvegardé
-      ) 
+    lancer_asp = function(type_cytometre = "aurora") {
+      
+      if (self$mode != "Spectral") {
+        stop("Cette méthode nécessite le mode 'Spectral'.")
+      }
+      
+      self$asp_config <- AutoSpectral::get.autospectral.param(cytometer = type_cytometre)
+      control_dir <- path.expand(dirname(self$chemins_monomarques$chemin[1]))
+      fichier_csv <- file.path(path.expand(self$dossier_racine), "fcs_control_file")
+      
+      if (file.exists(paste0(fichier_csv, ".csv"))) {
+        file.remove(paste0(fichier_csv, ".csv"))
+      }
+      
+      AutoSpectral::create.control.file(
+        control.dir = control_dir,
+        asp = self$asp_config,
+        filename = fichier_csv
+      )
     },
     
-    verifier_asp = function(warning = 5000, error = 1000) { # Méthode auditant la qualité et la conformité des fichiers contrôles référencés dans le fichier CSV d'AutoSpectral
+    verifier_asp = function(warning = 5000, error = 1000) {
       
-      if (is.null(self$asp_config)) { # Vérifie si l'objet contenant les paramètres de configuration du cytomètre est manquant
-        stop("Erreur : asp_config est NULL. Lancez d'abord lancer_asp().") # Bloque l'exécution et exige l'initialisation préalable des paramètres de l'appareil
-      } 
-      chemin_csv_complet <- file.path(path.expand(self$dossier_racine), "fcs_control_file.csv") # Génère le chemin absolu standardisé pointant vers le fichier de configuration CSV
-      dossier_fcs <- path.expand(dirname(self$chemins_monomarques$chemin[1])) # Extrait et isole le chemin absolu du répertoire où résident les fichiers FCS témoins
+      if (is.null(self$asp_config)) {
+        stop("Erreur : asp_config est NULL. Lancez d'abord lancer_asp().")
+      }
+      chemin_csv_complet <- file.path(path.expand(self$dossier_racine), "fcs_control_file.csv")
+      dossier_fcs <- path.expand(dirname(self$chemins_monomarques$chemin[1]))
       
-      if (!file.exists(chemin_csv_complet)) { # Détecte si le fichier de contrôle CSV est physiquement absent du répertoire cible
-        stop("Fichier de contrôle introuvable à : ", chemin_csv_complet) # Interrompt le script pour signaler la non-génération ou le déplacement du fichier de métadonnées
-      } 
+      if (!file.exists(chemin_csv_complet)) {
+        stop("Fichier de contrôle introuvable à : ", chemin_csv_complet)
+      }
       
-      verification <- AutoSpectral::check.control.file( # Déclenche l'algorithme d'audit d'AutoSpectral pour valider les fichiers FCS témoins répertoriés
-        control.dir = dossier_fcs, # Indique le répertoire contenant les fichiers d'acquisitions de cytométrie spectrale
-        control.def.file = chemin_csv_complet, # Fournit le fichier CSV contenant le tableau de correspondance des fluorophores
-        asp = self$asp_config, # Fournit la liste des constantes techniques liée au modèle de cytomètre configuré
-        min.event.warning = warning, # Fixe le seuil d'alerte (nombre minimal de cellules) en deçà duquel un avertissement qualité est émis
-        min.event.error = error # Fixe le seuil critique d'erreur (nombre minimal de cellules) en deçà duquel le tube est jugé inutilisable
-      ) 
+      verification <- AutoSpectral::check.control.file(
+        control.dir = dossier_fcs, 
+        control.def.file = chemin_csv_complet, 
+        asp = self$asp_config,
+        min.event.warning = warning, 
+        min.event.error = error
+      )
       
-      if (is.null(verification)) { # Si le rapport de diagnostic renvoyé est totalement vide (aucun défaut détecté)
-      } else { # Sinon, si l'algorithme identifie des anomalies ou des avertissements de conformité
-        print(verification) # Affiche le tableau détaillé du rapport de contrôle qualité dans la console R
-      } 
-      return(verification) # Renvoie l'objet contenant le bilan de l'audit pour permettre son exploitation ou son affichage dans Shiny
-    }, 
-    
-    # définition des gates 
+      if (is.null(verification)) {
+      } else {
+        print(verification)
+      }
+      return(verification)
+    },
     
     definir_gates_landmarks = function(control_name, n.cells = 2000, percentile = 70, 
                                        grid.n = 100, bandwidth.factor = 1, 
-                                       fsc.channel = NULL, ssc.channel = NULL) { # Méthode ajustant et calculant automatiquement les fenêtres de sélection de référence (landmarks) pour un tube témoin spectral
+                                       fsc.channel = NULL, ssc.channel = NULL) {
       
-      if (is.null(self$asp_config)) { # Vérifie si l'objet contenant les constantes de configuration du cytomètre est manquant
-        stop("La configuration ASP n'est pas initialisée. Appelez d'abord lancer_asp().") # Bloque l'exécution et exige l'initialisation des paramètres de l'appareil
-      } 
+      if (is.null(self$asp_config)) {
+        stop("La configuration ASP n'est pas initialisée. Appelez d'abord lancer_asp().")
+      }
       
-      old_wd <- getwd() # Mémorise le chemin du répertoire de travail actuel de la session R avant de basculer
-      setwd(path.expand(self$dossier_racine)) # Déplace temporairement le répertoire de travail de R vers le dossier racine du projet AutoSpectral
-      on.exit(setwd(old_wd)) # Configure une sécurité forçant R à restaurer le répertoire de travail initial dès que la fonction se termine (qu'elle réussisse ou plante)
+      old_wd <- getwd()
+      setwd(path.expand(self$dossier_racine))
+      on.exit(setwd(old_wd))
       
-      output_dir <- file.path(self$dossier_racine, "figure_gate") # Définit le chemin d'accès absolu du dossier destiné à stocker les graphiques de contrôle qualité du gating
-      if (!dir.exists(output_dir)) dir.create(output_dir) # Crée physiquement le sous-dossier s'il n'existe pas encore sur le disque dur
+      output_dir <- file.path(self$dossier_racine, "figure_gate")
+      if (!dir.exists(output_dir)) dir.create(output_dir)
       
-      gate_result <- AutoSpectral::define.gate.landmarks( # Applique l'algorithme d'AutoSpectral pour modéliser et isoler la population cellulaire de référence
-        control.file = "fcs_control_file.csv", # Indique le nom du fichier CSV de configuration listant les tubes et les fluorophores
-        control.dir = path.expand(dirname(self$chemins_monomarques$chemin[1])), # Fournit le chemin d'accès absolu du répertoire hébergeant les fichiers FCS témoins
-        asp = self$asp_config, # Fournit la liste des constantes techniques liée au modèle de cytomètre configuré
-        gate.name = control_name, # Spécifie le nom ou l'identifiant du tube de contrôle monomarqué à analyser
-        n.cells = n.cells, # Fixe le nombre maximal de cellules (événements) à échantillonner pour modéliser la densité
-        percentile = percentile, # Définit le seuil de percentile de densité pour resserrer le filtre sur le cœur de la population cellulaire
-        grid.n = grid.n, # Spécifie la résolution de la grille mathématique bidimensionnelle pour l'estimation de la densité
-        bandwidth.factor = bandwidth.factor, # Ajuste le facteur de l'effet de lissage statistique de la courbe de distribution
-        fsc.channel = fsc.channel, # Permet de surcharger manuellement le nom du canal de taille cellulaire (Forward Scatter), sinon autodétecté
-        ssc.channel = ssc.channel, # Permet de surcharger manuellement le nom du canal de granularité cellulaire (Side Scatter), sinon autodétecté
-        output.dir = output_dir # Indique le chemin où sauvegarder automatiquement l'image PNG de contrôle de la fenêtre calculée
-      ) 
+      gate_result <- AutoSpectral::define.gate.landmarks(
+        control.file = "fcs_control_file.csv", 
+        control.dir = path.expand(dirname(self$chemins_monomarques$chemin[1])),
+        asp = self$asp_config,
+        gate.name = control_name,
+        n.cells = n.cells,
+        percentile = percentile,
+        grid.n = grid.n,
+        bandwidth.factor = bandwidth.factor,
+        fsc.channel = fsc.channel,
+        ssc.channel = ssc.channel,
+        output.dir = output_dir
+      )
       
-      if (is.null(self$gates)) { # Si la structure de stockage des fenêtres de sélection n'est pas encore initialisée dans l'objet R6
-        self$gates <- list() # Initialise une liste vide dédiée pour mémoriser les coordonnées des gates calculés
-      } 
-      self$gates[[control_name]] <- gate_result # Enregistre le modèle géométrique résultant (les coordonnées du gate) associé à ce tube dans l'objet R6
-      return(gate_result) # Renvoie les paramètres géométriques de la population isolée pour une exploitation ultérieure
+      if (is.null(self$gates)) {
+        self$gates <- list()
+      }
+      self$gates[[control_name]] <- gate_result
+      return(gate_result)
     },
     
     definir_gates_density = function(control_name, n.cells = 2000, grid.n = 100, 
                                      bandwidth.factor = 1, fsc.channel = NULL, 
-                                     ssc.channel = NULL) { # Méthode calculant automatiquement une fenêtre de sélection (gate) basée sur le pic de densité de population d'un tube témoin spectral
+                                     ssc.channel = NULL) {
       
-      if (is.null(self$asp_config)) { # Vérifie si l'objet contenant les constantes de configuration du cytomètre est manquant
-        stop("La configuration ASP n'est pas initialisée. Appelez d'abord lancer_asp().") # Bloque l'exécution et exige l'initialisation des paramètres de l'appareil
-      } 
+      if (is.null(self$asp_config)) {
+        stop("La configuration ASP n'est pas initialisée. Appelez d'abord lancer_asp().")
+      }
       
-      old_wd <- getwd() # Mémorise le chemin du répertoire de travail actuel de la session R avant de basculer
-      setwd(path.expand(self$dossier_racine)) # Déplace temporairement le répertoire de travail de R vers le dossier racine du projet AutoSpectral
-      on.exit(setwd(old_wd)) # Configure une sécurité forçant R à restaurer le répertoire de travail initial dès que la fonction se termine (qu'elle réussisse ou plante)
+      old_wd <- getwd()
+      setwd(path.expand(self$dossier_racine))
+      on.exit(setwd(old_wd))
       
-      output_dir <- file.path(self$dossier_racine, "figure_gate") # Définit le chemin d'accès absolu du dossier destiné à stocker les graphiques de contrôle qualité du gating
-      if (!dir.exists(output_dir)) dir.create(output_dir) # Crée physiquement le sous-dossier s'il n'existe pas encore sur le disque dur
+      output_dir <- file.path(self$dossier_racine, "figure_gate")
+      if (!dir.exists(output_dir)) dir.create(output_dir)
       
-      gate_result <- AutoSpectral::define.gate.density( # Applique l'algorithme d'AutoSpectral pour modéliser et isoler la population cellulaire par estimation de densité locale
-        control.file = "fcs_control_file.csv", # Indique le nom du fichier CSV de configuration listant les tubes et les fluorophores
-        control.dir = path.expand(dirname(self$chemins_monomarques$chemin[1])), # Fournit le chemin d'accès absolu du répertoire hébergeant les fichiers FCS témoins
-        asp = self$asp_config, # Fournit la liste des constantes techniques liée au modèle de cytomètre configuré
-        gate.name = control_name, # Spécifie le nom ou l'identifiant du tube de contrôle monomarqué à analyser
-        n.cells = n.cells, # Fixe le nombre maximal de cellules (événements) à échantillonner pour modéliser la densité
-        grid.n = grid.n, # Spécifie la résolution de la grille mathématique bidimensionnelle pour l'estimation de la densité
-        bandwidth.factor = bandwidth.factor, # Ajuste le facteur de l'effet de lissage statistique de la courbe de distribution
-        fsc.channel = fsc.channel, # Permet de surcharger manuellement le nom du canal de taille cellulaire (Forward Scatter), sinon autodétecté
-        ssc.channel = ssc.channel, # Permet de surcharger manuellement le nom du canal de granularité cellulaire (Side Scatter), sinon autodétecté
-        output.dir = output_dir # Indique le chemin où sauvegarder automatiquement l'image PNG de contrôle de la fenêtre de densité calculée
-      ) 
+      gate_result <- AutoSpectral::define.gate.density(
+        control.file = "fcs_control_file.csv",
+        control.dir = path.expand(dirname(self$chemins_monomarques$chemin[1])),
+        asp = self$asp_config,
+        gate.name = control_name,
+        n.cells = n.cells,
+        grid.n = grid.n,
+        bandwidth.factor = bandwidth.factor,
+        fsc.channel = fsc.channel,
+        ssc.channel = ssc.channel,
+        output.dir = output_dir
+      )
       
-      if (is.null(self$gates)) { # Si la structure de stockage des fenêtres de sélection n'est pas encore initialisée dans l'objet R6
-        self$gates <- list() # Initialise une liste vide dédiée pour mémoriser les coordonnées des gates calculés
-      } 
+      if (is.null(self$gates)) {
+        self$gates <- list()
+      }
       
-      self$gates[[control_name]] <- gate_result # Enregistre le modèle géométrique résultant (les coordonnées du gate) associé à ce tube dans l'objet R6
-      return(gate_result) # Renvoie les paramètres géométriques de la population isolée pour une exploitation ultérieure
+      self$gates[[control_name]] <- gate_result
+      return(gate_result)
     },
     
-    definir_tune_gates = function(gate.name, n_cells = 2000, percentile = 70, bandwidth = 1) { # Méthode permettant d'ajuster finement (tuner) les paramètres géométriques d'un gate pour un témoin spectral spécifique
+    definir_tune_gates = function(gate.name, n_cells = 2000, percentile = 70, bandwidth = 1) {
       
-      csv_file <- file.path(path.expand(self$dossier_racine), "fcs_control_file.csv") # Génère le chemin absolu standardisé pointant vers le fichier de configuration CSV des contrôles
+      csv_file <- file.path(path.expand(self$dossier_racine), "fcs_control_file.csv")
       
-      if (!file.exists(csv_file)) { # Détecte si le fichier de contrôle CSV est physiquement absent du répertoire cible
-        stop("Fichier CSV introuvable à : ", csv_file, ". Avez-vous bien lancé lancer_asp() ?") # Interrompt le processus et alerte l'utilisateur si la configuration initiale est manquante
-      } 
+      if (!file.exists(csv_file)) {
+        stop("Fichier CSV introuvable à : ", csv_file, ". Avez-vous bien lancé lancer_asp() ?")
+      }
       
-      dossier_fcs <- path.expand(dirname(self$chemins_monomarques$chemin[1])) # Extrait et isole le chemin absolu du répertoire où résident les fichiers FCS témoins
-      output_dir <- file.path(self$dossier_racine, "figure_gate_tuning") # Définit le chemin d'accès absolu du dossier destiné à stocker les graphiques d'optimisation du gating
-      if (!dir.exists(output_dir)) dir.create(output_dir) # Crée physiquement le sous-dossier s'il n'existe pas encore sur le disque dur
+      dossier_fcs <- path.expand(dirname(self$chemins_monomarques$chemin[1]))
+      output_dir <- file.path(self$dossier_racine, "figure_gate_tuning")
+      if (!dir.exists(output_dir)) dir.create(output_dir)
       
-      gate_tuned <- AutoSpectral::tune.gate( # Applique l'algorithme d'optimisation d'AutoSpectral pour tester et affiner la géométrie de la fenêtre de sélection
-        control.file = csv_file, # Fournit le fichier CSV contenant le tableau de correspondance des fluorophores et des tubes
-        control.dir = dossier_fcs, # Indique le répertoire contenant les fichiers d'acquisitions de cytométrie spectrale
-        asp = self$asp_config, # Fournit la liste des constantes techniques liée au modèle de cytomètre configuré
-        gate.name = gate.name, # Spécifie le nom ou l'identifiant du tube de contrôle monomarqué à optimiser
-        n.cells = n_cells, # Fixe le nombre maximal de cellules (événements) à échantillonner pour les simulations de densité
-        percentiles = percentile, # Ajuste le seuil de percentile de densité testé pour capturer le cœur de la population cellulaire
-        bandwidth.factor = bandwidth, # Modifie le facteur de lissage statistique appliqué aux contours de la distribution cellulaire
-        output.dir = output_dir, # Indique le chemin où sauvegarder automatiquement le graphique d'aide à la décision du tuning
-        filename = paste0("tuned_", gate.name) # Définit le nom de base du fichier image généré affichant le résultat de l'optimisation
-      ) 
+      gate_tuned <- AutoSpectral::tune.gate(
+        control.file = csv_file, 
+        control.dir = dossier_fcs, 
+        asp = self$asp_config, 
+        gate.name = gate.name, 
+        n.cells = n_cells,
+        percentiles = percentile,
+        bandwidth.factor = bandwidth,
+        output.dir = output_dir,
+        filename = paste0("tuned_", gate.name)
+      )
       
-      self$gates[[gate.name]] <- gate_tuned # Enregistre ou met à jour le modèle géométrique optimisé résultant dans la mémoire de l'objet R6
-      return(invisible(gate_tuned)) # Renvoie discrètement l'objet contenant les paramètres du gate optimisé sans encombrer la console R
+      self$gates[[gate.name]] <- gate_tuned
+      return(invisible(gate_tuned))
     },
     
-    charger_et_nettoyer = function() { # Méthode chargeant les fichiers témoins et exécutant le nettoyage algorithmique des signaux de fluorescence
+    charger_et_nettoyer = function() {
+      # 1. Vérification optionnelle : on ne bloque plus si gates est vide, 
+      # mais on informe l'utilisateur.
+      if (is.null(self$gates) || length(self$gates) == 0) {
+        message("⚠️ Aucune gate définie. Les fichiers seront traités sans filtrage spatial.")
+      }
       
-      if (is.null(self$gates) || length(self$gates) == 0) { # Détecte si aucune structure géométrique de gate n'a été préalablement calculée ou enregistrée
-        message("Aucune gate définie. Les fichiers seront traités sans filtrage spatial.") # Alerte l'utilisateur que l'analyse se fera sur la totalité des événements du fichier binaire
-      } 
-      dossier_fcs <- path.expand(dirname(self$chemins_monomarques$chemin[1])) # Extrait et standardise le chemin absolu du dossier système contenant les fichiers de contrôles monomarqués
-      dossier_figures <- path.expand(file.path(self$dossier_racine, "figure_clean_controls")) # Définit le chemin d'accès absolu du dossier destiné à stocker les graphiques de contrôle qualité du nettoyage
-      if (!dir.exists(dossier_figures)) { # Vérifie si le dossier de destination pour les figures n'existe pas encore sur le disque dur
-        dir.create(dossier_figures, recursive = TRUE) # Crée automatiquement l'arborescence des dossiers manquants pour éviter une erreur d'écriture systeme
-      } 
-      old_wd <- getwd() # Mémorise le chemin du répertoire de travail actuel de la session R avant de basculer
-      setwd(dossier_figures) # Déplace temporairement le répertoire de travail de R vers le dossier d'export des figures pour y forcer l'écriture des fichiers images d'AutoSpectral
-      on.exit(setwd(old_wd)) # Configure une sécurité forçant R à restaurer le répertoire de travail initial dès que la fonction se termine (qu'elle réussisse ou plante)
+      dossier_fcs <- path.expand(dirname(self$chemins_monomarques$chemin[1]))
+      dossier_figures <- path.expand(file.path(self$dossier_racine, "figure_clean_controls"))
       
-      flow_res <- AutoSpectral::define.flow.control( # Initialise l'objet de contrôle de flux en associant les fichiers FCS, les configurations de marqueurs et les structures géométriques
-        control.dir = dossier_fcs, # Spécifie le répertoire source hébergeant les fichiers d'acquisitions de cytométrie spectrale
-        control.def.file = file.path(self$dossier_racine, self$asp_control_file), # Spécifie le chemin d'accès absolu vers le fichier CSV de configuration technique de l'expérience
-        asp = self$asp_config, # Fournit la liste des constantes techniques liée au modèle de cytomètre configuré
-        gate.list = if(length(self$gates) > 0) self$gates else NULL # Injecte la liste des gates calculés s'ils existent, sinon transmet la valeur NULL
-      ) 
+      if (!dir.exists(dossier_figures)) {
+        dir.create(dossier_figures, recursive = TRUE)
+      }
       
-      flow_cleaned <- AutoSpectral::clean.controls( # Déclenche l'algorithme de nettoyage et de normalisation mathématique des spectres d'autofluorescence
-        flow.control = flow_res, # Fournit l'objet de contrôle de flux initialisé à l'étape précédente
-        asp = self$asp_config, # Transmet la configuration technique de l'appareil pour guider le traitement des signaux
-        main.figures = TRUE # Force la génération automatique des graphiques de diagnostic spectral (profils d'émission) dans le dossier courant
-      ) 
+      old_wd <- getwd()
+      setwd(dossier_figures)
+      on.exit(setwd(old_wd))
       
-      self$flow.control <- flow_cleaned # Enregistre l'objet de contrôle nettoyé et finalisé dans la mémoire de la classe R6
-      return(invisible(self$flow.control)) # Renvoie discrètement l'objet nettoyé pour permettre son chaînage sans encombrer la console R
+      # 2. Préparation du contrôle : 
+      # AutoSpectral::define.flow.control gérera les fichiers avec gate.define = FALSE 
+      # automatiquement si votre CSV est bien configuré.
+      flow_res <- AutoSpectral::define.flow.control(
+        control.dir = dossier_fcs, 
+        control.def.file = file.path(self$dossier_racine, self$asp_control_file),
+        asp = self$asp_config,
+        gate.list = if(length(self$gates) > 0) self$gates else NULL
+      )
+      
+      # 3. Nettoyage :
+      # Si aucune gate n'est définie, clean.controls traitera les fichiers "bruts" 
+      # (autofluorescence uniquement).
+      flow_cleaned <- AutoSpectral::clean.controls(
+        flow.control = flow_res,
+        asp = self$asp_config,
+        main.figures = TRUE 
+      )
+      
+      self$flow.control <- flow_cleaned
+      message("✅ Chargement et nettoyage terminés avec succès.")
+      return(invisible(self$flow.control))
     },
     
-    extraire_fluorophore_spectre = function() { # Méthode isolant et calculant la signature spectrale d'émission pure de chaque fluorophore de l'expérience
-      if (is.null(self$flow.control)) { # Vérifie si l'objet contenant les témoins chargés et nettoyés est absent de la mémoire
-        stop("Erreur : flow.control n'est pas chargé.") # Bloque le traitement et alerte l'utilisateur qu'il faut d'abord exécuter le nettoyage
-      } 
+    extraire_fluorophore_spectre = function() {
+      if (is.null(self$flow.control)) {
+        stop("Erreur : flow.control n'est pas chargé.")
+      }
       
-      old_wd <- getwd() # Mémorise le chemin du répertoire de travail actuel de la session R avant de basculer
-      setwd(path.expand(self$dossier_racine)) # Déplace temporairement le répertoire de travail vers le dossier racine pour permettre l'écriture des fichiers journaux d'AutoSpectral
+      old_wd <- getwd()
+      setwd(path.expand(self$dossier_racine))
       
-      spectra_result <- AutoSpectral::get.fluorophore.spectra( # Déclenche l'algorithme d'AutoSpectral pour déduire le profil spectral de référence de chaque colorant
-        flow.control = self$flow.control, # Fournit l'objet contenant les données de cytométrie nettoyées et filtrées
-        asp = self$asp_config # Transmet les constantes techniques de configuration de l'appareil optique
-      ) 
+      spectra_result <- AutoSpectral::get.fluorophore.spectra(
+        flow.control = self$flow.control,
+        asp = self$asp_config
+      )
       
-      setwd(old_wd) # Restaure immédiatement le répertoire de travail initial de l'utilisateur après l'opération informatique
-      self$spectra <- spectra_result # Enregistre la matrice des spectres d'émission purs de référence dans l'objet R6
-      return(invisible(self$spectra)) # Renvoie discrètement la matrice spectrale calculée sans saturer l'affichage de la console R
+      setwd(old_wd)
+      self$spectra <- spectra_result
+      return(invisible(self$spectra))
     },
     
     # =========================
     # étapes optionnelles
     # =========================
-    extraire_spectre_af = function(unstained_fcs_path, tissue_name, refine = TRUE) { # Méthode isolant le profil spectral spécifique de l'autofluorescence (AF) pour un tissu biologique donné à partir d'un échantillon non marqué
+    extraire_spectre_af = function(unstained_fcs_path, tissue_name, refine = TRUE) {
       
-      if (is.null(self$spectra)) { # Vérifie si la matrice des spectres purs des fluorophores est absente de la mémoire de l'objet
-        stop("Erreur : Les spectres fluorophores n'ont pas été extraits. Lancez extraire_fluorophore_spectre() d'abord.") # Bloque l'exécution car l'algorithme a besoin des profils des colorants pour isoler mathématiquement le signal de l'autofluorescence
-      } 
+      if (is.null(self$spectra)) {
+        stop("Erreur : Les spectres fluorophores n'ont pas été extraits. Lancez extraire_fluorophore_spectre() d'abord.")
+      }
       
-      dossier_figures <- path.expand(file.path(self$dossier_racine, "figure_autofluorescence")) # Définit le chemin absolu du dossier destiné à stocker les graphiques de diagnostic de l'autofluorescence
-      dossier_tables <- path.expand(file.path(self$dossier_racine, "table_autofluorescence")) # Définit le chemin absolu du dossier destiné à exporter les tableaux de données numériques de l'autofluorescence
-      if (!dir.exists(dossier_figures)) dir.create(dossier_figures, recursive = TRUE) # Crée physiquement le sous-dossier d'export des images s'il n'existe pas encore sur le disque dur
-      if (!dir.exists(dossier_tables)) dir.create(dossier_tables, recursive = TRUE) # Crée physiquement le sous-dossier d'export des tables s'il n'existe pas encore sur le disque dur
+      dossier_figures <- path.expand(file.path(self$dossier_racine, "figure_autofluorescence"))
+      dossier_tables <- path.expand(file.path(self$dossier_racine, "table_autofluorescence"))
+      if (!dir.exists(dossier_figures)) dir.create(dossier_figures, recursive = TRUE)
+      if (!dir.exists(dossier_tables)) dir.create(dossier_tables, recursive = TRUE)
       
-      af_result <- AutoSpectral::get.af.spectra( # Déclenche l'algorithme d'AutoSpectral pour déduire le spectre d'émission du bruit de fond tissulaire intrinsèque
-        unstained.sample = path.expand(unstained_fcs_path), # Spécifie le chemin d'accès absolu vers le fichier FCS du témoin non marqué (Unstained) propre à ce tissu
-        asp = self$asp_config, # Fournit la liste des constantes de configuration technique de l'appareil optique
-        spectra = self$spectra, # Transmet la matrice des spectres des fluorophores pour permettre la déconvolution mathématique
-        refine = refine, # Active ou désactive l'algorithme d'optimisation itérative pour affiner la précision de la courbe d'autofluorescence
-        figures = TRUE, # Force la génération automatique des graphiques de contrôle qualité affichant le profil de signature de l'autofluorescence
-        plot.dir = dossier_figures,  # Indique le répertoire cible où le script doit enregistrer les figures générées
-        table.dir = dossier_tables,  # Indique le répertoire cible où le script doit enregistrer les fichiers de données textuels
-        title = paste("Autofluorescence -", tissue_name) # Configure le titre personnalisé qui sera inscrit sur les graphiques de diagnostic spectral
-      ) 
+      af_result <- AutoSpectral::get.af.spectra(
+        unstained.sample = path.expand(unstained_fcs_path),
+        asp = self$asp_config,
+        spectra = self$spectra,
+        refine = refine,
+        figures = TRUE,
+        plot.dir = dossier_figures,  # Forcé ici
+        table.dir = dossier_tables,  # Forcé ici
+        title = paste("Autofluorescence -", tissue_name)
+      )
       
-      if (is.null(self$af_spectra)) { # Si la structure de stockage des spectres d'autofluorescence par tissu n'est pas encore initialisée
-        self$af_spectra <- list() # Initialise une liste vide dédiée pour mémoriser les signatures de bruit de fond par type de tissu
-      } 
+      if (is.null(self$af_spectra)) {
+        self$af_spectra <- list()
+      }
       
-      self$af_spectra[[tissue_name]] <- af_result # Enregistre la signature spectrale d'autofluorescence calculée dans la sous-liste de l'objet R6 sous le nom du tissu
-      return(invisible(af_result)) # Renvoie discrètement la matrice spectrale de l'autofluorescence sans encombrer la console R de commande
+      self$af_spectra[[tissue_name]] <- af_result
+      return(invisible(af_result))
     },
     
-    preparer_variants_spectraux = function(tissue_af_name = NULL, refine = TRUE) { # Méthode évaluant et générant les variantes de signatures spectrales en combinant les profils des fluorophores et le spectre d'autofluorescence tissulaire
+    preparer_variants_spectraux = function(tissue_af_name = NULL, refine = TRUE) {
       
-      nom_tissu <- if (!is.null(tissue_af_name)) { # Si l'utilisateur a spécifié manuellement un nom de tissu biologique cible
-        tissue_af_name # Sélectionne le nom du tissu fourni en paramètre d'entrée
-      } else if (length(self$af_spectra) > 0) { # Sinon, si la liste des spectres d'autofluorescence enregistrés n'est pas vide
-        names(self$af_spectra)[1] # Sélectionne automatiquement par défaut le premier tissu disponible dans la liste
-      } else { # Sinon, si aucun spectre d'autofluorescence n'est disponible ou n'a été préalablement calculé
-        stop("Erreur : Aucune AF trouvée dans self$af_spectra. Lancez extraire_spectre_af() d'abord.") # Bloque l'exécution et exige l'extraction préalable du bruit de fond tissulaire
-      } 
+      nom_tissu <- if (!is.null(tissue_af_name)) {
+        tissue_af_name
+      } else if (length(self$af_spectra) > 0) {
+        names(self$af_spectra)[1]
+      } else {
+        stop("Erreur : Aucune AF trouvée dans self$af_spectra. Lancez extraire_spectre_af() d'abord.")
+      }
       
-      if (is.null(self$spectra) || is.null(self$af_spectra[[nom_tissu]])) { # Vérifie si la matrice des spectres purs ou celle de l'autofluorescence du tissu sélectionné est manquante
-        stop("Erreur : Spectres ou AF non trouvés pour le tissu : ", nom_tissu) # Interrompt le script pour signaler l'absence de l'une des deux matrices mathématiques indispensables
-      } 
+      if (is.null(self$spectra) || is.null(self$af_spectra[[nom_tissu]])) {
+        stop("Erreur : Spectres ou AF non trouvés pour le tissu : ", nom_tissu)
+      }
       
-      dossier_variants <- path.expand(file.path(self$dossier_racine, "figure_spectral_variants")) # Définit le chemin absolu du dossier système destiné à stocker les graphiques de diagnostic des variantes spectrales
-      if (!dir.exists(dossier_variants)) dir.create(dossier_variants, recursive = TRUE) # Crée physiquement le sous-dossier d'export des images s'il n'existe pas encore sur le stockage local
+      dossier_variants <- path.expand(file.path(self$dossier_racine, "figure_spectral_variants"))
+      if (!dir.exists(dossier_variants)) dir.create(dossier_variants, recursive = TRUE)
       
-      chemin_dossier_controles <- path.expand(dirname(self$chemins_monomarques$chemin[1])) # Extrait et standardise le chemin absolu du répertoire hébergeant les fichiers FCS témoins monomarqués
-      chemin_fichier_csv <- path.expand(file.path(self$dossier_racine, self$asp_control_file)) # Construit le chemin absolu pointant vers le fichier CSV de configuration technique de l'expérience
+      chemin_dossier_controles <- path.expand(dirname(self$chemins_monomarques$chemin[1]))
+      chemin_fichier_csv <- path.expand(file.path(self$dossier_racine, self$asp_control_file))
       
-      variants_result <- AutoSpectral::get.spectral.variants( # Déclenche l'algorithme d'AutoSpectral pour modéliser les distorsions ou variantes de signatures spectrales
-        control.dir = chemin_dossier_controles, # Indique le répertoire contenant les fichiers d'acquisitions des témoins monomarqués
-        control.def.file = chemin_fichier_csv, # Fournit le fichier CSV contenant le tableau de correspondance des fluorophores
-        asp = self$asp_config, # Fournit la liste des constantes de configuration technique du cytomètre spectral
-        spectra = self$spectra, # Transmet la matrice de référence des spectres d'émission purs des fluorophores
-        af.spectra = self$af_spectra[[nom_tissu]], # Transmet le spectre d'autofluorescence spécifique extrait pour le tissu biologique actif
-        refine = refine, # Active ou désactive l'algorithme d'optimisation itérative pour affiner la détection des variantes
-        figures = TRUE, # Force la génération automatique des figures graphiques de contrôle qualité décrivant les variantes identifiées
-        output.dir = dossier_variants # Indique au script le dossier cible exact où sauvegarder les graphiques de diagnostic produits
-      ) 
+      variants_result <- AutoSpectral::get.spectral.variants(
+        control.dir = chemin_dossier_controles,
+        control.def.file = chemin_fichier_csv,
+        asp = self$asp_config,
+        spectra = self$spectra,
+        af.spectra = self$af_spectra[[nom_tissu]],
+        refine = refine,
+        figures = TRUE, 
+        output.dir = dossier_variants 
+      )
       
-      if (is.null(self$variants)) self$variants <- list() # Initialise une liste vide dédiée au sein de l'objet R6 si la structure de stockage n'existe pas encore
-      self$variants[[nom_tissu]] <- variants_result # Enregistre la structure de données des variantes spectrales calculée pour ce tissu dans la mémoire R6
-      return(invisible(variants_result)) # Renvoie discrètement la liste des variantes spectrales sans saturer l'affichage de la console R
+      if (is.null(self$variants)) self$variants <- list()
+      self$variants[[nom_tissu]] <- variants_result
+      return(invisible(variants_result))
     },
     
     # ===========================   
     # unmixing 
     # ===========================
     
-    unmix_fcs = function(fcs_file_path, tissue_name = NULL, method = "AutoSpectral", speed = "slow") { # Méthode principale exécutant le démixage spectral (unmixing) d'un fichier FCS à l'aide des matrices de référence calculées
+    unmix_fcs = function(fcs_file_path, tissue_name = NULL, method = "AutoSpectral", speed = "slow") {
       
-      dossier_sortie <- file.path(self$dossier_racine, "AutoSpectral_unmixed") # Spécifie le chemin d'accès absolu du dossier de destination pour les fichiers FCS démixés
-      if (!dir.exists(dossier_sortie)) dir.create(dossier_sortie) # Crée physiquement le sous-dossier s'il n'existe pas encore sur le disque dur
-      n_detectors <- ncol(self$spectra[[1]]) # Extrait dynamiquement le nombre total de canaux/détecteurs optiques physiques configurés sur l'appareil
-      af_s <- if (!is.null(tissue_name) && !is.null(self$af_spectra[[tissue_name]])) { # Si un nom de tissu est fourni et possède son propre profil d'autofluorescence (AF) mémorisé
-        self$af_spectra[[tissue_name]] # Sélectionne le spectre d'autofluorescence spécifique extrait pour ce tissu biologique précis
-      } else if (length(self$af_spectra) > 0) { # Sinon, si la liste contient d'autres spectres d'autofluorescence déjà calculés
-        self$af_spectra[[1]] # Sélectionne de manière adaptative la première signature d'autofluorescence disponible par défaut
-      } else { # Sinon, si aucune signature d'autofluorescence n'a été isolée au préalable pour l'expérience
-        matrix(nrow = 0, ncol = n_detectors) # Génère une matrice vide dimensionnée pour ne pas bloquer l'algorithme (démixage sans soustraction de l'AF)
-      } 
-      var_s <- if (!is.null(tissue_name) && !is.null(self$variants[[tissue_name]])) { # Détecte si des variantes spectrales (distorsions de signaux) ont été modélisées pour ce tissu
-        self$variants[[tissue_name]] # Charge les variantes spectrales calculées correspondantes pour optimiser la déconvolution
-      } else { # Sinon, si aucune variante n'est disponible ou requise pour l'analyse
-        NULL # Transmet la valeur NULL pour indiquer à l'algorithme d'utiliser exclusivement les spectres purs standards
-      } 
+      dossier_sortie <- file.path(self$dossier_racine, "AutoSpectral_unmixed")
+      if (!dir.exists(dossier_sortie)) dir.create(dossier_sortie)
       
-      AutoSpectral::unmix.fcs( # Applique l'algorithme de démixing spectral linéaire ou itératif pour déconvoluer les signaux du fichier d'acquisition
-        fcs.file = fcs_file_path, # Indique le chemin d'accès absolu vers le fichier FCS brut original (multiparamétrique) à traiter
-        spectra = self$spectra, # Transmet la matrice de référence des spectres d'émission purs de l'ensemble des fluorophores du panel
-        asp = self$asp_config, # Fournit la liste des constantes de configuration technique du cytomètre spectral
-        flow.control = self$flow.control, # Fournit l'objet contenant les contrôles qualité et les paramètres de flux nettoyés
-        method = method, # Spécifie le modèle mathématique de démixage à exécuter (ex: "AutoSpectral" ou "OLS" moindres carrés ordinaires)
-        af.spectra = af_s, # Injecte la matrice d'autofluorescence sélectionnée pour la soustraire mathématiquement du signal global
-        spectra.variants = var_s, # Injecte la matrice des variantes de signatures pour compenser les distorsions de fluorescence
-        speed = speed, # Règle la vitesse d'exécution de l'algorithme (ex: "slow" pour une précision maximale avec optimisations itératives)
-        output.dir = dossier_sortie, # Indique le dossier cible exact où sauvegarder le fichier binaire FCS final résultant
-        parallel = TRUE # Active le calcul parallèle multi-cœur pour accélérer la déconvolution de millions d'événements cellulaires
-      ) 
+      n_detectors <- ncol(self$spectra[[1]]) 
+      af_s <- if (!is.null(tissue_name) && !is.null(self$af_spectra[[tissue_name]])) {
+        self$af_spectra[[tissue_name]]
+      } else if (length(self$af_spectra) > 0) {
+        self$af_spectra[[1]]
+      } else {
+        matrix(nrow = 0, ncol = n_detectors) 
+      }
+      
+      var_s <- if (!is.null(tissue_name) && !is.null(self$variants[[tissue_name]])) {
+        self$variants[[tissue_name]]
+      } else {
+        NULL
+      }
+      
+      AutoSpectral::unmix.fcs(
+        fcs.file = fcs_file_path,
+        spectra = self$spectra,
+        asp = self$asp_config,
+        flow.control = self$flow.control,
+        method = method,
+        af.spectra = af_s,
+        spectra.variants = var_s,
+        speed = speed,
+        output.dir = dossier_sortie,  
+        parallel = TRUE
+      )
+      
     },
     
-    unmix_folder = function(folder_path, tissue_name = NULL, method = "AutoSpectral", speed = "slow") { # Méthode principale automatisant le démixage spectral (unmixing) en lot pour tout un dossier contenant des fichiers FCS bruts
+    unmix_folder = function(folder_path, tissue_name = NULL, method = "AutoSpectral", speed = "slow") {
       
-      dossier_sortie <- file.path(self$dossier_racine, "AutoSpectral_unmixed") # Spécifie le chemin d'accès absolu du dossier de destination pour la cohorte de fichiers FCS démixés
-      if (!dir.exists(dossier_sortie)) dir.create(dossier_sortie, recursive = TRUE) # Crée physiquement le dossier de sortie ainsi que ses sous-répertoires si nécessaire pour éviter un plantage
-      n_detectors <- ncol(self$spectra[[1]]) # Extrait dynamiquement le nombre total de canaux/détecteurs optiques physiques configurés sur l'appareil
-      af_s <- if (!is.null(tissue_name) && !is.null(self$af_spectra[[tissue_name]])) { # Si un nom de tissu est fourni et possède son propre profil d'autofluorescence (AF) mémorisé
-        self$af_spectra[[tissue_name]] # Sélectionne le spectre d'autofluorescence spécifique extrait pour ce tissu biologique précis
-      } else if (length(self$af_spectra) > 0) { # Sinon, si la liste contient d'autres spectres d'autofluorescence déjà calculés
-        self$af_spectra[[1]] # Sélectionne de manière adaptative la première signature d'autofluorescence disponible par défaut
-      } else { # Sinon, si aucune signature d'autofluorescence n'a été isolée au préalable pour l'expérience
-        matrix(nrow = 0, ncol = n_detectors) # Génère une matrice vide dimensionnée pour exécuter le démixage de la cohorte sans soustraction de l'AF
-      } 
-      var_s <- if (!is.null(tissue_name) && !is.null(self$variants[[tissue_name]])) { # Détecte si des variantes spectrales (distorsions de signaux) ont été modélisées pour ce tissu
-        self$variants[[tissue_name]] # Charge les variantes spectrales calculées correspondantes pour optimiser la déconvolution du lot
-      } else { # Sinon, si aucune variante n'est disponible ou requise pour l'analyse
-        NULL # Transmet la valeur NULL pour indiquer à l'algorithme d'utiliser exclusivement les spectres purs standards
-      } 
+      dossier_sortie <- file.path(self$dossier_racine, "AutoSpectral_unmixed")
+      if (!dir.exists(dossier_sortie)) dir.create(dossier_sortie, recursive = TRUE)
+      n_detectors <- ncol(self$spectra[[1]]) 
       
-      AutoSpectral::unmix.folder( # Applique l'algorithme de démixing spectral en lot pour traiter simultanément tous les fichiers du dossier cible
-        fcs.dir = folder_path, # Spécifie le chemin d'accès absolu du dossier contenant les fichiers d'acquisitions bruts à déconvoluer
-        spectra = self$spectra, # Transmet la matrice de référence des spectres d'émission purs de l'ensemble des fluorophores du panel
-        asp = self$asp_config, # Fournit la liste des constantes de configuration technique du cytomètre spectral
-        flow.control = self$flow.control, # Fournit l'objet contenant les contrôles qualité et les paramètres de flux nettoyés
-        method = method, # Spécifie le modèle mathématique de démixage à exécuter (ex: "AutoSpectral" ou "OLS" moindres carrés ordinaires)
-        af.spectra = af_s, # Injecte la matrice d'autofluorescence sélectionnée pour la soustraire mathématiquement de chaque cellule de la cohorte
-        spectra.variants = var_s, # Injecte la matrice des variantes de signatures pour compenser les distorsions de fluorescence sur l'ensemble des tubes
-        speed = speed, # Règle la vitesse d'exécution de l'algorithme (ex: "slow" pour privilégier la précision via des optimisations itératives)
-        output.dir = dossier_sortie, # Indique le dossier cible exact où sauvegarder les fichiers binaires FCS résultants de la cohorte
-        parallel = TRUE # Active le calcul parallèle multi-cœur pour déconvoluer simultanément plusieurs fichiers FCS et accélérer le traitement global
-      ) 
+      af_s <- if (!is.null(tissue_name) && !is.null(self$af_spectra[[tissue_name]])) {
+        self$af_spectra[[tissue_name]]
+      } else if (length(self$af_spectra) > 0) {
+        self$af_spectra[[1]]
+      } else {
+        matrix(nrow = 0, ncol = n_detectors) 
+      }
+      
+      var_s <- if (!is.null(tissue_name) && !is.null(self$variants[[tissue_name]])) {
+        self$variants[[tissue_name]]
+      } else {
+        NULL
+      }
+      
+      AutoSpectral::unmix.folder(
+        fcs.dir = folder_path,
+        spectra = self$spectra,
+        asp = self$asp_config,
+        flow.control = self$flow.control,
+        method = method,
+        af.spectra = af_s,
+        spectra.variants = var_s,
+        speed = speed,
+        output.dir = dossier_sortie, 
+        parallel = TRUE
+      )
     },
     
-    verifier_qualite_unmix = function(fluorophore, single_stained_fcs, unstained_fcs, cytometer = "aurora", gate = TRUE) { # Méthode de contrôle qualité évaluant la justesse du démixage d'un fluorophore en comparant le profil observé au spectre de référence
-      dossier_gates <- file.path(self$dossier_racine, "figure_gate") # Spécifie le chemin d'accès pour le stockage des graphiques de gating liés au contrôle qualité
-      if (!dir.exists(dossier_gates)) dir.create(dossier_gates, recursive = TRUE) # Crée automatiquement le dossier des fenêtres de sélection s'il est physiquement absent du disque
-      if (is.null(self$spectra)) { # Vérifie si la matrice contenant les spectres de référence des fluorophores n'a pas été initialisée
-        stop("Erreur : Les spectres n'ont pas été extraits. Lancez extraire_fluorophore_spectre() d'abord.") # Interrompt le traitement pour exiger le calcul préalable des profils spectraux purs
-      } 
+    verifier_qualite_unmix = function(fluorophore, single_stained_fcs, unstained_fcs, cytometer = "aurora", gate = TRUE) {
+      dossier_gates <- file.path(self$dossier_racine, "figure_gate")
+      if (!dir.exists(dossier_gates)) dir.create(dossier_gates, recursive = TRUE)
+      if (is.null(self$spectra)) {
+        stop("Erreur : Les spectres n'ont pas été extraits. Lancez extraire_fluorophore_spectre() d'abord.")
+      }
       
-      if (!any(rownames(self$spectra) == fluorophore)) { # Sécurité stricte sans %in% : valide la présence du fluorophore cible parmi les lignes de la matrice spectrale
-        stop("Erreur : Fluorophore introuvable dans les spectres.") # Bloque l'exécution si le nom du colorant spécifié est inexistant ou mal orthographié
-      } 
+      if (!fluorophore %in% rownames(self$spectra)) {
+        stop("Erreur : Fluorophore introuvable dans les spectres.")
+      }
       
-      dossier_figures <- path.expand(file.path(self$dossier_racine, "figure_compare_unmix")) # Définit le chemin absolu du dossier de destination pour les graphiques de diagnostic du démixage
-      if (!dir.exists(dossier_figures)) dir.create(dossier_figures, recursive = TRUE) # Crée le sous-dossier d'export des images de contrôle qualité s'il n'existe pas encore
-      spectre_cible <- self$spectra[fluorophore, ] # Extrait le vecteur d'intensités lumineuses propre au fluorophore étudié à travers tous les canaux physiques
+      dossier_figures <- path.expand(file.path(self$dossier_racine, "figure_compare_unmix"))
+      if (!dir.exists(dossier_figures)) dir.create(dossier_figures, recursive = TRUE)
+      spectre_cible <- self$spectra[fluorophore, ]
       
-      qc_result <- AutoSpectral::compare.unmix( # Déclenche l'algorithme comparatif d'AutoSpectral pour mesurer les résidus et les erreurs de démixage
-        single.stained.fcs = path.expand(single_stained_fcs), # Fournit le chemin absolu du fichier FCS témoin monomarqué (Positif) pour ce fluorophore
-        unstained.fcs      = path.expand(unstained_fcs), # Fournit le chemin absolu du fichier FCS témoin non marqué (Négatif/Autoflo) de référence
-        fluorophore        = fluorophore, # Transmet le nom du marqueur fluorescent à auditer
-        spectra            = self$spectra, # Injecte la matrice complète des signatures spectrales de référence du panel
-        ref.spectrum       = spectre_cible, # Fournit le profil théorique de référence pour l'évaluation des déviations
-        test.spectrum      = spectre_cible, # Fournit le profil expérimental à tester pour le calcul des coefficients de corrélation
-        cytometer          = cytometer, # Spécifie le modèle technique de cytomètre configuré pour adapter les calculs d'indices
-        gate               = gate, # Active ou désactive le gating automatique sur la population cellulaire d'intérêt avant l'évaluation
-        plot.dir           = dossier_figures # Indique le répertoire cible où enregistrer les graphiques comparatifs de distribution et d'erreur
-      ) 
+      qc_result <- AutoSpectral::compare.unmix(
+        single.stained.fcs = path.expand(single_stained_fcs),
+        unstained.fcs      = path.expand(unstained_fcs),
+        fluorophore        = fluorophore,
+        spectra            = self$spectra,
+        ref.spectrum       = spectre_cible,
+        test.spectrum      = spectre_cible,
+        cytometer          = cytometer,
+        gate               = gate, 
+        plot.dir           = dossier_figures
+      )
       
-      return(invisible(qc_result)) # Renvoie discrètement l'objet contenant les métriques d'erreur et de qualité sans saturer la console R
+      return(invisible(qc_result))
     },
     
     # exportation
     
-    charger_fcs_unmixes = function(dossier = "AutoSpectral_unmixed") { # Méthode important en mémoire les fichiers FCS démixés (unmixed) afin de les rendre disponibles pour l'analyse en aval
-      chemin_complet <- file.path(self$dossier_racine, dossier) # Construit le chemin absolu standardisé vers le répertoire contenant les fichiers démixés
-      if(!dir.exists(chemin_complet)) stop("Dossier introuvable : ", chemin_complet) # interrompt le script si le dossier spécifié est inexistant sur le disque
-      fichiers <- list.files(chemin_complet, pattern = "\\.fcs$", full.names = TRUE, ignore.case = TRUE) # Scanne le répertoire pour lister tous les fichiers ayant l'extension standard .fcs (insensible à la casse)
-      for (f in fichiers) { # Boucle itérative pour charger individuellement chaque fichier de la liste
-        nom_cle <- basename(f) # Extrait uniquement le nom du fichier avec son extension pour servir de clé d'identification
-        self$echantillons_traites[[nom_cle]] <- flowCore::read.FCS(f, truncate_max_range = FALSE) # Lit et convertit le fichier binaire bivarié en objet flowFrame, sans tronquer les valeurs hors limites (conservation du signal pur)
-      } 
-      message("Chargement terminé : ", length(fichiers), " échantillons importés depuis ", dossier) # Affiche un bilan chiffré du succès de l'importation dans la console R
-    }, 
-    
-    get_chemins_figures = function(control_name) { # Méthode récupérant le chemin d'accès local des graphiques PNG de contrôle qualité générés pour le gating d'un témoin
-      dossier <- file.path(self$dossier_racine, "figure_gate") # Construit le chemin absolu vers le répertoire de stockage des images de fenêtrage
-      if (!dir.exists(dossier)) return(NULL) # Sécurité : retourne immédiatement NULL si le dossier des figures n'a pas encore été créé
-      list.files(dossier, pattern=paste0(control_name, ".*\\.png$"), full.names=TRUE) # Recherche et renvoie le chemin complet de toutes les images PNG dont le nom commence par le témoin spécifié
+    charger_fcs_unmixes = function(dossier = "AutoSpectral_unmixed") {
+      chemin_complet <- file.path(self$dossier_racine, dossier)
+      if(!dir.exists(chemin_complet)) stop("Dossier introuvable : ", chemin_complet)
+      
+      fichiers <- list.files(chemin_complet, pattern = "\\.fcs$", full.names = TRUE, ignore.case = TRUE)
+      
+      for (f in fichiers) {
+        nom_cle <- basename(f)
+        self$echantillons_traites[[nom_cle]] <- flowCore::read.FCS(f, truncate_max_range = FALSE)
+      }
+      message("Chargement terminé : ", length(fichiers), " échantillons importés depuis ", dossier)
     },
     
-    visualiser_unmixing = function(nom_fichier_fcs, canal_x, canal_y, cofacteur = 150, max_points = 10000) { # Méthode générant un biplot de densité pour inspecter la qualité du démixage spectral entre deux fluorophores déconvolués
-      fcs_unmixed <- self$echantillons_traites[[nom_fichier_fcs]] # Extrait le fichier FCS démixé (unmixed) de la mémoire de l'objet R6
-      if (is.null(fcs_unmixed)) stop("Fichier introuvable en mémoire.") # Sécurité : interrompt l'exécution si l'échantillon ciblé n'a pas été chargé ou traité
-      trans_list <- flowCore::transformList(c(canal_x, canal_y), flowCore::arcsinhTransform(a = 0, b = 1/cofacteur, c = 0)) # Construit dynamiquement l'opérateur de transformation mathématique Arcsinh adapté au cofacteur choisi pour les deux canaux cibles
-      mat <- flowCore::exprs(flowCore::transform(fcs_unmixed, trans_list))[, c(canal_x, canal_y)] # Applique la transformation Arcsinh et isole la matrice des intensités pour le couple de marqueurs spécifié
-      if (!is.null(self$seed)) set.seed(self$seed)
-      indices <- sample(seq_len(nrow(mat)), min(nrow(mat), max_points)) # Tire au sort de manière aléatoire un sous-échantillon d'événements pour fluidifier le rendu graphique
-      df <- as.data.frame(mat[indices, ]) # Convertit la matrice filtrée en tableau de données R standard exploitable par ggplot2
-      colnames(df) <- c("Axe_X", "Axe_Y") # Uniformise le nom des colonnes pour faciliter l'affectation des variables esthétiques
-      
-      graphique_unmixing <- ggplot(df, aes(x = Axe_X, y = Axe_Y)) + # Initialise la figure graphique biplot
-        ggpointdensity::geom_pointdensity(size = 0.2, alpha = 0.5) + # Dessine un nuage de points dont la couleur dépend de la densité locale de cellules (évite l'effet de saturation visuelle)
-        scale_color_gradientn( # Configure la palette colorimétrique pour exprimer le gradient de concentration cellulaire
-          colours = PALETTE_DENSITE, # Applique un dégradé pseudo-spectral standard allant du bleu (faible densité) au rouge (forte densité)
-          name = "Densité" # Définit le titre affiché au-dessus de la légende de l'échelle colorimétrique
-        ) + 
-        theme_bw() + # Applique un arrière-plan blanc épuré avec une grille de lecture grise discrète
-        labs( # Configure les textes informatifs entourant la figure
-          title = paste("Résultat après Unmixing :", nom_fichier_fcs), # Génère un titre dynamique identifiant précisément le fichier FCS traité
-          x = self$get_label(fcs_unmixed, canal_x), # Extrait et affiche le libellé biologique complet du paramètre X (ex: "CD4") via la méthode get_label
-          y = self$get_label(fcs_unmixed, canal_y) # Extrait et affiche le libellé biologique complet du paramètre Y (ex: "CD8") via la méthode get_label
-        ) 
-      
-      return(graphique_unmixing) # Renvoie l'objet graphique ggplot2 complet, prêt pour affichage immédiat ou intégration dans une interface UI Shiny
+    
+    get_chemins_figures = function(control_name) {
+      dossier <- file.path(self$dossier_racine, "figure_gate")
+      if (!dir.exists(dossier)) return(NULL)
+      list.files(dossier, pattern=paste0(control_name, ".*\\.png$"), full.names=TRUE)
     },
     
-    visualiser_figures = function(dossier_nom) { # Méthode compilant et affichant dynamiquement les images de diagnostic (PNG/JPEG) d'un dossier dans le volet de visualisation d'RStudio
-      chemin_dossier <- file.path(self$dossier_racine, dossier_nom) # Construit le chemin absolu standardisé vers le sous-répertoire d'images cible (ex: "figure_gate")
-      fichiers <- list.files(chemin_dossier, pattern="\\.(jpg|jpeg|png)$", full.names=TRUE, ignore.case=TRUE) # Scanne le dossier pour lister tous les fichiers d'images matricielles acceptés (insensible à la casse)
-      if (length(fichiers) == 0) return(message("Aucune image.")) # interrompt le processus et informe l'utilisateur si le répertoire ne contient aucune figure à afficher
+    visualiser_unmixing = function(nom_fichier_fcs, canal_x, canal_y, cofacteur = 150, max_points = 10000) {
+      fcs_unmixed <- self$echantillons_traites[[nom_fichier_fcs]]
+      if (is.null(fcs_unmixed)) stop("Fichier introuvable en mémoire.")
+      trans_list <- flowCore::transformList(c(canal_x, canal_y), flowCore::arcsinhTransform(a = 0, b = 1/cofacteur, c = 0))
+      mat <- flowCore::exprs(flowCore::transform(fcs_unmixed, trans_list))[, c(canal_x, canal_y)]
+      indices <- sample(seq_len(nrow(mat)), min(nrow(mat), max_points))
+      df <- as.data.frame(mat[indices, ])
+      colnames(df) <- c("Axe_X", "Axe_Y")
       
-      html_elements <- sapply(fichiers, function(f) { # Boucle vectorisée pour convertir chaque fichier image physique en un conteneur d'affichage HTML autonome
-        mime <- ifelse(grepl("\\.(jpg|jpeg)", f, ignore.case=TRUE), "image/jpeg", "image/png") # Détecte dynamiquement le type MIME approprié (JPEG ou PNG) selon l'extension du fichier graphique
-        paste0("<div><h3>", basename(f), "</h3><img src='", base64enc::dataURI(file=f, mime=mime), "' style='max-width:100%'></div>") # Encode l'image binaire en chaîne de caractères Base64 (Data URI) et l'intègre dans une balise HTML réactive
+      ggplot(df, aes(x = Axe_X, y = Axe_Y)) +
+        ggpointdensity::geom_pointdensity(size = 0.2, alpha = 0.5) +
+        scale_color_gradientn(
+          colours = c("darkblue", "blue", "cyan", "greenyellow", "yellow", "darkorange", "red"),
+          name = "Densité"
+        ) +
+        theme_bw() + 
+        labs(
+          title = paste("Résultat après Unmixing :", nom_fichier_fcs), 
+          x = self$get_label(fcs_unmixed, canal_x), 
+          y = self$get_label(fcs_unmixed, canal_y)
+        )
+    },
+    
+    visualiser_figures = function(dossier_nom) {
+      chemin_dossier <- file.path(self$dossier_racine, dossier_nom)
+      fichiers <- list.files(chemin_dossier, pattern="\\.(jpg|jpeg|png)$", full.names=TRUE, ignore.case=TRUE)
+      if (length(fichiers) == 0) return(message("Aucune image."))
+      
+      html_elements <- sapply(fichiers, function(f) {
+        mime <- ifelse(grepl("\\.(jpg|jpeg)", f, ignore.case=TRUE), "image/jpeg", "image/png")
+        paste0("<div><h3>", basename(f), "</h3><img src='", base64enc::dataURI(file=f, mime=mime), "' style='max-width:100%'></div>")
       })
       
-      temp_html <- tempfile(fileext=".html") # Génère un chemin de fichier unique et sécurisé au sein du répertoire temporaire du système d'exploitation avec l'extension .html
-      writeLines(c("<html><body>", html_elements, "</body></html>"), temp_html) # Assemble la structure du document HTML complet et écrit le fichier de manière synchrone sur le disque dur
-      rstudioapi::viewer(temp_html) # Envoie le fichier HTML produit à l'API d'RStudio pour injecter et afficher instantanément la galerie d'images dans l'onglet "Viewer"
+      temp_html <- tempfile(fileext=".html")
+      writeLines(c("<html><body>", html_elements, "</body></html>"), temp_html)
+      rstudioapi::viewer(temp_html)
     }, 
+    
     
     # ============================================================
     #       ️ SECTION PRÉ-TRAITEMENT
@@ -2118,59 +2080,45 @@ CARROT <- R6Class(
       lim_y_globale <- c(0, max(donnees_globales[[canal_y]], na.rm = TRUE))
       
       # ───────────────────────────────────────────────
-      # 3. Densité haute résolution (pixels plus petits)
+      # 3. Densité (binning raster rapide, pixels petits, sans lissage pour
+      #    bien distinguer les zones) — même helper que pour les débris/doublets/
+      #    viabilité, afin de garder un rendu uniforme dans toute l'application.
       # ───────────────────────────────────────────────
-      resolution <- 800   # 400 = standard, 800 = fin, 1200 = ultra-fin
-      
-      x_breaks <- seq(lim_x_globale[1], lim_x_globale[2], length.out = resolution + 1)
-      y_breaks <- seq(lim_y_globale[1], lim_y_globale[2], length.out = resolution + 1)
-      
-      df_binned <- donnees_globales |>
-        dplyr::mutate(
-          x_bin = cut(.data[[canal_x]], breaks = x_breaks, include.lowest = TRUE),
-          y_bin = cut(.data[[canal_y]], breaks = y_breaks, include.lowest = TRUE)
-        ) |>
-        dplyr::count(x_bin, y_bin, name = "densite") |>
-        tidyr::drop_na()
-      
-      # centres des bins
-      x_centers <- (head(x_breaks, -1) + tail(x_breaks, -1)) / 2
-      y_centers <- (head(y_breaks, -1) + tail(y_breaks, -1)) / 2
-      
-      df_binned <- df_binned |>
-        dplyr::mutate(
-          X = x_centers[as.integer(x_bin)],
-          Y = y_centers[as.integer(y_bin)]
-        )
+      df_densite <- calculer_densite_raster(donnees_globales[[canal_x]], donnees_globales[[canal_y]], lim_x_globale, lim_y_globale)
       
       # ───────────────────────────────────────────────
-      # 4. Construction du graphique (geom_tile)
+      # 4. Construction du graphique (geom_raster)
       # ───────────────────────────────────────────────
-      graphique_debris <- ggplot2::ggplot(df_binned, ggplot2::aes(x = X, y = Y, fill = densite)) +
-        ggplot2::geom_tile() +   # ← pixels réguliers, plus fins
-        ggplot2::scale_fill_gradientn(colours = PALETTE_DENSITE) +
-        ggplot2::geom_polygon(
-          data = coordonnees_gate,
-          ggplot2::aes(x = x, y = y),
-          fill = NA, color = "black", linewidth = 0.6,
-          inherit.aes = FALSE
-        ) +
-        ggplot2::coord_cartesian(xlim = lim_x_globale, ylim = lim_y_globale) +
-        ggplot2::theme_bw() +
-        ggplot2::theme(
-          legend.position = "none",
-          plot.title = element_text(face = "bold"),
-          plot.subtitle = element_text(color = "darkblue", size = 11)
-        ) +
-        ggplot2::labs(
-          title = paste("Nettoyage des débris :", nom_echantillon),
-          subtitle = paste0(
-            "Événements conservés : ",
-            format(total_evenements_apres, big.mark = " "),
-            " | ", pourcentage_conservation, "%"
-          ),
-          x = lbl_x, y = lbl_y
-        )
+      graphique_debris <- if (is.null(df_densite)) {
+        ggplot2::ggplot() + ggplot2::theme_bw() +
+          ggplot2::labs(title = paste("Nettoyage des débris :", nom_echantillon), subtitle = "Pas assez d'événements pour tracer la densité", x = lbl_x, y = lbl_y)
+      } else {
+        ggplot2::ggplot(df_densite, ggplot2::aes(x = X, y = Y, fill = densite)) +
+          ggplot2::geom_raster() + # pixels réguliers et petits (grille haute résolution), rendu rapide même avec beaucoup d'événements
+          ggplot2::scale_fill_gradientn(colours = PALETTE_DENSITE) +
+          ggplot2::geom_polygon(
+            data = coordonnees_gate,
+            ggplot2::aes(x = x, y = y),
+            fill = NA, color = "black", linewidth = 0.6,
+            inherit.aes = FALSE
+          ) +
+          ggplot2::coord_cartesian(xlim = lim_x_globale, ylim = lim_y_globale) +
+          ggplot2::theme_bw() +
+          ggplot2::theme(
+            legend.position = "none",
+            plot.title = element_text(face = "bold"),
+            plot.subtitle = element_text(color = "darkblue", size = 11)
+          ) +
+          ggplot2::labs(
+            title = paste("Nettoyage des débris :", nom_echantillon),
+            subtitle = paste0(
+              "Événements conservés : ",
+              format(total_evenements_apres, big.mark = " "),
+              " | ", pourcentage_conservation, "%"
+            ),
+            x = lbl_x, y = lbl_y
+          )
+      }
       
       # ───────────────────────────────────────────────
       # 5. Stockage dans l'objet CARROT
@@ -2181,7 +2129,7 @@ CARROT <- R6Class(
       return(graphique_debris)
     },
     
-    visualiser_doublets = function(nom_echantillon, type_analyse = "FSC", max_points = 200000) { # Méthode générant un graphique bidimensionnel de densité (biplot) pour cartographier et valider l'exclusion des agrégats cellulaires (doublets) selon l'axe choisi (FSC ou SSC)
+    visualiser_doublets = function(nom_echantillon, type_analyse = "FSC") { # Méthode générant un graphique bidimensionnel de densité (biplot) pour cartographier et valider l'exclusion des agrégats cellulaires (doublets) selon l'axe choisi (FSC ou SSC)
       infos_gate <- if (type_analyse == "FSC") self$gate_doublets_FSC[[nom_echantillon]] else self$gate_doublets_SSC[[nom_echantillon]] # Extrait les paramètres et métadonnées de la barrière de tri (statistique ou polygonale) correspondant au paramètre spécifié
       if (is.null(infos_gate)) return(NULL) # interrompt proprement la fonction si aucune information de gating n'est localisée pour cet échantillon
       
@@ -2202,13 +2150,9 @@ CARROT <- R6Class(
       donnees_source <- as.data.frame(flowCore::exprs(ff_avant)) # Convertit la matrice des intensités de la source d'entrée en tableau de données exploitable par ggplot2
       
       nb_avant <- nrow(donnees_source) # Dénombre la population totale d'événements cellulaires entrant dans l'étape de discrimination des doublets
-      if (!is.null(max_points) && nb_avant > max_points) { # Si la taille de la population outrepasse la limite maximale définie pour la fluidité du rendu graphique
-        
-        if (!is.null(self$seed)) set.seed(self$seed)
-        donnees_visu <- donnees_source[sample(seq_len(nb_avant), max_points), ] # Génère une sous-matrice par échantillonnage aléatoire uniforme sans remise pour alléger le nuage de points
-      } else { # Si le volume total de cellules initiales est inférieur au seuil critique max_points
-        donnees_visu <- donnees_source # Conserve l'intégralité de la matrice source pour le tracé graphique
-      } 
+      # Densité calculée par binning raster : on garde systématiquement l'intégralité des
+      # événements (pas de sous-échantillonnage), le coût du binning restant indépendant de N.
+      donnees_visu <- donnees_source
       
       canal_x <- infos_gate$channels[1] # Extrait le nom technique du canal affecté à l'axe des abscisses (généralement le paramètre de Hauteur ou Largeur)
       canal_y <- infos_gate$channels[2] # Extrait le nom technique du canal affecté à l'axe des ordonnées (généralement le paramètre d'Aire)
@@ -2329,7 +2273,7 @@ CARROT <- R6Class(
       self$update_pipeline("viabilite", nom_echantillon)
     },
     
-    visualiser_viabilite = function(nom_echantillon, max_points = 200000) {
+    visualiser_viabilite = function(nom_echantillon) {
       
       if (is.null(self$post_viabilite[[nom_echantillon]])) {
         message("Pas de données Viabilité pour ", nom_echantillon)
@@ -2353,13 +2297,9 @@ CARROT <- R6Class(
       donnees_globales <- as.data.frame(flowCore::exprs(flowframe_avant))
       
       total_evenements_avant <- nrow(donnees_globales)
-      if (!is.null(max_points) && total_evenements_avant > max_points) {
-        if (!is.null(self$seed)) set.seed(self$seed)
-        indices_gardes <- sample(seq_len(total_evenements_avant), max_points)
-        donnees_visu <- donnees_globales[indices_gardes, ]
-      } else {
-        donnees_visu <- donnees_globales
-      }
+      # Densité calculée par binning raster : on garde systématiquement l'intégralité des
+      # événements (pas de sous-échantillonnage), le coût du binning restant indépendant de N.
+      donnees_visu <- donnees_globales
       
       gate_polygone <- self$gate_viabilite[[nom_echantillon]]
       
