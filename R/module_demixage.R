@@ -25,50 +25,51 @@ demixage_ui <- function(id) {
       tabPanel(
         title = tagList(icon("folder-open"), " Paramètres"),
         
+        # ── Bulle 1 : Dossiers, pleine largeur ─────────────────────────────
         fluidRow(
           column(
-            width = 4,
-            wellPanel(
-              h4(tagList(icon("folder-open"), " Dossiers"), style = "margin-top:0; color:#605ca8;"),
-              
-              h5("Dossier racine (sorties AutoSpectral)"),
-              shinyDirButton(ns("dir_root"), "Parcourir…", "Sélectionner le dossier racine",
-                             icon = icon("folder-open"), class = "btn-primary", style = "width:100%;"),
-              br(), uiOutput(ns("root_display")),
-              
-              hr(),
-              
-              h5("Dossier des contrôles monomarqués / unstained"),
-              shinyDirButton(ns("dir_monomarques"), "Parcourir…", "Sélectionner le dossier des contrôles",
-                             icon = icon("folder-open"), class = "btn-primary", style = "width:100%;"),
-              br(), uiOutput(ns("monomarques_display")),
-              uiOutput(ns("unstained_picker")),
-              
-              hr(),
-              
-              h5("Dossier des échantillons biologiques"),
-              shinyDirButton(ns("dir_echantillons"), "Parcourir…", "Sélectionner le dossier des échantillons",
-                             icon = icon("folder-open"), class = "btn-primary", style = "width:100%;"),
-              br(), uiOutput(ns("echantillons_display")),
-              
-              hr(),
-              
-              h5(tagList(icon("microscope"), " Type de cytomètre spectral")),
-              selectInput(ns("type_cytometre"), NULL,
-                          choices = c("aurora", "a8", "s8", "a5se", "id7000", "mosaic", "opteon", "xenith", "minimal", "auroraNL"),
-                          selected = "aurora"),
-              
-              actionButton(ns("btn_lancer_asp"), tagList(icon("play"), " Lancer lancer_asp()"),
-                           class = "btn-success", style = "width:100%; font-weight:bold;")
-            )
-          ),
-          column(
-            width = 8,
-            box(title = tagList(icon("info-circle"), " Statut"), width = NULL, status = "info", solidHeader = TRUE,
-                uiOutput(ns("asp_status")))
+            width = 12,
+            box(title = tagList(icon("folder-open"), " Dossiers"), width = NULL, status = "primary", solidHeader = TRUE,
+                fluidRow(
+                  column(4,
+                         h5("Dossier racine (sorties AutoSpectral)", style = "margin-top:0;"),
+                         shinyDirButton(ns("dir_root"), "Parcourir…", "Sélectionner le dossier racine",
+                                        icon = icon("folder-open"), class = "btn-primary", style = "width:100%;"),
+                         br(), uiOutput(ns("root_display"))
+                  ),
+                  column(4,
+                         h5("Contrôles monomarqués / unstained", style = "margin-top:0;"),
+                         shinyDirButton(ns("dir_monomarques"), "Parcourir…", "Sélectionner le dossier des contrôles",
+                                        icon = icon("folder-open"), class = "btn-primary", style = "width:100%;"),
+                         br(), uiOutput(ns("monomarques_display")),
+                         uiOutput(ns("unstained_picker"))
+                  ),
+                  column(4,
+                         h5("Échantillons biologiques", style = "margin-top:0;"),
+                         shinyDirButton(ns("dir_echantillons"), "Parcourir…", "Sélectionner le dossier des échantillons",
+                                        icon = icon("folder-open"), class = "btn-primary", style = "width:100%;"),
+                         br(), uiOutput(ns("echantillons_display"))
+                  )
+                ),
+                hr(),
+                fluidRow(
+                  column(4,
+                         h5(tagList(icon("microscope"), " Type de cytomètre spectral")),
+                         selectInput(ns("type_cytometre"), NULL,
+                                     choices = c("aurora", "a8", "s8", "a5se", "id7000", "mosaic", "opteon", "xenith", "minimal", "auroraNL"),
+                                     selected = "aurora")
+                  ),
+                  column(4,
+                         br(),
+                         actionButton(ns("btn_lancer_asp"), tagList(icon("play"), " Lancer lancer_asp()"),
+                                      class = "btn-success", style = "width:100%; font-weight:bold; margin-top:5px;")
+                  ),
+                  column(4, uiOutput(ns("asp_status")))
+                ))
           )
         ),
         
+        # ── Bulle 2 : Aperçu, sur toute la largeur de la page ──────────────
         fluidRow(
           column(
             width = 12,
@@ -98,7 +99,7 @@ demixage_ui <- function(id) {
                 p("Astuce : cliquez sur une ou plusieurs lignes du tableau (Ctrl/Cmd + clic pour une sélection multiple) avant de les supprimer.",
                   style = "font-size:11px; color:#999;"),
                 br(),
-                DTOutput(ns("csv_preview")),
+                div(style = "width:100%; overflow-x:auto;", DTOutput(ns("csv_preview"))),
                 br(),
                 uiOutput(ns("csv_save_status")))
           )
@@ -166,42 +167,18 @@ demixage_ui <- function(id) {
               
               actionButton(ns("btn_definir_gate"), tagList(icon("play"), " Créer la gate"),
                            class = "btn-success", style = "width:100%; font-weight:bold;"),
+              br(), br(), uiOutput(ns("gate_status")),
               
               hr(),
               h4(tagList(icon("broom"), " Nettoyage des contrôles"), style = "color:#605ca8;"),
               p("Appelle charger_et_nettoyer() une fois toutes les gates nécessaires définies.", style = "font-size:12px; color:#666;"),
               actionButton(ns("btn_charger_nettoyer"), tagList(icon("play"), " Lancer charger_et_nettoyer()"),
                            class = "btn-primary", style = "width:100%; font-weight:bold;"),
-              
-              hr(),
-              h4(tagList(icon("trash-can"), " Réinitialisation des gates"), style = "color:#c9302c;"),
-              
-              h5(tagList(icon("list-check"), " Suppression sélective")),
-              p("Coche une ou plusieurs gates ci-dessous puis supprime uniquement celles-ci (les autres restent intactes).",
-                style = "font-size:12px; color:#666;"),
-              uiOutput(ns("gates_liste_ui")),
-              actionButton(ns("btn_supprimer_gates_selection"), tagList(icon("trash"), " Supprimer la/les gate(s) cochée(s)"),
-                           class = "btn-danger", style = "width:100%;"),
-              br(), br(), uiOutput(ns("suppr_gates_status")),
-              
-              hr(),
-              h5(tagList(icon("triangle-exclamation"), " Réinitialisation complète")),
-              p("Supprime les figures de gating générées et/ou vide entièrement la liste des gates enregistrées dans le pipeline.",
-                style = "font-size:12px; color:#666;"),
-              checkboxGroupInput(ns("reset_dossiers"), "Dossiers de figures à supprimer",
-                                 choices = c("figure_gate" = "figure_gate",
-                                             "figure_gate_tuning" = "figure_gate_tuning"),
-                                 selected = c("figure_gate", "figure_gate_tuning")),
-              checkboxInput(ns("reset_vider_gates"), "Vider aussi la liste complète des gates (self$gates)", value = TRUE),
-              actionButton(ns("btn_reset_gates"), tagList(icon("trash-can"), " Tout réinitialiser"),
-                           class = "btn-danger", style = "width:100%; font-weight:bold;"),
-              br(), br(), uiOutput(ns("reset_gates_status"))
+              br(), br(), uiOutput(ns("nettoyage_status"))
             )
           ),
           column(
             width = 8,
-            box(title = tagList(icon("info-circle"), " Statut"), width = NULL, status = "info", solidHeader = TRUE,
-                uiOutput(ns("gate_status")), uiOutput(ns("nettoyage_status"))),
             box(title = tagList(icon("image"), " Aperçu des figures de gating"), width = NULL, status = "primary", solidHeader = TRUE,
                 fluidRow(
                   column(6, selectInput(ns("gate_figure_dossier"), "Dossier",
@@ -210,7 +187,35 @@ demixage_ui <- function(id) {
                 ),
                 actionButton(ns("btn_rafraichir_figures"), tagList(icon("rotate"), " Rafraîchir la liste"), class = "btn-default"),
                 br(), br(),
-                uiOutput(ns("gate_figure_zone")))
+                uiOutput(ns("gate_figure_zone")),
+                
+                hr(),
+                h4(tagList(icon("trash-can"), " Réinitialisation des gates"), style = "color:#c9302c;"),
+                
+                fluidRow(
+                  column(6,
+                         h5(tagList(icon("list-check"), " Suppression sélective")),
+                         p("Coche une ou plusieurs gates ci-dessous puis supprime uniquement celles-ci (les autres restent intactes).",
+                           style = "font-size:12px; color:#666;"),
+                         uiOutput(ns("gates_liste_ui")),
+                         actionButton(ns("btn_supprimer_gates_selection"), tagList(icon("trash"), " Supprimer la/les gate(s) cochée(s)"),
+                                      class = "btn-danger", style = "width:100%;"),
+                         br(), br(), uiOutput(ns("suppr_gates_status"))
+                  ),
+                  column(6,
+                         h5(tagList(icon("triangle-exclamation"), " Réinitialisation complète")),
+                         p("Supprime les figures de gating générées et/ou vide entièrement la liste des gates enregistrées dans le pipeline.",
+                           style = "font-size:12px; color:#666;"),
+                         checkboxGroupInput(ns("reset_dossiers"), "Dossiers de figures à supprimer",
+                                            choices = c("figure_gate" = "figure_gate",
+                                                        "figure_gate_tuning" = "figure_gate_tuning"),
+                                            selected = c("figure_gate", "figure_gate_tuning")),
+                         checkboxInput(ns("reset_vider_gates"), "Vider aussi la liste complète des gates (self$gates)", value = TRUE),
+                         actionButton(ns("btn_reset_gates"), tagList(icon("trash-can"), " Tout réinitialiser"),
+                                      class = "btn-danger", style = "width:100%; font-weight:bold;"),
+                         br(), br(), uiOutput(ns("reset_gates_status"))
+                  )
+                ))
           )
         )
       ),
@@ -258,11 +263,7 @@ demixage_ui <- function(id) {
                 ),
                 actionButton(ns("btn_rafraichir_figures_spectra"), tagList(icon("rotate"), " Rafraîchir la liste"), class = "btn-default"),
                 br(), br(),
-                uiOutput(ns("spectra_figure_zone"))),
-            box(title = tagList(icon("info-circle"), " Information"), width = NULL, status = "info", solidHeader = TRUE,
-                p("extraire_fluorophore_spectre() nécessite que charger_et_nettoyer() ait déjà été exécuté (self$flow.control doit être défini)."),
-                p("extraire_spectre_af() nécessite que les spectres de fluorophores aient déjà été extraits."),
-                p("preparer_variants_spectraux() nécessite les spectres ET l'autofluorescence du tissu concerné."))
+                uiOutput(ns("spectra_figure_zone")))
           )
         )
       ),
@@ -604,7 +605,9 @@ demixage_server <- function(id, pipeline, pipeline_version) {
         editable = TRUE,
         rownames = FALSE,
         selection = "multiple",
-        options = list(pageLength = 15, scrollX = TRUE)
+        width = "100%",
+        options = list(pageLength = 15, scrollX = TRUE, autoWidth = FALSE,
+                       columnDefs = list(list(width = "auto", targets = "_all")))
       )
     })
     

@@ -11,18 +11,15 @@ import_data_ui <- function(id) {
                column(4,
                       box(width = 12, status = "primary", solidHeader = TRUE,
                           title = "Console d'Importation",
-                          h4("1. Chargement des fichiers"),
+                          h4("1. Choix du Cytomètre"),
+                          selectInput(ns("cyto_type"), "Technologie :", choices = c("Conventionnel", "Spectral")),
+                          radioButtons(ns("deja_compense"), "Données déjà compensées/démixées ?",
+                                       choices = c("Non" = "non", "Oui" = "oui"), inline = TRUE),
+                          hr(),
+                          h4("2. Chargement des fichiers"),
                           fileInput(ns("files_controls"), "Tubes Monomarqués / Unstained (optionnel)", multiple = TRUE, accept = ".fcs"),
                           fileInput(ns("files_samples"),  "Échantillons Biologiques", multiple = TRUE, accept = ".fcs"),
-                          div(style = "color:gray; font-size:12px; margin-top:-8px;",
-                              icon("info-circle"),
-                              " Si vos échantillons sont déjà compensés (conventionnel) ou déjà unmixés (spectral), ",
-                              "vous pouvez ne charger que les échantillons et passer directement aux étapes suivantes."),
-                          hr(),
-                          h4("2. Choix du Cytomètre"),
-                          selectInput(ns("cyto_type"), "Technologie :", choices = c("Conventionnel", "Spectral")),
-                          radioButtons(ns("deja_compense"), "Données déjà compensées ?",
-                                       choices = c("Non" = "non", "Oui" = "oui"), inline = TRUE),
+                          uiOutput(ns("aide_controles_ui")),
                           hr(),
                           actionButton(ns("init_r6"), "Initialiser l'objet",
                                        class = "btn-success",
@@ -89,6 +86,27 @@ import_data_server <- function(id, pipeline, pipeline_version,canaux) {
       groupes              = list()
     )
     
+    # ── Texte d'aide contextuel (dépend du type de cytomètre et de la réponse
+    # "déjà compensées/démixées ?"), affiché sous les fileInput ────────────
+    output$aide_controles_ui <- renderUI({
+      if (identical(input$deja_compense, "oui")) {
+        div(style = "color:gray; font-size:12px; margin-top:-8px;",
+            icon("info-circle"),
+            " Vos échantillons sont déclarés déjà compensés (conventionnel) ou déjà démixés (spectral) : ",
+            "vous pouvez ne charger que les échantillons ci-dessus et passer directement aux étapes de prétraitement.")
+      } else if (identical(input$cyto_type, "Spectral")) {
+        div(style = "color:gray; font-size:12px; margin-top:-8px;",
+            icon("info-circle"),
+            " En spectral, il n'est pas nécessaire d'indiquer de canal pour les tubes contrôles : ",
+            "le fichier de contrôle AutoSpectral (fluorophores/marqueurs) sera configuré dans l'onglet Démixage.")
+      } else {
+        div(style = "color:gray; font-size:12px; margin-top:-8px;",
+            icon("info-circle"),
+            " Si vos échantillons sont déjà compensés, vous pouvez ne charger que les échantillons ",
+            "et passer directement aux étapes suivantes.")
+      }
+    })
+    
     observeEvent(input$files_controls, {
       f <- input$files_controls
       noms_proposes <- gsub("\\.fcs$", "", f$name, ignore.case = TRUE)
@@ -107,19 +125,6 @@ import_data_server <- function(id, pipeline, pipeline_version,canaux) {
       df <- rv$r_df_mono
       CANAUX <- rv$r_dictionnaire
       
-      sel_canal <- sapply(seq_len(nrow(df)), function(i) {
-        v <- df$canal[i]
-        datalist_id <- session$ns(paste0("dl_canal_", i))
-        input_id    <- session$ns(paste0("txt_canal_", i))
-        datalist_opts <- paste0(sapply(CANAUX[nchar(CANAUX) > 0], function(o) sprintf('<option value="%s">', o)), collapse = "")
-        
-        # Modification : on remplace oninput par onchange
-        paste0('<div style="display:flex;gap:4px;">',
-               sprintf('<input type="text" class="dt-datalist-input" list="%s" id="%s" value="%s" placeholder="Choisir le canal" style="flex:1;" onchange=\'Shiny.setInputValue("%s",{row:%d,val:this.value},{priority:"event"})\'>',
-                       datalist_id, input_id, v, session$ns("change_table_canal"), i),
-               sprintf('<datalist id="%s">%s</datalist>', datalist_id, datalist_opts), '</div>')
-      })
-      
       sel_type <- sapply(seq_len(nrow(df)), function(i) {
         opt_m <- if (df$type[i] == "Monomarque") " selected" else ""
         opt_u <- if (df$type[i] == "Unstained")  " selected" else ""
@@ -129,11 +134,39 @@ import_data_server <- function(id, pipeline, pipeline_version,canaux) {
                 session$ns("change_table_type"), i, opt_m, opt_u)
       })
       
-      datatable(data.frame(Fichier = df$fichier, Canal = sel_canal, Type = sel_type, stringsAsFactors = FALSE),
-                escape = FALSE, rownames = FALSE, selection = "none",
-                options = list(dom = "t", paging = FALSE, ordering = FALSE,
-                               preDrawCallback = JS("function(){Shiny.unbindAll(this.api().table().node());}"),
-                               drawCallback    = JS("function(){Shiny.bindAll(this.api().table().node());}")))
+      # ── Cytomètre Conventionnel : le canal d'acquisition doit être renseigné
+      # manuellement pour chaque tube monomarqué (utilisé ensuite pour la
+      # compensation par gates positifs/négatifs, cf. pipeline_cytometrie.R).
+      # ── Cytomètre Spectral : le canal n'est pas requis à cette étape. Le
+      # rattachement fluorophore/marqueur est configuré séparément dans
+      # l'onglet Démixage (fichier de contrôle AutoSpectral), donc on
+      # n'affiche que le nom du fichier et le type (Monomarque/Unstained).
+      if (identical(input$cyto_type, "Spectral")) {
+        datatable(data.frame(Fichier = df$fichier, Type = sel_type, stringsAsFactors = FALSE),
+                  escape = FALSE, rownames = FALSE, selection = "none",
+                  options = list(dom = "t", paging = FALSE, ordering = FALSE,
+                                 preDrawCallback = JS("function(){Shiny.unbindAll(this.api().table().node());}"),
+                                 drawCallback    = JS("function(){Shiny.bindAll(this.api().table().node());}")))
+      } else {
+        sel_canal <- sapply(seq_len(nrow(df)), function(i) {
+          v <- df$canal[i]
+          datalist_id <- session$ns(paste0("dl_canal_", i))
+          input_id    <- session$ns(paste0("txt_canal_", i))
+          datalist_opts <- paste0(sapply(CANAUX[nchar(CANAUX) > 0], function(o) sprintf('<option value="%s">', o)), collapse = "")
+          
+          # Modification : on remplace oninput par onchange
+          paste0('<div style="display:flex;gap:4px;">',
+                 sprintf('<input type="text" class="dt-datalist-input" list="%s" id="%s" value="%s" placeholder="Choisir le canal" style="flex:1;" onchange=\'Shiny.setInputValue("%s",{row:%d,val:this.value},{priority:"event"})\'>',
+                         datalist_id, input_id, v, session$ns("change_table_canal"), i),
+                 sprintf('<datalist id="%s">%s</datalist>', datalist_id, datalist_opts), '</div>')
+        })
+        
+        datatable(data.frame(Fichier = df$fichier, Canal = sel_canal, Type = sel_type, stringsAsFactors = FALSE),
+                  escape = FALSE, rownames = FALSE, selection = "none",
+                  options = list(dom = "t", paging = FALSE, ordering = FALSE,
+                                 preDrawCallback = JS("function(){Shiny.unbindAll(this.api().table().node());}"),
+                                 drawCallback    = JS("function(){Shiny.bindAll(this.api().table().node());}")))
+      }
     })
     
     observeEvent(input$change_table_canal, {
