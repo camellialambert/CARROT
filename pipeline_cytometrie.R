@@ -2495,6 +2495,87 @@ CARROT <- R6Class(
       
       message("Succès : Gate '", nom_gate, "' créée sur les axes ", paste(axes, collapse="/"), ".")
       return(invisible(self))
+    },
+    
+    # ===========================================
+    # SECTION EXPORT — PRÉTRAITEMENT
+    # ===========================================
+    
+    exporter_fcs_pretraitement = function(noms_echantillons = "all", etapes = c("debris", "doublets", "viabilite"), dossier_export = ".") { # Méthode permettant d'écrire sur le disque les fichiers FCS aux différentes étapes du prétraitement (débris, doublets, cellules mortes), au choix de l'utilisateur
+      etapes <- intersect(etapes, c("debris", "doublets", "viabilite")) # Filtre les étapes demandées pour ne garder que les valeurs reconnues
+      if (length(etapes) == 0) {
+        stop("Aucune étape de prétraitement valide sélectionnée (attendu : 'debris', 'doublets' et/ou 'viabilite').")
+      }
+      
+      liste_sources <- list(debris = self$post_debris, doublets = self$post_doublets_final, viabilite = self$post_viabilite) # Regroupe les trois listes de résultats de prétraitement disponibles pour un accès homogène
+      suffixes      <- list(debris = "_post_debris", doublets = "_post_doublets", viabilite = "_post_viabilite") # Associe à chaque étape le suffixe de nommage utilisé pour distinguer les fichiers exportés
+      
+      noms_disponibles <- unique(unlist(lapply(etapes, function(e) names(liste_sources[[e]])))) # Recense l'ensemble des échantillons disponibles, toutes étapes sélectionnées confondues
+      if (length(noms_disponibles) == 0) {
+        stop("Aucun résultat de prétraitement disponible : exécutez d'abord le retrait des débris, des doublets et/ou des cellules mortes.")
+      }
+      
+      tubes_a_exporter <- if (length(noms_echantillons) == 1 && noms_echantillons == "all") { # Si l'utilisateur souhaite exporter la totalité des échantillons traités
+        noms_disponibles # Sélectionne l'intégralité des échantillons disponibles pour les étapes demandées
+      } else { # Sinon, si une liste restreinte de noms a été fournie par l'utilisateur
+        intersect(noms_echantillons, noms_disponibles) # Identifie par intersection les échantillons demandés qui existent réellement en mémoire
+      }
+      if (length(tubes_a_exporter) == 0) {
+        stop("Aucun des échantillons spécifiés n'a été trouvé dans les résultats de prétraitement.")
+      }
+      
+      if (!dir.exists(dossier_export)) { # Vérifie si le dossier de destination spécifié n'existe pas encore physiquement sur le disque
+        dir.create(dossier_export, recursive = TRUE) # Crée automatiquement l'arborescence des dossiers manquants pour éviter une erreur d'écriture
+      }
+      
+      fichiers_ecrits <- character(0) # Accumule au fil de la boucle les chemins des fichiers FCS effectivement écrits sur le disque
+      
+      for (nom in tubes_a_exporter) { # Boucle de traitement itérative pour chaque échantillon sélectionné
+        for (etape in etapes) { # Boucle interne pour chaque étape de prétraitement demandée (débris, doublets et/ou viabilité)
+          fcs_obj <- liste_sources[[etape]][[nom]] # Extrait l'objet flowFrame nettoyé correspondant à cet échantillon et cette étape
+          if (is.null(fcs_obj)) next # Sécurité : passe au suivant si cet échantillon n'a pas de résultat pour cette étape précise
+          
+          nom_fichier_propre <- paste0(gsub("[^a-zA-Z0-9_]", "_", nom), suffixes[[etape]], ".fcs") # Construit un nom de fichier sûr, distinguant l'étape d'origine du nettoyage
+          chemin_fcs <- file.path(dossier_export, nom_fichier_propre) # Concatène le chemin du dossier et le nom du fichier pour obtenir l'adresse d'écriture finale
+          flowCore::write.FCS(fcs_obj, filename = chemin_fcs) # Enregistre physiquement l'objet flowFrame nettoyé au format binaire FCS standard sur le disque dur
+          fichiers_ecrits <- c(fichiers_ecrits, chemin_fcs) # Ajoute le chemin du fichier fraîchement écrit à la liste de suivi
+        }
+      }
+      
+      message(paste(length(fichiers_ecrits), "fichier(s) FCS post-prétraitement exporté(s) dans :", dossier_export)) # Affiche un message de confirmation récapitulatif dans la console de commande
+      invisible(fichiers_ecrits) # Renvoie de manière invisible la liste des chemins écrits (utile pour zipper ensuite depuis Shiny)
+    },
+    
+    sauvegarder_session_pretraitement_rds = function(nom_fichier = "Pretraitement_Session_Complete.rds") { # Méthode permettant de sauvegarder l'intégralité des paramètres et résultats du prétraitement (bordures, débris, doublets, viabilité) dans un fichier binaire R (.rds)
+      sauvegarde <- list( # Initialise une structure de liste imbriquée pour regrouper de manière organisée tous les éléments à archiver
+        meta = list( # Sous-liste dédiée aux informations générales et de traçabilité de l'expérience
+          date_export  = Sys.time(), # Enregistre l'horodatage exact (date et heure) de la création de la sauvegarde
+          echantillons = names(self$echantillons_traites) # Mémorise la liste des échantillons présents dans la cohorte au moment de l'export
+        ),
+        retrait_bordures = list( # Sous-liste dédiée aux réglages utilisés pour le retrait des événements saturés (Margins)
+          canaux_bordures = self$canaux_bordures # Archive les canaux/détecteurs ciblés lors du retrait des bordures
+        ),
+        debris = list( # Sous-liste dédiée au filtrage des débris
+          gates = self$gate_debris # Archive les polygones de sélection des cellules (hors débris) pour chaque échantillon
+        ),
+        doublets = list( # Sous-liste dédiée au filtrage des doublets
+          gates_FSC = self$gate_doublets_FSC, # Archive les seuils/polygones de discrimination des doublets sur l'axe FSC
+          gates_SSC = self$gate_doublets_SSC # Archive les seuils/polygones de discrimination des doublets sur l'axe SSC
+        ),
+        viabilite = list( # Sous-liste dédiée au retrait des cellules mortes
+          gates           = self$gate_viabilite, # Archive les polygones de sélection des cellules vivantes
+          transformation  = self$cofactor_transformation # Archive le cofacteur Arcsinh utilisé pour la transformation du marqueur de viabilité
+        ),
+        visualisations = list( # Sous-liste dédiée à l'archivage des rendus graphiques produits pour l'assurance qualité
+          plots_debris    = self$plots_debris, # Archive l'historique des figures de densité illustrant le retrait des débris
+          plots_doublets  = self$plots_doublets, # Archive l'historique des figures illustrant le retrait des doublets (FSC et SSC)
+          plots_viabilite = self$plots_viabilite # Archive l'historique des figures illustrant le retrait des cellules mortes
+        )
+      )
+      
+      saveRDS(sauvegarde, file = nom_fichier) # Sérialise et enregistre l'objet liste complet sous forme de fichier binaire compressé (.rds) sur le stockage local
+      message(paste("Session de prétraitement et paramètres sauvegardés avec succès dans :", nom_fichier)) # Génère un message de confirmation explicite au sein de la console R de commande
+      invisible(nom_fichier) # Renvoie de manière invisible le chemin du fichier généré, prêt à être proposé au téléchargement depuis Shiny
     }
     
     

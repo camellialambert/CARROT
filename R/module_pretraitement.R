@@ -367,6 +367,57 @@ pretraitement_ui <- function(id) {
                  )
           )
         )
+      ),
+      
+      # ══════════════════════════════════════════════════════════════════════
+      # ONGLET — EXPORT
+      # ══════════════════════════════════════════════════════════════════════
+      tabPanel(
+        title = tagList(icon("file-export"), " Export"),
+        fluidRow(
+          # --- Colonne de Gauche : Sélection & options ---
+          column(width = 4,
+                 wellPanel(
+                   h4("Export des résultats de prétraitement"),
+                   
+                   div(class = "pretrait-instr",
+                       icon("info-circle"),
+                       " Sélectionnez la ou les étapes de prétraitement à exporter, ainsi que les échantillons souhaités, ",
+                       "puis téléchargez ", tags$b("les fichiers FCS"), " correspondants et/ou ",
+                       tags$b("une session RDS"), " regroupant tous les paramètres utilisés (gates, seuils, canaux)."),
+                   hr(),
+                   
+                   checkboxGroupInput(ns("export_etapes_pretrait"), "Étapes à inclure :",
+                                      choices = c("Post débris"          = "debris",
+                                                  "Post doublets"        = "doublets",
+                                                  "Post cellules mortes" = "viabilite"),
+                                      selected = c("debris", "doublets", "viabilite")),
+                   
+                   uiOutput(ns("ui_select_echantillons_export_pretrait")),
+                   
+                   hr(),
+                   
+                   downloadButton(ns("dl_export_fcs_pretrait"), tagList(icon("file-arrow-down"), " Télécharger les FCS (.zip)"),
+                                  class = "btn-warning", style = "width:100%; font-weight:bold; margin-bottom:15px;"),
+                   
+                   hr(),
+                   
+                   textInput(ns("pretrait_rds_filename"), "Nom du fichier RDS :",
+                             value = "Pretraitement_Session_Complete.rds",
+                             placeholder = "nom_session.rds"),
+                   downloadButton(ns("dl_export_rds_pretrait"), tagList(icon("file-arrow-down"), " Télécharger la session RDS"),
+                                  class = "btn-success", style = "width:100%; font-weight:bold;")
+                 )
+          ),
+          
+          # --- Colonne de Droite : Récapitulatif de ce qui sera exporté ---
+          column(width = 8,
+                 box(title = "Aperçu des données disponibles pour l'export", width = NULL,
+                     status = "warning", solidHeader = TRUE,
+                     uiOutput(ns("ui_recap_export_pretrait"))
+                 )
+          )
+        )
       )
       
     ) # /tabsetPanel
@@ -1675,6 +1726,117 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
       req(input$sel_ech_viabilite)
       rendre_recap(construire_recap(p, input$sel_ech_viabilite), input$sel_ech_viabilite)
     })
+    
+    # ════════════════════════════════════════════════════════════════════════
+    # SECTION EXPORT (FCS post-débris / post-doublets / post-cellules mortes + session RDS)
+    # ════════════════════════════════════════════════════════════════════════
+    
+    # Sélecteur multiple des échantillons disponibles pour l'export (union débris + doublets + viabilité, filtrée par les étapes cochées)
+    output$ui_select_echantillons_export_pretrait <- renderUI({
+      bordures_trigger(); gates_trigger(); doublet_trigger(); viabilite_trigger()
+      p <- carrot_obj()
+      
+      etapes <- input$export_etapes_pretrait %||% c("debris", "doublets", "viabilite")
+      noms_disponibles <- unique(c(
+        if ("debris"    %in% etapes) names(p$post_debris)        else character(0),
+        if ("doublets"  %in% etapes) names(p$post_doublets_final) else character(0),
+        if ("viabilite" %in% etapes) names(p$post_viabilite)      else character(0)
+      ))
+      
+      if (length(noms_disponibles) == 0) {
+        return(div(class = "alert alert-warning", style = "font-size:12px; padding:8px;",
+                   icon("exclamation-triangle"),
+                   " Aucun échantillon disponible pour les étapes sélectionnées."))
+      }
+      
+      selectizeInput(ns("export_echantillons_pretrait"), "Échantillons à exporter :",
+                     choices = noms_disponibles, selected = noms_disponibles,
+                     multiple = TRUE, options = list(plugins = list("remove_button")))
+    })
+    
+    # Tableau récapitulatif de ce qui sera inclus dans l'export
+    output$ui_recap_export_pretrait <- renderUI({
+      bordures_trigger(); gates_trigger(); doublet_trigger(); viabilite_trigger()
+      p <- carrot_obj()
+      
+      noms <- unique(c(names(p$post_debris), names(p$post_doublets_final), names(p$post_viabilite)))
+      if (length(noms) == 0) {
+        return(div(class = "alert alert-warning", style = "font-size:12px; padding:8px;",
+                   icon("exclamation-triangle"),
+                   " Aucun résultat de prétraitement disponible. Exécutez d'abord le retrait des débris, des doublets et/ou des cellules mortes."))
+      }
+      
+      icone_ok   <- icon("circle-check", style = "color:#2e7d32;")
+      icone_vide <- icon("circle-xmark", style = "color:#c62828;")
+      
+      lignes <- lapply(noms, function(nom) {
+        a_debris    <- !is.null(p$post_debris[[nom]])
+        a_doublets  <- !is.null(p$post_doublets_final[[nom]])
+        a_viabilite <- !is.null(p$post_viabilite[[nom]])
+        tags$tr(
+          tags$td(strong(nom)),
+          tags$td(style = "text-align:center;", if (a_debris) icone_ok else icone_vide),
+          tags$td(style = "text-align:center;", if (a_doublets) icone_ok else icone_vide),
+          tags$td(style = "text-align:center;", if (a_viabilite) icone_ok else icone_vide)
+        )
+      })
+      
+      tags$table(class = "table table-condensed", style = "font-size:12px;",
+                 tags$thead(tags$tr(tags$th("Échantillon"), tags$th("Post débris"), tags$th("Post doublets"), tags$th("Post cellules mortes"))),
+                 tags$tbody(lignes)
+      )
+    })
+    
+    # Export ZIP des fichiers FCS de prétraitement (étape(s) au choix de l'utilisateur)
+    output$dl_export_fcs_pretrait <- downloadHandler(
+      filename = function() paste0("Pretraitement_FCS_", format(Sys.Date(), "%Y%m%d"), ".zip"),
+      content = function(file) {
+        p <- carrot_obj()
+        req(length(input$export_etapes_pretrait) > 0, length(input$export_echantillons_pretrait) > 0)
+        
+        dossier_temp <- file.path(tempdir(), paste0("export_fcs_pretrait_", as.integer(Sys.time())))
+        dir.create(dossier_temp, recursive = TRUE)
+        
+        tryCatch({
+          p$exporter_fcs_pretraitement(
+            noms_echantillons = input$export_echantillons_pretrait,
+            etapes            = input$export_etapes_pretrait,
+            dossier_export    = dossier_temp
+          )
+        }, error = function(e) {
+          showNotification(paste("Erreur export FCS :", conditionMessage(e)), type = "error")
+        })
+        
+        fichiers <- list.files(dossier_temp, full.names = FALSE)
+        req(length(fichiers) > 0)
+        
+        ancien_wd <- setwd(dossier_temp)
+        on.exit(setwd(ancien_wd), add = TRUE)
+        utils::zip(zipfile = file, files = fichiers)
+      },
+      contentType = "application/zip"
+    )
+    
+    # Export RDS de la session complète de prétraitement (gates, seuils, canaux, figures)
+    output$dl_export_rds_pretrait <- downloadHandler(
+      filename = function() {
+        nm <- trimws(input$pretrait_rds_filename)
+        if (nchar(nm) == 0) nm <- "Pretraitement_Session_Complete.rds"
+        if (!grepl("\\.rds$", nm, ignore.case = TRUE)) nm <- paste0(nm, ".rds")
+        nm
+      },
+      content = function(file) {
+        p <- carrot_obj()
+        withProgress(message = "Sérialisation de la session...", value = 0.5, {
+          tryCatch({
+            p$sauvegarder_session_pretraitement_rds(nom_fichier = file)
+          }, error = function(e) {
+            showNotification(paste("Erreur export RDS :", conditionMessage(e)), type = "error")
+          })
+        })
+      },
+      contentType = "application/octet-stream"
+    )
     
   })
 }
