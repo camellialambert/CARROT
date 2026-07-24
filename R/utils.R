@@ -113,3 +113,99 @@ get_canaux_filtres <- function(p) {
   # Le pattern 'fsc|ssc|time' exclut tout ce qui contient ces mots (insensible à la casse)
   return(tous_canaux[!grepl("fsc|ssc|time", tous_canaux, ignore.case = TRUE)])
 }
+
+
+calculer_densite_raster <- function(x, y, xlim, ylim, res = 400, lissage = FALSE) {
+  ok <- is.finite(x) & is.finite(y)
+  x <- x[ok]; y <- y[ok]
+  if (length(x) < 2) return(NULL)
+  
+  if (diff(xlim) == 0) xlim <- xlim + c(-0.5, 0.5)
+  if (diff(ylim) == 0) ylim <- ylim + c(-0.5, 0.5)
+  
+  x_breaks <- seq(xlim[1], xlim[2], length.out = res + 1)
+  y_breaks <- seq(ylim[1], ylim[2], length.out = res + 1)
+  
+  df <- data.frame(X = x, Y = y)
+  df_binned <- df |>
+    dplyr::mutate(
+      x_bin = cut(X, breaks = x_breaks, include.lowest = TRUE),
+      y_bin = cut(Y, breaks = y_breaks, include.lowest = TRUE)
+    ) |>
+    dplyr::count(x_bin, y_bin, name = "densite") |>
+    tidyr::drop_na()
+  
+  if (nrow(df_binned) == 0) return(NULL)
+  
+  # centres des bins
+  x_centers <- (head(x_breaks, -1) + tail(x_breaks, -1)) / 2
+  y_centers <- (head(y_breaks, -1) + tail(y_breaks, -1)) / 2
+  
+  df_binned <- df_binned |>
+    dplyr::mutate(
+      X = x_centers[as.integer(x_bin)],
+      Y = y_centers[as.integer(y_bin)]
+    )
+  
+  # La colonne "densite" contient à ce stade le nombre BRUT d'événements par
+  # bin. Avec de gros échantillons (centaines de milliers à millions
+  # d'événements), la population se concentre typiquement dans une poignée de
+  # bins qui peuvent contenir des milliers d'événements, alors que le reste de
+  # la population (biologiquement tout aussi pertinent) n'en compte que
+  # quelques dizaines à centaines. Comme scale_fill_gradientn()/le colorscale
+  # plotly font un mappage LINÉAIRE entre le min et le max de "densite", ces
+  # quelques bins extrêmes écrasent toute la variation en dessous vers la
+  # même couleur basse de la palette (dominante darkblue), même si
+  # l'échantillon contient énormément de cellules. On applique donc une
+  # compression log1p (standard en cytométrie pour les pseudo-couleurs de
+  # densité) : elle conserve l'ordre des bins (les plus denses restent les
+  # plus "chauds") mais réduit fortement l'écart entre les valeurs extrêmes et
+  # modérées, ce qui répartit les couleurs sur l'ensemble de la population au
+  # lieu de les concentrer sur une poignée de pixels. La colonne "densite"
+  # n'est utilisée nulle part ailleurs que pour cette coloration (aucun calcul
+  # de pourcentage ou de comptage n'en dépend) : ce changement est purement
+  # visuel et sans risque, et se propage automatiquement à toutes les figures
+  # de l'application (débris, doublets, viabilité, PeacoQC, flowAI, unmixing,
+  # compensation) ainsi qu'au gating interactif, puisqu'il est appliqué ici
+  # une seule fois dans ce helper partagé.
+  df_binned$densite <- log1p(df_binned$densite)
+  
+  df_binned[, c("X", "Y", "densite")]
+}
+
+PALETTE_DENSITE <- c("darkblue", "blue", "cyan", "greenyellow", "yellow", "darkorange", "red")
+
+# Positions (0-1) de chaque couleur de PALETTE_DENSITE le long du dégradé.
+# Par défaut (espacement uniforme), chaque couleur occuperait 1/6e de
+# l'échelle. Ici, les teintes froides (darkblue/blue/cyan) sont resserrées sur
+# le début du dégradé et les teintes chaudes (orange/rouge) sont étirées sur
+# une plus grande portion de la fin, afin que le rouge apparaisse dès qu'une
+# zone est nettement plus dense que la moyenne, plutôt que réservé aux tout
+# derniers pixels les plus extrêmes.
+PALETTE_DENSITE_STOPS <- c(0, 0.07, 0.16, 0.28, 0.42, 0.55, 1)
+
+COLORSCALE_DENSITE_PLOTLY <- local({
+  lapply(seq_along(PALETTE_DENSITE), function(i) list(PALETTE_DENSITE_STOPS[i], PALETTE_DENSITE[i]))
+})
+
+
+generer_image_densite_base64 <- function(x, y, xlim, ylim, res = 800, largeur_px = 600, hauteur_px = 600) {
+  df <- calculer_densite_raster(x, y, xlim, ylim, res = res, lissage = FALSE)
+  if (is.null(df)) return(NULL)
+  
+  g <- ggplot2::ggplot(df, ggplot2::aes(x = X, y = Y, fill = densite)) +
+    ggplot2::geom_raster() +
+    ggplot2::scale_fill_gradientn(colours = PALETTE_DENSITE, values = PALETTE_DENSITE_STOPS) +
+    ggplot2::scale_x_continuous(limits = xlim, expand = c(0, 0)) +
+    ggplot2::scale_y_continuous(limits = ylim, expand = c(0, 0)) +
+    ggplot2::theme_void() +
+    ggplot2::theme(legend.position = "none",
+                   plot.margin = ggplot2::margin(0, 0, 0, 0))
+  
+  fichier_tmp <- tempfile(fileext = ".png")
+  on.exit(unlink(fichier_tmp), add = TRUE)
+  ggplot2::ggsave(fichier_tmp, plot = g, width = largeur_px / 96, height = hauteur_px / 96,
+                  dpi = 96, bg = "transparent")
+  
+  base64enc::dataURI(file = fichier_tmp, mime = "image/png")
+}
