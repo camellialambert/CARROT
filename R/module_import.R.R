@@ -397,6 +397,21 @@ import_data_server <- function(id, pipeline, pipeline_version,canaux) {
         if (!is.null(val) && val != "") new_groupes[[val]] <- c(new_groupes[[val]], tube)
       }
       rv$groupes <- new_groupes
+      
+      # Répercute l'assignation dans l'objet pipeline partagé (p$groupes_echantillons,
+      # au format échantillon -> groupe) : c'est ce que lit directement le module
+      # Analyses (onglet Comparaison Groupes) pour ses comparaisons statistiques,
+      # évitant ainsi de devoir recréer les groupes une seconde fois là-bas.
+      p <- pipeline()
+      if (inherits(p, "R6")) {
+        for (tube in rv$r_df_ech$tube_name) {
+          val <- input[[paste0("assign_", make.names(tube))]]
+          p$definir_groupe_echantillon(tube, if (is.null(val)) "" else val)
+        }
+        pipeline(p)
+        pipeline_version(pipeline_version() + 1L)
+      }
+      
       showNotification("Cohorte enregistrée !", type = "message")
     })
     

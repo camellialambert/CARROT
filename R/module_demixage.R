@@ -317,8 +317,7 @@ demixage_ui <- function(id) {
                   column(6, uiOutput(ns("visu_canal_y_ui")))
                 ),
                 fluidRow(
-                  column(6, numericInput(ns("visu_cofacteur"), "cofacteur", value = 150, min = 1, step = 10)),
-                  column(6, numericInput(ns("visu_max_points"), "max_points", value = 10000, min = 100, step = 1000))
+                  column(6, numericInput(ns("visu_cofacteur"), "cofacteur", value = 150, min = 1, step = 10))
                 ),
                 actionButton(ns("btn_visualiser"), tagList(icon("eye"), " Afficher"), class = "btn-primary"),
                 br(), br(),
@@ -1224,8 +1223,7 @@ demixage_server <- function(id, pipeline, pipeline_version) {
               nom_fichier_fcs = input$visu_fichier,
               canal_x          = input$visu_canal_x,
               canal_y          = input$visu_canal_y,
-              cofacteur         = input$visu_cofacteur,
-              max_points        = input$visu_max_points
+              cofacteur         = input$visu_cofacteur
             )
           }, bouton_id = ns("btn_visualiser"), label_repos = "Afficher", icone_repos = "eye")
         }, error = function(e) {

@@ -1,11 +1,16 @@
 library(R6)
 library(ggplot2)
-library(ggpointdensity)
-library(raster)
 library(flowCore)
 library(base64enc)
 
-calculer_densite_raster <- function(x, y, xlim, ylim, res = 800, lissage = FALSE) {
+# Calcule une grille de densité 2D par binning (mêmes principes que le
+# creer_plot_raster() historique de visualiser_compensation()) : découpage en
+# bins réguliers via cut() puis comptage par bin via dplyr, plutôt qu'un objet
+# du package raster. Utilisé par toutes les figures de densité de
+# l'application (débris, doublets, viabilité, PeacoQC, flowAI, unmixing,
+# compensation) afin de garantir un rendu visuel strictement identique
+# partout, quel que soit le nombre d'événements (coût du binning indépendant de N).
+calculer_densite_raster <- function(x, y, xlim, ylim, res = 400, lissage = FALSE) {
   ok <- is.finite(x) & is.finite(y)
   x <- x[ok]; y <- y[ok]
   if (length(x) < 2) return(NULL)
@@ -13,27 +18,69 @@ calculer_densite_raster <- function(x, y, xlim, ylim, res = 800, lissage = FALSE
   if (diff(xlim) == 0) xlim <- xlim + c(-0.5, 0.5)
   if (diff(ylim) == 0) ylim <- ylim + c(-0.5, 0.5)
   
-  r_vide <- raster::raster(xmn = xlim[1], xmx = xlim[2],
-                           ymn = ylim[1], ymx = ylim[2],
-                           nrows = res, ncols = res)
-  r_densite <- raster::rasterize(cbind(x, y), r_vide, fun = "count", background = 0)
+  x_breaks <- seq(xlim[1], xlim[2], length.out = res + 1)
+  y_breaks <- seq(ylim[1], ylim[2], length.out = res + 1)
   
-  if (isTRUE(lissage)) {
-    r_densite <- raster::focal(r_densite, w = matrix(1, 3, 3), fun = mean, na.rm = TRUE, pad = TRUE)
-  }
+  df <- data.frame(X = x, Y = y)
+  df_binned <- df |>
+    dplyr::mutate(
+      x_bin = cut(X, breaks = x_breaks, include.lowest = TRUE),
+      y_bin = cut(Y, breaks = y_breaks, include.lowest = TRUE)
+    ) |>
+    dplyr::count(x_bin, y_bin, name = "densite") |>
+    tidyr::drop_na()
   
-  df <- as.data.frame(r_densite, xy = TRUE)
-  names(df) <- c("X", "Y", "densite")
-  df <- df[!is.na(df$densite) & df$densite > 0, , drop = FALSE]
-  if (nrow(df) == 0) return(NULL)
-  df
+  if (nrow(df_binned) == 0) return(NULL)
+  
+  # centres des bins
+  x_centers <- (head(x_breaks, -1) + tail(x_breaks, -1)) / 2
+  y_centers <- (head(y_breaks, -1) + tail(y_breaks, -1)) / 2
+  
+  df_binned <- df_binned |>
+    dplyr::mutate(
+      X = x_centers[as.integer(x_bin)],
+      Y = y_centers[as.integer(y_bin)]
+    )
+  
+  # La colonne "densite" contient à ce stade le nombre BRUT d'événements par
+  # bin. Avec de gros échantillons (centaines de milliers à millions
+  # d'événements), la population se concentre typiquement dans une poignée de
+  # bins qui peuvent contenir des milliers d'événements, alors que le reste de
+  # la population (biologiquement tout aussi pertinent) n'en compte que
+  # quelques dizaines à centaines. Comme scale_fill_gradientn()/le colorscale
+  # plotly font un mappage LINÉAIRE entre le min et le max de "densite", ces
+  # quelques bins extrêmes écrasent toute la variation en dessous vers la
+  # même couleur basse de la palette (dominante darkblue), même si
+  # l'échantillon contient énormément de cellules. On applique donc une
+  # compression log1p (standard en cytométrie pour les pseudo-couleurs de
+  # densité) : elle conserve l'ordre des bins (les plus denses restent les
+  # plus "chauds") mais réduit fortement l'écart entre les valeurs extrêmes et
+  # modérées, ce qui répartit les couleurs sur l'ensemble de la population au
+  # lieu de les concentrer sur une poignée de pixels. La colonne "densite"
+  # n'est utilisée nulle part ailleurs que pour cette coloration (aucun calcul
+  # de pourcentage ou de comptage n'en dépend) : ce changement est purement
+  # visuel et sans risque, et se propage automatiquement à toutes les figures
+  # de l'application (débris, doublets, viabilité, PeacoQC, flowAI, unmixing,
+  # compensation) ainsi qu'au gating interactif, puisqu'il est appliqué ici
+  # une seule fois dans ce helper partagé.
+  df_binned$densite <- log1p(df_binned$densite)
+  
+  df_binned[, c("X", "Y", "densite")]
 }
 
 PALETTE_DENSITE <- c("darkblue", "blue", "cyan", "greenyellow", "yellow", "darkorange", "red")
 
+# Positions (0-1) de chaque couleur de PALETTE_DENSITE le long du dégradé.
+# Par défaut (espacement uniforme), chaque couleur occuperait 1/6e de
+# l'échelle. Ici, les teintes froides (darkblue/blue/cyan) sont resserrées sur
+# le début du dégradé et les teintes chaudes (orange/rouge) sont étirées sur
+# une plus grande portion de la fin, afin que le rouge apparaisse dès qu'une
+# zone est nettement plus dense que la moyenne, plutôt que réservé aux tout
+# derniers pixels les plus extrêmes.
+PALETTE_DENSITE_STOPS <- c(0, 0.07, 0.16, 0.28, 0.42, 0.55, 1)
+
 COLORSCALE_DENSITE_PLOTLY <- local({
-  n <- length(PALETTE_DENSITE)
-  lapply(seq_len(n), function(i) list((i - 1) / (n - 1), PALETTE_DENSITE[i]))
+  lapply(seq_along(PALETTE_DENSITE), function(i) list(PALETTE_DENSITE_STOPS[i], PALETTE_DENSITE[i]))
 })
 
 
@@ -43,7 +90,7 @@ generer_image_densite_base64 <- function(x, y, xlim, ylim, res = 800, largeur_px
   
   g <- ggplot2::ggplot(df, ggplot2::aes(x = X, y = Y, fill = densite)) +
     ggplot2::geom_raster() +
-    ggplot2::scale_fill_gradientn(colours = PALETTE_DENSITE) +
+    ggplot2::scale_fill_gradientn(colours = PALETTE_DENSITE, values = PALETTE_DENSITE_STOPS) +
     ggplot2::scale_x_continuous(limits = xlim, expand = c(0, 0)) +
     ggplot2::scale_y_continuous(limits = ylim, expand = c(0, 0)) +
     ggplot2::theme_void() +
@@ -115,6 +162,14 @@ CARROT <- R6Class(
     gate_debris = list(), # Contient les coordonnées et les structures géométriques des fenêtres (gates) de sélection des cellules (retrait des débris en FSC vs SSC)
     post_debris = list(), # Stocke les données des échantillons filtrées où seuls les événements correspondants aux cellules (hors débris) ont été conservés
     gates_history = list(), # Historique ordonné des gates nommés appliqués : list(nom_gate -> list(nom_echantillon -> list(polygone, cx, cy, post_data, n_avant, n_apres)))
+    
+    # ── SECTION ANALYSES : gates personnalisés et résultats des analyses avancées ──
+    gates_personnalisees = list(), # Gates créés via creer_gate(), un par nom : list(nom_gate -> list(gate, axes, type)). Chaque appel avec un nouveau nom ajoute une entrée sans écraser les précédentes : l'utilisateur peut créer et conserver autant de gates qu'il le souhaite.
+    analyses_umap        = list(), # Résultats de projection_UMAP(), indexés par nom de gate : list(nom_gate -> list(embedding, echantillon_origine, canaux, parametres))
+    analyses_tsne        = list(), # Résultats de projection_tSNE(), indexés par nom de gate, même structure que analyses_umap
+    analyses_pca         = list(), # Résultats de projection_PCA(), indexés par nom de gate : list(nom_gate -> list(embedding, echantillon_origine, canaux, variance_expliquee, rotation, parametres))
+    clusters_flowsom     = list(), # Résultats de creer_clusters(), indexés par nom de gate : list(nom_gate -> list(fsom, clusters, metaclusters, echantillon_origine, canaux, parametres))
+    
     gate_doublets_FSC = list(), # Contient les coordonnées du gate de discrimination des doublets basé sur les paramètres du Forward Scatter (ex: FSC-A vs FSC-H)
     gate_doublets_SSC = list(), # Contient les coordonnées du gate de discrimination des doublets basé sur les paramètres du Side Scatter (ex: SSC-A vs SSC-H)
     post_doublets_FSC = list(), # Stocke les données des échantillons après l'élimination des doublets par le filtre FSC
@@ -569,7 +624,7 @@ CARROT <- R6Class(
       return(resultat) # Renvoie la liste des résultats comparatifs
     },
     
-    controler_monomarques = function(fichier_monomarque, canal_x, canal_y, max_points = 200000) { # Méthode générant un graphique biplot comparatif avant/après compensation pour contrôler le spillover
+    controler_monomarques = function(fichier_monomarque, canal_x, canal_y) { # Méthode générant un graphique biplot comparatif avant/après compensation pour contrôler le spillover
       if (is.null(canal_x) || canal_x == "" || is.null(canal_y) || canal_y == "") return(NULL) # Intercepte et arrête la fonction si l'un des deux canaux d'acquisition n'est pas renseigné
       fcs_brut_original  <- self$tubes_monomarques[[fichier_monomarque]] # Récupère le fichier d'acquisition FCS brut d'origine correspondant au tube monomarqué
       fcs_compense_brut  <- flowCore::compensate(fcs_brut_original, self$S_matrix) # Applique la matrice de spillover calculée pour soustraire mathématiquement les fluorescences croisées
@@ -599,10 +654,10 @@ CARROT <- R6Class(
       mat_avant <- flowCore::exprs(fcs_avant_trans)[, c(canal_x, canal_y), drop = FALSE] # Isoles l'intensité de fluorescence des deux canaux d'intérêt avant compensation
       mat_apres <- flowCore::exprs(fcs_apres_trans)[, c(canal_x, canal_y), drop = FALSE] # Isoles l'intensité de fluorescence des deux canaux d'intérêt après compensation
       nb_evenements <- nrow(mat_avant) # Compte le nombre total de cellules (événements) présentes dans le fichier FCS
-      taille_echantillon <- min(nb_evenements, max_points) # Restreint le nombre d'événements à afficher pour optimiser la vitesse du rendu graphique
-      indices_sub <- sample(seq_len(nb_evenements), taille_echantillon) # Tire au sort de manière aléatoire les indices des cellules à afficher
-      df_avant <- as.data.frame(mat_avant[indices_sub, , drop = FALSE]) # Crée un tableau R contenant le sous-échantillon d'événements non compensés
-      df_apres <- as.data.frame(mat_apres[indices_sub, , drop = FALSE]) # Crée un tableau R contenant le sous-échantillon d'événements compensés
+      # Densité calculée par binning raster (rapide, indépendant du nombre d'événements) :
+      # on garde systématiquement l'intégralité des événements, sans sous-échantillonnage.
+      df_avant <- as.data.frame(mat_avant) # Crée un tableau R contenant l'intégralité des événements non compensés
+      df_apres <- as.data.frame(mat_apres) # Crée un tableau R contenant l'intégralité des événements compensés
       label_x_explicite <- self$get_label(fcs_brut_original, canal_x) # Génère le libellé biologique complet pour l'axe X (ex: "V3-A | CD4")
       label_y_explicite <- self$get_label(fcs_brut_original, canal_y) # Génère le libellé biologique complet pour l'axe Y (ex: "B1-A | CD8")
       limite_x <- range(c(df_avant[[canal_x]], df_apres[[canal_x]]), na.rm = TRUE) + c(-0.5, 0.5) # Calcule des limites d'affichage identiques en abscisse pour les deux graphiques
@@ -618,9 +673,9 @@ CARROT <- R6Class(
         }
         ggplot(df_densite, aes(x = X, y = Y, fill = densite)) + # Initialise la figure biplot à partir de la grille de densité
           geom_raster(interpolate = TRUE) + # Affiche la densité sous forme d'image raster (rapide, même avec beaucoup d'événements)
-          scale_fill_gradientn(colours = PALETTE_DENSITE) + # Applique une palette de couleurs pseudo-spectrale allant du bleu (faible densité) au rouge (forte densité)
+          scale_fill_gradientn(colours = PALETTE_DENSITE, values = PALETTE_DENSITE_STOPS) + # Applique une palette de couleurs pseudo-spectrale allant du bleu (faible densité) au rouge (forte densité)
           coord_cartesian(xlim = limite_x, ylim = limite_y) + # Verrouille les fenêtres d'affichage pour aligner visuellement les deux graphiques côte à côte
-          theme_bw() + theme(legend.position = "none") + # Applique un arrière-plan blanc et masque la légende de l'échelle colorimétrique
+          theme_bw() + theme(legend.position = "none", aspect.ratio = 1) + # Applique un arrière-plan blanc et masque la légende de l'échelle colorimétrique
           labs(title = titre_plot, subtitle = paste0("Spillover : ", valeur_spill, " %"), x = lab_x, y = lab_y) # Assigne le titre, la valeur calculée du spillover et les axes
       }
       
@@ -754,7 +809,8 @@ CARROT <- R6Class(
         ggplot2::ggplot(df_binned, ggplot2::aes(x = X, y = Y, fill = densite)) +
           ggplot2::geom_raster(interpolate = TRUE) +
           ggplot2::scale_fill_gradientn(
-            colours = PALETTE_DENSITE
+            colours = PALETTE_DENSITE,
+            values  = PALETTE_DENSITE_STOPS
           ) +
           ggplot2::coord_cartesian(xlim = lim_x, ylim = lim_y) +
           ggplot2::theme_bw() +
@@ -1357,22 +1413,34 @@ CARROT <- R6Class(
       list.files(dossier, pattern=paste0(control_name, ".*\\.png$"), full.names=TRUE)
     },
     
-    visualiser_unmixing = function(nom_fichier_fcs, canal_x, canal_y, cofacteur = 150, max_points = 10000) {
+    visualiser_unmixing = function(nom_fichier_fcs, canal_x, canal_y, cofacteur = 150) {
       fcs_unmixed <- self$echantillons_traites[[nom_fichier_fcs]]
       if (is.null(fcs_unmixed)) stop("Fichier introuvable en mémoire.")
       trans_list <- flowCore::transformList(c(canal_x, canal_y), flowCore::arcsinhTransform(a = 0, b = 1/cofacteur, c = 0))
       mat <- flowCore::exprs(flowCore::transform(fcs_unmixed, trans_list))[, c(canal_x, canal_y)]
-      indices <- sample(seq_len(nrow(mat)), min(nrow(mat), max_points))
-      df <- as.data.frame(mat[indices, ])
+      df <- as.data.frame(mat)
       colnames(df) <- c("Axe_X", "Axe_Y")
       
-      ggplot(df, aes(x = Axe_X, y = Axe_Y)) +
-        ggpointdensity::geom_pointdensity(size = 0.2, alpha = 0.5) +
-        scale_color_gradientn(
-          colours = c("darkblue", "blue", "cyan", "greenyellow", "yellow", "darkorange", "red"),
-          name = "Densité"
-        ) +
-        theme_bw() + 
+      # Densité calculée par binning raster (rapide, indépendant du nombre d'événements)
+      # plutôt que par ggpointdensity (densité par point, coûteuse avec beaucoup d'événements) —
+      # même helper que pour les autres modules, afin de garder un rendu uniforme.
+      lim_x <- range(df$Axe_X, na.rm = TRUE)
+      lim_y <- range(df$Axe_Y, na.rm = TRUE)
+      df_densite <- calculer_densite_raster(df$Axe_X, df$Axe_Y, lim_x, lim_y)
+      
+      if (is.null(df_densite)) {
+        return(ggplot() + theme_bw() +
+                 labs(title = paste("Résultat après Unmixing :", nom_fichier_fcs),
+                      subtitle = "Pas assez d'événements pour tracer la densité",
+                      x = self$get_label(fcs_unmixed, canal_x), y = self$get_label(fcs_unmixed, canal_y)))
+      }
+      
+      ggplot(df_densite, aes(x = X, y = Y, fill = densite)) +
+        geom_raster(interpolate = TRUE) +
+        scale_fill_gradientn(colours = PALETTE_DENSITE, values = PALETTE_DENSITE_STOPS) +
+        coord_cartesian(xlim = lim_x, ylim = lim_y) +
+        theme_bw() +
+        theme(legend.position = "none", aspect.ratio = 1) +
         labs(
           title = paste("Résultat après Unmixing :", nom_fichier_fcs), 
           x = self$get_label(fcs_unmixed, canal_x), 
@@ -1422,11 +1490,11 @@ CARROT <- R6Class(
     
     appliquer_peacoqc = function(dossier_rapports = NULL, reglages_specifiques = list()) {
       
-      # Paramètres par défaut
+      # Paramètres par défaut (alignés sur les valeurs par défaut officielles de PeacoQC::PeacoQC())
       parametres_par_defaut <- list(
         determine_good_cells = "all",
         min_cells = 150,
-        max_bins = 100,
+        max_bins = 500,
         step = 500,
         MAD = 6,
         IT_limit = 0.6,
@@ -1519,22 +1587,30 @@ CARROT <- R6Class(
         stop("Aucun échantillon traité disponible pour flowAI.")
       }
       
-      # Paramètres sécurisés
+      # Paramètres sécurisés (alignés sur les valeurs par défaut officielles de flowAI::flow_auto_qc())
       remove_from       <- reglages_specifiques$remove_from       %||% "all"
       timeCh            <- reglages_specifiques$timeCh            %||% NULL
       second_fractionFR <- reglages_specifiques$second_fractionFR %||% 0.1
       alphaFR           <- reglages_specifiques$alphaFR           %||% 0.01
-      decompFR          <- if (isTRUE(reglages_specifiques$decompFR)) "cffilter" else "loess"
+      # decompFR : "cffilter" est la valeur par défaut officielle (décomposition tendance/cycle
+      # activée). FALSE désactive la décomposition ; ce paramètre attend une chaîne ("cffilter")
+      # ou une valeur logique selon les versions de flowAI — jamais la chaîne "loess", qui n'est
+      # pas une méthode reconnue par le package et aurait provoqué un comportement incorrect ou
+      # une erreur silencieuse.
+      decompFR          <- if (isTRUE(reglages_specifiques$decompFR)) "cffilter" else FALSE
       
+      # ChExcludeFS/ChExcludeFM : la valeur par défaut officielle est c("FSC", "SSC") (jamais NULL,
+      # qui inclurait à tort les canaux morphologiques dans les contrôles de qualité de signal et
+      # de plage dynamique).
       ChExcludeFS <- reglages_specifiques$ChExcludeFS
-      if (is.null(ChExcludeFS) || length(ChExcludeFS) == 0) ChExcludeFS <- NULL
+      if (is.null(ChExcludeFS) || length(ChExcludeFS) == 0) ChExcludeFS <- c("FSC", "SSC")
       
       outlier_binsFS <- reglages_specifiques$outlier_binsFS %||% FALSE
       pen_valueFS    <- reglages_specifiques$pen_valueFS    %||% 500
       max_cptFS      <- reglages_specifiques$max_cptFS      %||% 3
       
       ChExcludeFM <- reglages_specifiques$ChExcludeFM
-      if (is.null(ChExcludeFM) || length(ChExcludeFM) == 0) ChExcludeFM <- NULL
+      if (is.null(ChExcludeFM) || length(ChExcludeFM) == 0) ChExcludeFM <- c("FSC", "SSC")
       
       sideFM       <- reglages_specifiques$sideFM       %||% "both"
       neg_valuesFM <- reglages_specifiques$neg_valuesFM %||% 1
@@ -1669,19 +1745,35 @@ CARROT <- R6Class(
       return(invisible(self))
     },
     
-    # Applique un gate polygonal nommé séquentiellement sur tous les échantillons.
-    # Chaque gate est empilé sur le précédent (le résultat du gate N-1 alimente le gate N).
-    # L'entrée du 1er gate est déterminée par source_nettoyage.
+    # Applique un gate polygonal nommé sur la cohorte.
+    # Comportement : la toute première fois qu'un gate de ce nom est enregistré,
+    # la forme est appliquée par défaut à TOUS les échantillons. Si ce gate existe
+    # déjà (au moins un échantillon traité), un appel ultérieur avec un
+    # nom_echantillon précis ne modifie QUE la forme de cet échantillon-là,
+    # laissant les autres échantillons inchangés — ce qui permet d'avoir un gate
+    # dont la forme est adaptée individuellement à chaque échantillon.
     # gates_history stocke, pour chaque nom de gate, les résultats par échantillon.
     appliquer_gate_nomme = function(nom_gate, matrice_points, canal_x, canal_y,
-                                    source_nettoyage = "brutes") {
+                                    source_nettoyage = "brutes", nom_echantillon = NULL) {
       if (is.null(nom_gate) || nchar(trimws(nom_gate)) == 0) stop("Le gate doit avoir un nom.")
       if (is.null(matrice_points) || nrow(matrice_points) < 3) stop("Polygone invalide (< 3 points).")
       
       # Source d'entrée : dernier gate validé si disponible, sinon source QC choisie
-      if (length(self$gates_history) > 0) {
+      if (length(self$gates_history) > 0 && is.null(self$gates_history[[nom_gate]])) {
         dernier_gate <- self$gates_history[[length(self$gates_history)]]
         liste_source <- lapply(names(dernier_gate), function(n) dernier_gate[[n]]$post_data)
+        names(liste_source) <- names(dernier_gate)
+      } else if (!is.null(self$gates_history[[nom_gate]]) && length(self$gates_history) > 1) {
+        # Ce gate existe déjà et d'autres gates sont chaînés : on repart de la même
+        # source que celle utilisée lors de la création initiale de ce gate nommé.
+        idx_gate <- match(nom_gate, names(self$gates_history))
+        if (idx_gate > 1) {
+          gate_precedent <- self$gates_history[[idx_gate - 1]]
+          liste_source <- lapply(names(gate_precedent), function(n) gate_precedent[[n]]$post_data)
+          names(liste_source) <- names(gate_precedent)
+        } else {
+          liste_source <- self$get_derniere_source()
+        }
       } else {
         if (source_nettoyage == "peacoqc" && length(self$post_PeacoQC) > 0) {
           liste_source <- self$post_PeacoQC
@@ -1700,8 +1792,14 @@ CARROT <- R6Class(
       colnames(mat_gate) <- c(canal_x, canal_y)
       polygone <- flowCore::polygonGate(.gate = mat_gate, filterId = nom_gate)
       
-      resultats_gate <- list()
-      for (nom in names(liste_source)) {
+      # Ce gate nommé a-t-il déjà été enregistré pour au moins un échantillon ?
+      # Si oui, un nom_echantillon précis restreint la mise à jour à ce seul
+      # échantillon ; sinon (première fois), on applique la forme à toute la cohorte.
+      deja_initialise  <- !is.null(self$gates_history[[nom_gate]]) && length(self$gates_history[[nom_gate]]) > 0
+      noms_a_traiter   <- if (is.null(nom_echantillon) || !deja_initialise) names(liste_source) else nom_echantillon
+      resultats_gate   <- if (deja_initialise) self$gates_history[[nom_gate]] else list()
+      
+      for (nom in noms_a_traiter) {
         ff_entree <- liste_source[[nom]]
         if (is.null(ff_entree)) next
         n_avant <- nrow(flowCore::exprs(ff_entree))
@@ -1778,7 +1876,7 @@ CARROT <- R6Class(
         self$post_doublets_final[[nom]] <- flowframe_filtre # Met à jour la mémoire de stockage terminale des cellules uniques validées (singlets)
       } 
       
-      noms_a_traiter <- if (is.null(nom_echantillon)) names(liste_fcs_source) else nom_echantillon # Détermine la liste d'échantillons à traiter en lot (tous les fichiers ou l'identifiant exclusif fourni)
+      noms_a_traiter <- if (is.null(nom_echantillon) || length(self$gate_doublets_FSC) == 0) names(liste_fcs_source) else nom_echantillon # Applique à toute la cohorte la toute première fois (aucun gate FSC encore enregistré) ; sinon restreint la mise à jour à l'échantillon ciblé, pour permettre un seuil différent par échantillon
       for (nom in noms_a_traiter) { calculer_doublets(nom, label_source) } # Parcourt et traite séquentiellement via la boucle chaque échantillon configuré dans la liste cible
       self$update_pipeline("doublets_FSC", nom_echantillon) # Active la mise à jour des graphes d'état ou rafraîchit l'interface Shiny pour cette étape d'isolement
     },
@@ -1844,7 +1942,7 @@ CARROT <- R6Class(
         self$post_doublets_final[[nom]] <- flowframe_filtre # Met à jour la mémoire finale centralisée de l'objet contenant les cellules uniques (singlets) qualifiées
       } 
       
-      noms_a_traiter <- if (is.null(nom_echantillon)) names(liste_fcs_source) else nom_echantillon # Cible la cohorte entière si l'identifiant est omis, sinon restreint l'exécution au fichier unique spécifié
+      noms_a_traiter <- if (is.null(nom_echantillon) || length(self$gate_doublets_SSC) == 0) names(liste_fcs_source) else nom_echantillon # Applique à toute la cohorte la toute première fois (aucun gate SSC encore enregistré) ; sinon restreint la mise à jour à l'échantillon ciblé, pour permettre un seuil différent par échantillon
       for (nom in noms_a_traiter) { calculer_doublets(nom, label_source) } # Parcourt et traite séquentiellement l'ensemble de la liste via une boucle d'exécution unitaire
       self$update_pipeline("doublets_SSC", nom_echantillon) # Déclenche directement la mise à jour des graphes de suivi ou actualise l'interface graphique UI Shiny
     },
@@ -1881,7 +1979,7 @@ CARROT <- R6Class(
         self$post_doublets_final[[nom]]  <- ff_propre # Met à jour la structure finale de stockage centralisant les cellules uniques qualifiées de l'expérience
       } 
       
-      noms <- if (is.null(nom_echantillon)) names(liste_fcs_source) else nom_echantillon # Cible la cohorte complète si l'identifiant est omis, ou restreint l'exécution au fichier unique spécifié
+      noms <- if (is.null(nom_echantillon) || length(self$gate_doublets_FSC) == 0) names(liste_fcs_source) else nom_echantillon # Applique à toute la cohorte la toute première fois (aucun gate FSC encore enregistré) ; sinon restreint la mise à jour à l'échantillon ciblé, pour permettre une forme de gate différente par échantillon
       for (n in noms) { appliquer_fsc(n) } # Parcourt et traite séquentiellement l'ensemble de la liste via une boucle d'exécution unitaire
       if (!is.null(self$update_pipeline)) self$update_pipeline("doublets_FSC", nom_echantillon) # Déclenche la mise à jour des graphes de suivi ou actualise l'interface graphique Shiny
     },
@@ -1924,12 +2022,12 @@ CARROT <- R6Class(
         self$post_doublets_final[[nom]] <- ff_propre # Met à jour la structure finale de stockage centralisant les cellules uniques qualifiées de l'expérience
       } 
       
-      noms <- if (is.null(nom_echantillon)) names(liste_fcs_source) else nom_echantillon # Cible la cohorte complète si l'identifiant est omis, ou restreint l'exécution au fichier unique spécifié
+      noms <- if (is.null(nom_echantillon) || length(self$gate_doublets_SSC) == 0) names(liste_fcs_source) else nom_echantillon # Applique à toute la cohorte la toute première fois (aucun gate SSC encore enregistré) ; sinon restreint la mise à jour à l'échantillon ciblé, pour permettre une forme de gate différente par échantillon
       for (n in noms) { appliquer_ssc(n) } # Parcourt et traite séquentiellement l'ensemble de la liste via une boucle d'exécution unitaire
       if (!is.null(self$update_pipeline)) self$update_pipeline("doublets_SSC", nom_echantillon) # Déclenche la mise à jour des graphes de suivi ou actualise l'interface graphique Shiny
     },
     
-    visualiser_peacoqc = function(nom_echantillon, max_points = 10000) { # Méthode générant un graphique cinétique comparatif pour évaluer visuellement l'efficacité du filtrage de bruit de flux opéré par PeacoQC
+    visualiser_peacoqc = function(nom_echantillon) { # Méthode générant un graphique cinétique comparatif pour évaluer visuellement l'efficacité du filtrage de bruit de flux opéré par PeacoQC
       if (is.null(self$post_PeacoQC[[nom_echantillon]])) { # Évalue si la structure ou le fichier cible nettoyé par PeacoQC est absent de la mémoire vive
         message("Pas de données PeacoQC pour ", nom_echantillon) # Notification d'avertissement en console si l'étape amont n'a pas été exécutée
         return(NULL) # Interrompt proprement la fonction et renvoie NULL pour ne pas provoquer de plantage de l'interface
@@ -1949,46 +2047,49 @@ CARROT <- R6Class(
       evenements_gardes <- nrow(donnees_nettoyees) # Dénombre le nombre de cellules conservées post-contrôle qualité statistique
       pourcentage_conservation <- if(total_evenements > 0) round((evenements_gardes / total_evenements) * 100, 1) else 0 # Calcule le rendement d'acquisition après filtration, arrondi au dixième
       
-      if (!is.null(max_points) && total_evenements > max_points) { # Si la taille de l'échantillon outrepasse la limite maximale définie pour la fluidité du rendu graphique
-        
-        if (!is.null(self$seed)) set.seed(self$seed)
-        donnees_init_visu  <- donnees_initiales[sample(seq_len(total_evenements), max_points), ] # Sous-échantillonne de manière aléatoire la matrice initiale pour alléger la charge graphique
-        
-        if (evenements_gardes > 0) { # S'il reste des cellules viables après le passage de l'algorithme PeacoQC
-          nb_nettoye_visu   <- min(evenements_gardes, max_points) # Détermine la borne supérieure optimale de points à conserver pour le rendu des données épurées
-          
-          # === SÉCURITÉ SEED : Fixe la graine avant le sous-échantillonnage nettoyé ===
-          if (!is.null(self$seed)) set.seed(self$seed)
-          donnees_nett_visu  <- donnees_nettoyees[sample(seq_len(evenements_gardes), nb_nettoye_visu), ] # Sous-échantillonne aléatoirement la matrice nettoyée au même prorata visuel
-        } else { # Si l'échantillon a été intégralement rejeté par le contrôle qualité
-          donnees_nett_visu  <- donnees_nettoyees # Assigne la structure vide directement sans calcul d'échantillonnage
-        } 
-      } else { # Si le nombre total de cellules est inférieur au seuil max_points
-        donnees_init_visu  <- donnees_initiales # Conserve l'intégralité de la matrice de départ pour la représentation graphique
-        donnees_nett_visu  <- donnees_nettoyees # Conserve l'intégralité de la matrice épurée pour la représentation graphique
-      } 
+      # Isole les événements exclus par identification de clé composite (mêmes valeurs sur
+      # tous les canaux communs), pour les superposer en points par-dessus la densité raster
+      # de la population conservée — même logique que pour visualiser_doublets().
+      colonnes_cle <- intersect(colnames(donnees_initiales), colnames(donnees_nettoyees))
+      if (evenements_gardes > 0 && length(colonnes_cle) > 0) {
+        cle_init <- do.call(paste, c(lapply(colonnes_cle, function(col) donnees_initiales[[col]]), sep = "\r"))
+        cle_nett <- do.call(paste, c(lapply(colonnes_cle, function(col) donnees_nettoyees[[col]]), sep = "\r"))
+        donnees_exclues <- donnees_initiales[!(cle_init %in% cle_nett), ]
+      } else {
+        donnees_exclues <- donnees_initiales
+      }
       
       lbl_x <- if (!is.null(self$get_label)) self$get_label(flowframe_initial, canal_temps) else canal_temps # Extrait le libellé biologique de l'axe X via get_label, ou utilise le nom technique brut
       lbl_y <- if (!is.null(self$get_label)) self$get_label(flowframe_initial, canal_fsc) else canal_fsc # Extrait le libellé biologique de l'axe Y via get_label, ou utilise le nom technique brut
-      graphique_qc <- ggplot2::ggplot() + # Initialise l'objet graphique ggplot2 vide multicouche
-        ggplot2::geom_point(data = donnees_init_visu, ggplot2::aes(x = .data[[canal_temps]], y = .data[[canal_fsc]]), # Ajoute la couche de fond représentant l'ensemble des points d'origine
-                            size = 0.2, alpha = 0.2, color = "grey70") # Paramètre les points en gris clair et transparent pour matérialiser les événements exclus ou masqués
-      if (nrow(donnees_nett_visu) > 0) { # Si la sous-matrice nettoyée contient des événements cellulaires à tracer
-        graphique_qc <- graphique_qc + # Superpose une seconde couche d'événements par-dessus le bruit de fond gris
-          ggplot2::geom_point(data = donnees_nett_visu, ggplot2::aes(x = .data[[canal_temps]], y = .data[[canal_fsc]]), # Spécifie les coordonnées cinétiques des cellules conformes validées
-                              size = 0.2, alpha = 0.4, color = "darkblue") # Paramètre les cellules saines en bleu foncé contrasté pour mettre en évidence les zones d'instabilité supprimées
+      
+      # Densité calculée par binning raster (rapide, indépendant du nombre d'événements) pour
+      # la population conservée, plutôt que par sous-échantillonnage aléatoire de points.
+      df_densite <- calculer_densite_raster(donnees_nettoyees[[canal_temps]], donnees_nettoyees[[canal_fsc]], limites_temps, limites_fsc)
+      
+      graphique_qc <- ggplot2::ggplot() # Initialise l'objet graphique ggplot2 vide multicouche
+      if (!is.null(df_densite)) {
+        graphique_qc <- graphique_qc +
+          ggplot2::geom_raster(data = df_densite, ggplot2::aes(x = X, y = Y, fill = densite), interpolate = TRUE) + # Affiche la densité des évènements conservés sous forme d'image raster (rapide, même avec beaucoup d'événements)
+          ggplot2::scale_fill_gradientn(colours = PALETTE_DENSITE, values = PALETTE_DENSITE_STOPS) # Applique l'échelle pseudo-spectrale standardisée pour cartographier les gradients de population conservée
+      }
+      if (nrow(donnees_exclues) > 0) { # Si la sous-matrice exclue contient des événements cellulaires à tracer
+        graphique_qc <- graphique_qc + # Superpose une couche d'événements exclus par-dessus la densité de fond
+          ggplot2::geom_point(data = donnees_exclues, ggplot2::aes(x = .data[[canal_temps]], y = .data[[canal_fsc]]), # Spécifie les coordonnées cinétiques des cellules exclues par PeacoQC
+                              size = 0.3, alpha = 0.6, color = "darkred") # Paramètre les cellules exclues en rouge foncé contrasté pour mettre en évidence les zones d'instabilité supprimées
       } 
       graphique_qc <- graphique_qc + # Finalise la mise en forme structurelle et textuelle de la figure de diagnostic
         ggplot2::coord_cartesian(xlim = limites_temps, ylim = limites_fsc) + # Force un cadrage strict sur les limites initiales du fichier pour éviter tout effet de zoom déformant
         ggplot2::theme_bw() + # Applique un habillage blanc structuré et épuré facilitant la lecture des densités de points
         ggplot2::theme( # Ajuste les propriétés typographiques de la figure de contrôle
+          legend.position = "none", # Masque la barre d'échelle continue des densités (redondante)
+          aspect.ratio = 1,
           plot.title = ggplot2::element_text(face = "bold"), # Renforce la visibilité du titre principal en l'affichant en caractères gras
           plot.subtitle = ggplot2::element_text(color = "darkblue", size = 11) # Distingue le sous-texte statistique en lui appliquant une coloration bleue
         ) + # Fin des ajustements de thème
         ggplot2::labs( # Définit l'ensemble des titres et des descriptions scientifiques entourant les axes
           title = paste("Contrôle qualité PeacoQC :", nom_echantillon), # Affiche dynamiquement le titre de la méthode couplé au nom du fichier FCS audité
           subtitle = paste0("Événements conservés : ", format(evenements_gardes, big.mark=" "), # Documente les métriques de tri incluant le décompte des cellules saines restantes
-                            " | ", pourcentage_conservation, "% (Affichage max : ", max_points, " pts)"), # Affiche le rendement en pourcentage et précise le niveau de sous-échantillonnage graphique appliqué
+                            " | ", pourcentage_conservation, "%"), # Affiche le rendement en pourcentage
           x = lbl_x, y = lbl_y # Attribue les libellés biologiques ou techniques finaux aux axes X et Y
         ) 
       
@@ -1997,7 +2098,7 @@ CARROT <- R6Class(
       return(graphique_qc) # Renvoie l'objet graphique complet, prêt pour affichage à l'écran ou intégration dans une interface Shiny
     },
     
-    visualiser_flowai = function(nom_echantillon, max_points = 10000) { # Méthode générant un graphique cinétique de contrôle qualité pour visualiser l'impact du nettoyage flowAI sur un échantillon
+    visualiser_flowai = function(nom_echantillon) { # Méthode générant un graphique cinétique de contrôle qualité pour visualiser l'impact du nettoyage flowAI sur un échantillon
       if (is.null(self$post_flowAI) || is.null(self$post_flowAI[[nom_echantillon]])) { # Vérifie si la structure ou l'échantillon ciblé par le nettoyage flowAI est manquant en mémoire
         stop("Aucun résultat flowAI trouvé pour cet échantillon.") # Interrompt le script et exige l'exécution préalable de la méthode appliquer_flowai
       } 
@@ -2017,16 +2118,32 @@ CARROT <- R6Class(
       exprs_initiales$Status[indices_conserves] <- "Conservé" # Assigne le statut de conformité aux événements cellulaires validés par l'algorithme
       total_pts <- nrow(exprs_initiales) # Mémorise le nombre total d'événements cellulaires initialement présents dans le fichier d'acquisition
       
-      if (total_pts > max_points) { # Si la taille de la matrice dépasse le seuil maximal de points fixé pour le tracé graphique
-        if (!is.null(self$seed)) set.seed(self$seed)
-        exprs_initiales <- exprs_initiales[sample(total_pts, max_points), ] # Échantillonne aléatoirement un nombre restreint de lignes pour optimiser le rendu graphique sans saturer la mémoire
-      } 
       total_conserves <- length(indices_conserves) # Calcule le décompte absolu d'événements cellulaires conformes conservés post-QC
       pourcentage_conservation <- round((total_conserves / total_pts) * 100, 1) # Déduit le rendement d'acquisition exprimé en pourcentage de cellules saines conservées
       
-      graphique_flowai <- ggplot2::ggplot(exprs_initiales, ggplot2::aes(x = .data[[canal_temps]], y = .data[[canal_taille]], color = Status)) + # Initialise le graphique biplot Temps vs FSC
-        ggplot2::geom_point(size = 0.4, alpha = 0.6) + # Dessine le nuage de points cytométriques avec une taille fine et une légère transparence pour révéler l'empilement
-        ggplot2::scale_color_manual(values = c("Conservé" = "#1f77b4", "Éliminé (flowAI)" = "#d62728")) + # Applique un code couleur binaire contrasté (bleu pour le signal sain, rouge pour les anomalies)
+      limites_temps <- range(exprs_initiales[[canal_temps]], na.rm = TRUE) # Calcule l'amplitude minimale et maximale du temps pour fixer les frontières absolues de l'axe X
+      limites_taille <- range(exprs_initiales[[canal_taille]], na.rm = TRUE) # Calcule l'amplitude minimale et maximale du signal FSC pour fixer les frontières absolues de l'axe Y
+      
+      # Densité calculée par binning raster (rapide, indépendant du nombre d'événements) pour
+      # la population conservée, plutôt que par sous-échantillonnage aléatoire de points —
+      # même logique que pour visualiser_peacoqc() et visualiser_doublets().
+      donnees_conservees <- exprs_initiales[exprs_initiales$Status == "Conservé", ]
+      donnees_eliminees  <- exprs_initiales[exprs_initiales$Status == "Éliminé (flowAI)", ]
+      df_densite <- calculer_densite_raster(donnees_conservees[[canal_temps]], donnees_conservees[[canal_taille]], limites_temps, limites_taille)
+      
+      graphique_flowai <- ggplot2::ggplot() # Initialise l'objet graphique ggplot2 vide multicouche
+      if (!is.null(df_densite)) {
+        graphique_flowai <- graphique_flowai +
+          ggplot2::geom_raster(data = df_densite, ggplot2::aes(x = X, y = Y, fill = densite), interpolate = TRUE) + # Affiche la densité des évènements conservés sous forme d'image raster (rapide, même avec beaucoup d'événements)
+          ggplot2::scale_fill_gradientn(colours = PALETTE_DENSITE, values = PALETTE_DENSITE_STOPS) # Applique l'échelle pseudo-spectrale standardisée pour cartographier les gradients de population conservée
+      }
+      if (nrow(donnees_eliminees) > 0) { # Si la sous-matrice éliminée contient des événements cellulaires à tracer
+        graphique_flowai <- graphique_flowai + # Superpose une couche d'événements éliminés par-dessus la densité de fond
+          ggplot2::geom_point(data = donnees_eliminees, ggplot2::aes(x = .data[[canal_temps]], y = .data[[canal_taille]]), # Dessine le nuage de points cytométriques des événements éliminés
+                              size = 0.4, alpha = 0.6, color = "#d62728") # Code couleur contrasté (rouge) pour les anomalies détectées par flowAI
+      }
+      graphique_flowai <- graphique_flowai + # Configure les textes et légendes scientifiques entourant la figure de diagnostic
+        ggplot2::coord_cartesian(xlim = limites_temps, ylim = limites_taille) + # Force un cadrage strict sur les limites initiales du fichier pour éviter tout effet de zoom déformant
         ggplot2::theme_bw() + # Applique un habillage blanc structuré et épuré facilitant l'évaluation visuelle des coupures cinétiques
         ggplot2::labs( # Configure les textes et légendes scientifiques entourant la figure de diagnostic
           title = paste("Contrôle Qualité flowAI :", nom_echantillon), # Affiche le titre de l'analyse associé au nom du fichier FCS audité
@@ -2036,9 +2153,9 @@ CARROT <- R6Class(
           y = paste("Axe Morphologique :", canal_taille) # Documente le nom exact du canal de taille de l'axe des ordonnées
         ) + 
         ggplot2::theme( # Ajuste finement la typographie et la disposition des éléments de la figure
-          legend.position = "bottom", # Positionne la légende des statuts sous le graphique pour maximiser la largeur de la zone de tracé
-          plot.title    = ggplot2::element_text(face = "bold", size = 14), # Renforce l'accentuation visuelle du titre principal du diagnostic
-          legend.title  = ggplot2::element_blank() # Masque l'intitulé de la légende devenu superflu grâce à l'explicitation des étiquettes
+          legend.position = "none", # Masque la barre d'échelle continue des densités (redondante)
+          aspect.ratio = 1,
+          plot.title    = ggplot2::element_text(face = "bold", size = 14) # Renforce l'accentuation visuelle du titre principal du diagnostic
         ) 
       
       if (is.null(self$plots_flowai)) self$plots_flowai <- list() # Initialise la structure de liste dédiée au stockage des graphiques flowAI si inexistante en mémoire
@@ -2109,8 +2226,8 @@ CARROT <- R6Class(
           ggplot2::labs(title = paste("Nettoyage des débris :", nom_echantillon), subtitle = "Pas assez d'événements pour tracer la densité", x = lbl_x, y = lbl_y)
       } else {
         ggplot2::ggplot(df_densite, ggplot2::aes(x = X, y = Y, fill = densite)) +
-          ggplot2::geom_raster() + # pixels réguliers et petits (grille haute résolution), rendu rapide même avec beaucoup d'événements
-          ggplot2::scale_fill_gradientn(colours = PALETTE_DENSITE) +
+          ggplot2::geom_raster(interpolate = TRUE) + # pixels réguliers et petits (grille haute résolution), rendu rapide même avec beaucoup d'événements
+          ggplot2::scale_fill_gradientn(colours = PALETTE_DENSITE, values = PALETTE_DENSITE_STOPS) +
           ggplot2::geom_polygon(
             data = coordonnees_gate,
             ggplot2::aes(x = x, y = y),
@@ -2121,6 +2238,7 @@ CARROT <- R6Class(
           ggplot2::theme_bw() +
           ggplot2::theme(
             legend.position = "none",
+            aspect.ratio = 1,
             plot.title = element_text(face = "bold"),
             plot.subtitle = element_text(color = "darkblue", size = 11)
           ) +
@@ -2204,7 +2322,7 @@ CARROT <- R6Class(
       if (!is.null(df_densite_cons)) {
         graphique <- graphique +
           ggplot2::geom_raster(data = df_densite_cons, ggplot2::aes(x = X, y = Y, fill = densite), interpolate = TRUE) + # Affiche la densité des évènements conservés sous forme d'image raster (rapide, même avec beaucoup d'événements)
-          ggplot2::scale_fill_gradientn(colours = PALETTE_DENSITE) # Applique l'échelle pseudo-spectrale standardisée pour cartographier les gradients de population conservée
+          ggplot2::scale_fill_gradientn(colours = PALETTE_DENSITE, values = PALETTE_DENSITE_STOPS) # Applique l'échelle pseudo-spectrale standardisée pour cartographier les gradients de population conservée
       }
       if (nrow(donnees_retirees) > 0) { # N'ajoute la couche des évènements retirés que si elle est non vide pour cet échantillon
         graphique <- graphique +
@@ -2218,7 +2336,7 @@ CARROT <- R6Class(
           subtitle = paste0("Événements conservés : ", format(nb_apres, big.mark=" "), " | ", pourcentage, "%"), # Resitue les métriques d'efficacité du tri (nombre d'événements uniques et rendement)
           x = lbl_x, y = lbl_y # Injecte les libellés biologiques nettoyés aux axes correspondants
         ) + 
-        ggplot2::theme(legend.position = "none", plot.title = element_text(face = "bold"), plot.subtitle = element_text(color = "darkblue", size = 11)) # Masque la barre d'échelle continue des densités (redondante) et stylise les titres ; la légende conservé/retiré est gérée manuellement ci-dessous
+        ggplot2::theme(legend.position = "none", aspect.ratio = 1, plot.title = element_text(face = "bold"), plot.subtitle = element_text(color = "darkblue", size = 11)) # Masque la barre d'échelle continue des densités (redondante) et stylise les titres ; la légende conservé/retiré est gérée manuellement ci-dessous
       
       if (infos_gate$type == "poly") { # Couche géométrique adaptative : si le filtre appliqué provient d'un gating polygonal manuel de l'utilisateur
         coordonnees_gate <- as.data.frame(infos_gate$gate@boundaries) # Extrait sous forme de tableau bidimensionnel les sommets géométriques (X, Y) du polygone de tri manuel
@@ -2282,7 +2400,7 @@ CARROT <- R6Class(
         self$post_viabilite[[nom]] <- ff[resultat_filtrage@subSet, ]
       }
       
-      echantillons <- if (is.null(nom_echantillon)) names(liste_fcs_source) else nom_echantillon
+      echantillons <- if (is.null(nom_echantillon) || length(self$gate_viabilite) == 0) names(liste_fcs_source) else nom_echantillon # Applique à toute la cohorte la toute première fois (aucun gate de viabilité encore enregistré) ; sinon restreint la mise à jour à l'échantillon ciblé, pour permettre une forme de gate différente par échantillon
       for (nom in echantillons) appliquer_le_gate_vivantes(nom)
       
       self$update_pipeline("viabilite", nom_echantillon)
@@ -2397,7 +2515,8 @@ CARROT <- R6Class(
         ) +
           ggplot2::geom_raster(interpolate = TRUE) +
           ggplot2::scale_fill_gradientn(
-            colours = PALETTE_DENSITE
+            colours = PALETTE_DENSITE,
+            values  = PALETTE_DENSITE_STOPS
           ) +
           ggplot2::geom_polygon(
             data = coordonnees_gate,
@@ -2419,6 +2538,7 @@ CARROT <- R6Class(
           ) +
           ggplot2::theme(
             legend.position = "none",
+            aspect.ratio = 1,
             plot.title = ggplot2::element_text(face = "bold"),
             plot.subtitle = ggplot2::element_text(color = "darkblue", size = 11)
           )
@@ -2471,29 +2591,417 @@ CARROT <- R6Class(
       invisible(self)
     },
     
-    creer_gate = function(nom_gate, type = "polygon", axes = c("FSC-A", "SSC-A"), points = NULL) {
-      # Validation de la structure de stockage
+    creer_gate = function(nom_gate, type = "polygon", axes = c("FSC-A", "SSC-A"), points = NULL, gate_parent = NULL, cofacteur = 150, nom_echantillon = NULL) {
+      # Chaque gate est identifié par son nom (nom_gate) et stocké séparément dans
+      # self$gates_personnalisees : appeler cette méthode plusieurs fois avec des
+      # noms différents accumule les gates (aucun n'écrase les précédents).
+      # gate_parent (optionnel) permet de définir un gate sur une SOUS-POPULATION :
+      # si fourni, ce nouveau gate ne sera appliqué qu'à l'intérieur de la
+      # population déjà sélectionnée par le gate parent (gating hiérarchique).
+      # cofacteur : les gates de ce module sont dessinés sur des données transformées
+      # (arcsinh, cofacteur ajustable) car les canaux de fluorescence choisis librement
+      # ne sont pas exploitables en échelle linéaire brute.
+      #
+      # Forme PAR ÉCHANTILLON (comme dans module_pretraitement.R) : la toute
+      # première fois qu'un gate de ce nom est créé, sa forme s'applique par
+      # défaut à TOUS les échantillons disponibles. Un appel ultérieur avec un
+      # nom_echantillon précis ne modifie QUE la forme de cet échantillon-là,
+      # laissant les autres inchangés — chaque échantillon peut ainsi avoir une
+      # forme de gate adaptée individuellement. Les réglages globaux (axes,
+      # type, parent, cofacteur) sont fixés à la création et ne changent plus
+      # lors des ajustements par échantillon.
       if (is.null(self$gates_personnalisees)) self$gates_personnalisees <- list()
       
-      # Création de la porte selon le type
+      deja_initialise <- !is.null(self$gates_personnalisees[[nom_gate]]) && length(self$gates_personnalisees[[nom_gate]]$formes) > 0
+      
+      # Validation géométrique et mise en forme des points selon le type
       if (type == "polygon") {
         if (is.null(points) || nrow(points) < 3) stop("Un polygone nécessite au moins 3 points.")
-        gate <- flowCore::polygonGate(.gate = as.matrix(points[, 1:2]), filterId = nom_gate)
-        
+        mat_forme <- as.matrix(points[, 1:2])
+        colnames(mat_forme) <- NULL # Les noms de colonnes sont réappliqués à la volée dans construire_gate_flowcore()
       } else if (type == "rectangle") {
         if (is.null(points) || length(points) != 4) stop("Le rectangle nécessite c(minX, maxX, minY, maxY).")
-        gate <- flowCore::rectangleGate(filterId = nom_gate, 
-                                        .gate = matrix(c(points[1], points[2], points[3], points[4]), 
-                                                       ncol = 2, byrow = TRUE, 
-                                                       dimnames = list(NULL, axes)))
+        mat_forme <- as.numeric(points)
       } else {
         stop("Type de gate invalide : utilisez 'polygon' ou 'rectangle'.")
       }
       
-      # Sauvegarde
-      self$gates_personnalisees[[nom_gate]] <- list(gate = gate, axes = axes, type = type)
+      if (!deja_initialise) {
+        # ── Première création : réglages globaux fixés, forme appliquée à tous les échantillons disponibles ──
+        if (!is.null(gate_parent) && nchar(gate_parent) > 0) {
+          if (identical(gate_parent, nom_gate)) stop("Un gate ne peut pas être son propre parent.")
+          if (is.null(self$gates_personnalisees[[gate_parent]])) stop("Le gate parent '", gate_parent, "' n'existe pas. Créez-le d'abord.")
+        } else {
+          gate_parent <- NULL
+        }
+        
+        source_par_echantillon <- if (is.null(gate_parent)) self$get_derniere_source() else self$resoudre_population_gate(gate_parent)
+        if (is.null(source_par_echantillon) || length(source_par_echantillon) == 0) {
+          stop("Aucune donnée disponible pour créer ce gate (vérifiez le prétraitement ou le gate parent choisi).")
+        }
+        
+        formes <- stats::setNames(rep(list(mat_forme), length(source_par_echantillon)), names(source_par_echantillon))
+        
+        self$gates_personnalisees[[nom_gate]] <- list(axes = axes, type = type, gate_parent = gate_parent, cofacteur = cofacteur, formes = formes)
+        
+        message("Succès : Gate '", nom_gate, "' créé sur les axes ", paste(axes, collapse = "/"),
+                " (cofacteur ", cofacteur, "), appliqué par défaut à ", length(formes), " échantillon(s).",
+                if (!is.null(gate_parent)) paste0(" Sous-population de '", gate_parent, "'.") else "")
+      } else {
+        # ── Gate déjà existant : ne touche pas aux réglages globaux, met à jour uniquement la ou les forme(s) ciblée(s) ──
+        infos  <- self$gates_personnalisees[[nom_gate]]
+        formes <- infos$formes
+        cibles <- if (is.null(nom_echantillon)) names(formes) else nom_echantillon
+        for (nom in cibles) formes[[nom]] <- mat_forme
+        self$gates_personnalisees[[nom_gate]]$formes <- formes
+        
+        if (is.null(nom_echantillon)) {
+          message("Gate '", nom_gate, "' : forme réinitialisée pour tous les échantillons (", length(formes), ").")
+        } else {
+          message("Gate '", nom_gate, "' : forme mise à jour pour ", nom_echantillon, " uniquement.")
+        }
+      }
       
-      message("Succès : Gate '", nom_gate, "' créée sur les axes ", paste(axes, collapse="/"), ".")
+      return(invisible(self))
+    },
+    
+    # Construit l'objet de gating flowCore (polygonGate/rectangleGate) à partir
+    # d'une forme stockée (matrice de points ou vecteur c(xmin,xmax,ymin,ymax))
+    # et des axes du gate. Utilisée par resoudre_population_gate() pour
+    # reconstruire, à la volée, le gate propre à chaque échantillon.
+    construire_gate_flowcore = function(type, axes, mat_forme, nom_gate) {
+      if (identical(type, "polygon")) {
+        mat <- as.matrix(mat_forme)
+        colnames(mat) <- axes # OBLIGATOIRE : flowCore::polygonGate() exige des noms de colonnes ("Matrix of gate boundaries must have colnames." sinon)
+        flowCore::polygonGate(.gate = mat, filterId = nom_gate)
+      } else {
+        flowCore::rectangleGate(filterId = nom_gate,
+                                .gate = matrix(c(mat_forme[1], mat_forme[2], mat_forme[3], mat_forme[4]),
+                                               ncol = 2, byrow = TRUE, dimnames = list(NULL, axes)))
+      }
+    },
+    
+    # Renvoie la forme (matrice de points ou vecteur de bornes) enregistrée
+    # pour un échantillon précis d'un gate donné, ou NULL si elle n'existe pas
+    # encore. Utilisée par l'interface pour précharger le tracé lors d'un
+    # changement d'échantillon.
+    obtenir_forme_gate = function(nom_gate, nom_echantillon) {
+      if (is.null(self$gates_personnalisees) || is.null(self$gates_personnalisees[[nom_gate]])) return(NULL)
+      self$gates_personnalisees[[nom_gate]]$formes[[nom_echantillon]]
+    },
+    
+    # Résout, pour un gate donné, la population de cellules qu'il sélectionne
+    # réellement — en tenant compte de la chaîne de gates parents éventuelle
+    # (gating hiérarchique / sous-populations) ET de la forme propre à chaque
+    # échantillon. Renvoie une liste de flowFrames (un par échantillon où au
+    # moins une cellule est retenue). Les valeurs renvoyées restent celles
+    # d'origine (non transformées) : la transformation arcsinh n'est utilisée
+    # qu'en interne pour déterminer quelles cellules tombent dans le gate,
+    # exactement comme pour le tracé interactif.
+    resoudre_population_gate = function(nom_gate, nom_echantillon = NULL) {
+      if (is.null(self$gates_personnalisees) || is.null(self$gates_personnalisees[[nom_gate]])) {
+        stop("Le gate '", nom_gate, "' n'existe pas. Créez-le d'abord avec creer_gate().")
+      }
+      infos_gate <- self$gates_personnalisees[[nom_gate]]
+      cofacteur  <- infos_gate$cofacteur %||% 150 # Rétrocompatibilité : les gates créés avant l'ajout de ce réglage utilisent la valeur par défaut
+      
+      source_par_echantillon <- if (is.null(infos_gate$gate_parent)) {
+        self$get_derniere_source() # Pas de parent : part de l'étape la plus avancée disponible du pipeline
+      } else {
+        self$resoudre_population_gate(infos_gate$gate_parent) # Avec un parent : ne considère que la sous-population déjà sélectionnée par celui-ci (récursif sur toute la chaîne)
+      }
+      
+      if (is.null(source_par_echantillon) || length(source_par_echantillon) == 0) return(list())
+      
+      trans_axes <- flowCore::transformList(infos_gate$axes, flowCore::arcsinhTransform(a = 0, b = 1 / cofacteur, c = 0)) # Même transformation (et même cofacteur) que celle utilisée pour le tracé interactif du gate
+      
+      noms_a_traiter <- if (is.null(nom_echantillon)) names(source_par_echantillon) else intersect(nom_echantillon, names(source_par_echantillon))
+      
+      resultat <- list()
+      for (nom in noms_a_traiter) {
+        ff <- source_par_echantillon[[nom]]
+        if (is.null(ff) || nrow(flowCore::exprs(ff)) == 0) next
+        if (!all(infos_gate$axes %in% flowCore::colnames(ff))) next # Sécurité : ignore un échantillon qui ne posséderait pas les 2 canaux du gate
+        
+        mat_forme <- infos_gate$formes[[nom]]
+        if (is.null(mat_forme)) mat_forme <- infos_gate$formes[[1]] # Repli : échantillon ajouté après coup sans forme propre → utilise la première forme disponible comme valeur par défaut
+        if (is.null(mat_forme)) next
+        
+        gate_echantillon <- self$construire_gate_flowcore(infos_gate$type, infos_gate$axes, mat_forme, nom_gate)
+        
+        ff_transforme   <- flowCore::transform(ff, trans_axes) # Applique la transformation uniquement pour tester l'appartenance au gate
+        resultat_filtre <- flowCore::filter(ff_transforme, gate_echantillon)
+        ff_gate         <- ff[resultat_filtre@subSet, ] # Sous-échantillonne le flowFrame D'ORIGINE (valeurs non transformées) avec les indices obtenus sur la version transformée
+        if (nrow(flowCore::exprs(ff_gate)) > 0) resultat[[nom]] <- ff_gate
+      }
+      resultat
+    },
+    
+    # Résumé chiffré d'un gate : nombre d'événements et pourcentage par
+    # rapport à la population parente (ou à la cohorte totale si pas de
+    # parent), pour chaque échantillon. Utile pour l'affichage dans l'interface.
+    resumer_gate = function(nom_gate) {
+      if (is.null(self$gates_personnalisees) || is.null(self$gates_personnalisees[[nom_gate]])) {
+        stop("Le gate '", nom_gate, "' n'existe pas. Créez-le d'abord avec creer_gate().")
+      }
+      infos_gate <- self$gates_personnalisees[[nom_gate]]
+      
+      population_gate  <- self$resoudre_population_gate(nom_gate)
+      population_amont <- if (is.null(infos_gate$gate_parent)) self$get_derniere_source() else self$resoudre_population_gate(infos_gate$gate_parent)
+      
+      noms <- union(names(population_gate), names(population_amont))
+      if (length(noms) == 0) return(data.frame(echantillon = character(0), n_evenements = integer(0), pct_parent = numeric(0)))
+      
+      lignes <- lapply(noms, function(nom) {
+        n_gate   <- if (!is.null(population_gate[[nom]]))  nrow(flowCore::exprs(population_gate[[nom]]))  else 0L
+        n_amont  <- if (!is.null(population_amont[[nom]])) nrow(flowCore::exprs(population_amont[[nom]])) else 0L
+        data.frame(
+          echantillon  = nom,
+          n_evenements = n_gate,
+          pct_parent   = if (n_amont > 0) round(100 * n_gate / n_amont, 2) else NA_real_
+        )
+      })
+      do.call(rbind, lignes)
+    },
+    
+    # Supprime un gate personnalisé. Par défaut (cascade = TRUE), supprime
+    # également tous les gates enfants qui en dépendent directement ou
+    # indirectement, pour éviter de laisser des gates orphelins référençant un
+    # parent inexistant. Supprime aussi les résultats d'analyses associés à ce
+    # gate (UMAP/t-SNE/PCA/FlowSOM) si présents.
+    supprimer_gate = function(nom_gate, cascade = TRUE) {
+      if (is.null(self$gates_personnalisees) || is.null(self$gates_personnalisees[[nom_gate]])) {
+        message("Le gate '", nom_gate, "' n'existe pas déjà plus.")
+        return(invisible(self))
+      }
+      
+      enfants_directs <- names(self$gates_personnalisees)[
+        vapply(self$gates_personnalisees, function(g) identical(g$gate_parent, nom_gate), logical(1))
+      ]
+      
+      if (length(enfants_directs) > 0) {
+        if (!cascade) stop("Impossible de supprimer '", nom_gate, "' : les gates suivants en dépendent : ", paste(enfants_directs, collapse = ", "), ". Utilisez cascade = TRUE pour les supprimer aussi.")
+        for (enfant in enfants_directs) self$supprimer_gate(enfant, cascade = TRUE) # Supprime récursivement toute la descendance avant de supprimer ce gate
+      }
+      
+      self$gates_personnalisees[[nom_gate]] <- NULL
+      if (!is.null(self$analyses_umap))     self$analyses_umap[[nom_gate]]     <- NULL
+      if (!is.null(self$analyses_tsne))     self$analyses_tsne[[nom_gate]]     <- NULL
+      if (!is.null(self$analyses_pca))      self$analyses_pca[[nom_gate]]      <- NULL
+      if (!is.null(self$clusters_flowsom))  self$clusters_flowsom[[nom_gate]]  <- NULL
+      
+      message("Gate '", nom_gate, "' supprimé", if (length(enfants_directs) > 0) paste0(" (ainsi que ", length(enfants_directs), " gate(s) enfant(s))") else "", ".")
+      return(invisible(self))
+    },
+    
+    # ===========================================
+    # SECTION ANALYSES — projections et clustering sur un gate personnalisé
+    # ===========================================
+    # Ces 4 méthodes travaillent toutes sur la population sélectionnée par un
+    # gate créé via creer_gate() (identifié par son nom). La population est
+    # extraite (toutes canaux fluorescents par défaut, ou une sélection
+    # explicite), poolée à travers tous les échantillons disponibles (avec une
+    # colonne de traçabilité indiquant l'échantillon d'origine de chaque
+    # cellule), puis passée à l'algorithme demandé. Voir private$extraire_donnees_gate().
+    
+    projection_UMAP = function(nom_gate, canaux = NULL, n_neighbors = 15, min_dist = 0.1,
+                               n_components = 2, metric = "euclidean", sous_echantillonnage_max = 50000, cofacteur = 150) { # Réalise une projection UMAP (uwot) de la population sélectionnée par le gate
+      if (!requireNamespace("uwot", quietly = TRUE)) stop("Le package 'uwot' est requis pour la projection UMAP (install.packages('uwot')).") # Vérifie la disponibilité du package avant tout calcul
+      
+      donnees <- private$extraire_donnees_gate(nom_gate, canaux, sous_echantillonnage_max, cofacteur) # Extrait, transforme (Arcsinh) et poole la matrice d'expression des cellules contenues dans le gate, toutes échantillons confondus
+      mat <- as.matrix(donnees$expression) # Convertit explicitement en matrice numérique, format attendu par uwot::umap
+      
+      set.seed(self$seed) # Fixe la graine aléatoire pour la reproductibilité (UMAP est un algorithme stochastique)
+      embedding <- uwot::umap( # Calcule la projection non linéaire en dimension réduite
+        mat,
+        n_neighbors  = n_neighbors, # Nombre de voisins définissant le voisinage local de chaque cellule
+        min_dist     = min_dist, # Distance minimale autorisée entre points dans l'espace de sortie (compacité des amas)
+        n_components = n_components, # Dimensionnalité de sortie souhaitée (2 par défaut, pour visualisation)
+        metric       = metric, # Métrique de distance utilisée pour le calcul des plus proches voisins
+        n_threads    = 1, # Un seul thread pour garantir la reproductibilité malgré la graine fixée
+        verbose      = TRUE # Affiche la progression du calcul dans la console R
+      )
+      colnames(embedding) <- paste0("UMAP_", seq_len(ncol(embedding))) # Nomme explicitement les colonnes de sortie (UMAP_1, UMAP_2, ...)
+      
+      if (is.null(self$analyses_umap)) self$analyses_umap <- list() # Sécurité : initialise la structure de stockage si absente
+      self$analyses_umap[[nom_gate]] <- list( # Archive le résultat complet sous le nom du gate, en écrasant un éventuel résultat précédent pour ce même gate
+        embedding           = embedding, # Coordonnées des cellules dans l'espace UMAP réduit
+        echantillon_origine = donnees$echantillon_origine, # Vecteur de traçabilité : échantillon d'origine de chaque ligne de l'embedding
+        canaux              = donnees$canaux, # Liste des canaux/marqueurs effectivement utilisés pour le calcul
+        expression          = donnees$expression, # Matrice d'expression brute poolée (mêmes lignes que l'embedding), pour permettre de colorer la projection par marqueur
+        parametres          = list(n_neighbors = n_neighbors, min_dist = min_dist, n_components = n_components, metric = metric) # Mémorise les réglages utilisés pour traçabilité
+      )
+      
+      message("UMAP calculée pour le gate '", nom_gate, "' sur ", nrow(mat), " cellules (", length(donnees$canaux), " canaux).") # Confirme le succès et résume l'ampleur du calcul effectué
+      return(invisible(self$analyses_umap[[nom_gate]])) # Renvoie de manière invisible le résultat complet, prêt à être exploité par l'interface Shiny
+    },
+    
+    projection_tSNE = function(nom_gate, canaux = NULL, dims = 2, perplexity = 30, theta = 0.5,
+                               max_iter = 1000, sous_echantillonnage_max = 20000, cofacteur = 150) { # Réalise une projection t-SNE (Rtsne) de la population sélectionnée par le gate
+      if (!requireNamespace("Rtsne", quietly = TRUE)) stop("Le package 'Rtsne' est requis pour la projection t-SNE (install.packages('Rtsne')).") # Vérifie la disponibilité du package avant tout calcul
+      
+      donnees <- private$extraire_donnees_gate(nom_gate, canaux, sous_echantillonnage_max, cofacteur) # Extrait, transforme (Arcsinh) et poole la matrice d'expression des cellules contenues dans le gate, toutes échantillons confondus
+      mat <- as.matrix(donnees$expression) # Convertit explicitement en matrice numérique, format attendu par Rtsne::Rtsne
+      
+      if (nrow(mat) <= 3 * perplexity) { # Rtsne exige un nombre de cellules suffisant par rapport à la perplexité demandée
+        stop("Pas assez de cellules dans le gate (", nrow(mat), ") pour une perplexité de ", perplexity, ". Réduisez la perplexité ou vérifiez le gate.")
+      }
+      
+      set.seed(self$seed) # Fixe la graine aléatoire pour la reproductibilité (t-SNE est un algorithme stochastique)
+      resultat_tsne <- Rtsne::Rtsne( # Calcule la projection non linéaire en dimension réduite via l'algorithme de Barnes-Hut
+        mat,
+        dims             = dims, # Dimensionnalité de sortie souhaitée (2 par défaut, pour visualisation)
+        perplexity       = perplexity, # Contrôle l'équilibre entre structure locale et globale (nombre effectif de voisins considérés)
+        theta            = theta, # Paramètre d'approximation de Barnes-Hut (0 = exact mais lent, proche de 1 = rapide mais approximatif)
+        max_iter         = max_iter, # Nombre d'itérations d'optimisation de la descente de gradient
+        check_duplicates = FALSE, # Autorise les lignes dupliquées (fréquentes en cytométrie après arrondis/compensation) sans lever d'erreur
+        num_threads      = 1, # Un seul thread pour garantir la reproductibilité malgré la graine fixée
+        verbose          = TRUE # Affiche la progression du calcul dans la console R
+      )
+      
+      embedding <- resultat_tsne$Y # Extrait la matrice de coordonnées finales de l'objet retourné par Rtsne
+      colnames(embedding) <- paste0("tSNE_", seq_len(ncol(embedding))) # Nomme explicitement les colonnes de sortie (tSNE_1, tSNE_2, ...)
+      
+      if (is.null(self$analyses_tsne)) self$analyses_tsne <- list() # Sécurité : initialise la structure de stockage si absente
+      self$analyses_tsne[[nom_gate]] <- list( # Archive le résultat complet sous le nom du gate, en écrasant un éventuel résultat précédent pour ce même gate
+        embedding           = embedding, # Coordonnées des cellules dans l'espace t-SNE réduit
+        echantillon_origine = donnees$echantillon_origine, # Vecteur de traçabilité : échantillon d'origine de chaque ligne de l'embedding
+        canaux              = donnees$canaux, # Liste des canaux/marqueurs effectivement utilisés pour le calcul
+        expression          = donnees$expression, # Matrice d'expression brute poolée (mêmes lignes que l'embedding), pour permettre de colorer la projection par marqueur
+        parametres          = list(dims = dims, perplexity = perplexity, theta = theta, max_iter = max_iter) # Mémorise les réglages utilisés pour traçabilité
+      )
+      
+      message("t-SNE calculée pour le gate '", nom_gate, "' sur ", nrow(mat), " cellules (", length(donnees$canaux), " canaux).") # Confirme le succès et résume l'ampleur du calcul effectué
+      return(invisible(self$analyses_tsne[[nom_gate]])) # Renvoie de manière invisible le résultat complet, prêt à être exploité par l'interface Shiny
+    },
+    
+    projection_PCA = function(nom_gate, canaux = NULL, n_components = 2, centrer = TRUE, reduire = TRUE,
+                              sous_echantillonnage_max = NULL, cofacteur = 150) { # Réalise une analyse en composantes principales (stats::prcomp) de la population sélectionnée par le gate
+      donnees <- private$extraire_donnees_gate(nom_gate, canaux, sous_echantillonnage_max, cofacteur) # Extrait, transforme (Arcsinh) et poole la matrice d'expression des cellules contenues dans le gate, toutes échantillons confondus
+      mat <- as.matrix(donnees$expression) # Convertit explicitement en matrice numérique, format attendu par prcomp
+      
+      resultat_pca <- stats::prcomp(mat, center = centrer, scale. = reduire) # Calcule la décomposition en valeurs propres (SVD) de la matrice d'expression, centrée et/ou réduite selon les réglages
+      
+      n_disponibles <- ncol(resultat_pca$x) # Nombre total de composantes principales effectivement calculables (borné par le nombre de canaux)
+      n_a_garder    <- min(n_components, n_disponibles) # Sécurité : ne garde pas plus de composantes que ce qui est mathématiquement disponible
+      embedding     <- resultat_pca$x[, seq_len(n_a_garder), drop = FALSE] # Extrait les coordonnées des cellules sur les n premières composantes principales
+      
+      variance_expliquee <- (resultat_pca$sdev^2 / sum(resultat_pca$sdev^2))[seq_len(n_a_garder)] # Calcule la proportion de variance totale expliquée par chacune des composantes conservées
+      
+      if (is.null(self$analyses_pca)) self$analyses_pca <- list() # Sécurité : initialise la structure de stockage si absente
+      self$analyses_pca[[nom_gate]] <- list( # Archive le résultat complet sous le nom du gate, en écrasant un éventuel résultat précédent pour ce même gate
+        embedding           = embedding, # Coordonnées des cellules sur les composantes principales conservées
+        echantillon_origine = donnees$echantillon_origine, # Vecteur de traçabilité : échantillon d'origine de chaque ligne de l'embedding
+        canaux              = donnees$canaux, # Liste des canaux/marqueurs effectivement utilisés pour le calcul
+        expression          = donnees$expression, # Matrice d'expression brute poolée (mêmes lignes que l'embedding), pour permettre de colorer la projection par marqueur
+        variance_expliquee  = variance_expliquee, # Proportion de variance expliquée par chaque composante conservée
+        rotation            = resultat_pca$rotation[, seq_len(n_a_garder), drop = FALSE], # Matrice des poids (loadings) de chaque canal sur chaque composante, utile pour interpréter les axes
+        parametres          = list(n_components = n_a_garder, centrer = centrer, reduire = reduire) # Mémorise les réglages utilisés pour traçabilité
+      )
+      
+      message("PCA calculée pour le gate '", nom_gate, "' sur ", nrow(mat), " cellules (",
+              round(sum(variance_expliquee) * 100, 1), "% de variance expliquée sur ", n_a_garder, " composante(s)).") # Confirme le succès et résume la qualité de la réduction de dimension obtenue
+      return(invisible(self$analyses_pca[[nom_gate]])) # Renvoie de manière invisible le résultat complet, prêt à être exploité par l'interface Shiny
+    },
+    
+    creer_clusters = function(nom_gate, canaux = NULL, xdim = 10, ydim = 10, n_metaclusters = 10,
+                              sous_echantillonnage_max = NULL, reutiliser_donnees_de = NULL, cofacteur = 150) { # Réalise un clustering non supervisé (FlowSOM) de la population sélectionnée par le gate
+      if (!requireNamespace("FlowSOM", quietly = TRUE)) stop("Le package 'FlowSOM' est requis pour le clustering (BiocManager::install('FlowSOM')).") # Vérifie la disponibilité du package avant tout calcul
+      
+      # reutiliser_donnees_de = "umap" ou "tsne" (optionnel) : au lieu de ré-extraire
+      # et ré-échantillonner indépendamment la population du gate (ce qui donnerait
+      # un nombre et un ordre de cellules différents de ceux de l'UMAP/t-SNE déjà
+      # calculée, rendant toute superposition incohérente), on reprend EXACTEMENT
+      # la même matrice poolée que celle utilisée pour cette projection. Les
+      # métaclusters obtenus correspondent alors ligne à ligne à l'embedding, et
+      # peuvent être superposés dessus sans le moindre décalage.
+      donnees <- if (!is.null(reutiliser_donnees_de)) {
+        source_analyse <- if (identical(reutiliser_donnees_de, "umap")) self$analyses_umap[[nom_gate]] else self$analyses_tsne[[nom_gate]]
+        if (is.null(source_analyse) || is.null(source_analyse$expression)) {
+          stop("Aucune analyse ", reutiliser_donnees_de, " disponible pour le gate '", nom_gate, "' à réutiliser. Calculez-la d'abord, ou laissez reutiliser_donnees_de = NULL pour une extraction indépendante.")
+        }
+        list(expression = source_analyse$expression, echantillon_origine = source_analyse$echantillon_origine, canaux = source_analyse$canaux)
+      } else {
+        private$extraire_donnees_gate(nom_gate, canaux, sous_echantillonnage_max, cofacteur) # Extraction, transformation (Arcsinh) et pooling indépendants (comportement historique)
+      }
+      mat <- as.matrix(donnees$expression) # Convertit explicitement en matrice numérique
+      
+      ff_pool <- flowCore::flowFrame(mat) # Reconstruit un flowFrame unique à partir de la matrice poolée, format attendu en entrée de FlowSOM::FlowSOM()
+      
+      set.seed(self$seed) # Fixe la graine aléatoire pour la reproductibilité (l'initialisation de la grille SOM est aléatoire)
+      fsom <- FlowSOM::FlowSOM( # Construit la carte auto-organisatrice (SOM) puis réalise la méta-clusterisation en une seule étape
+        ff_pool,
+        colsToUse = colnames(mat), # Restreint explicitement le clustering aux canaux/marqueurs sélectionnés
+        xdim      = xdim, # Largeur de la grille SOM (nombre de nœuds sur l'axe X)
+        ydim      = ydim, # Hauteur de la grille SOM (nombre de nœuds sur l'axe Y)
+        nClus     = n_metaclusters, # Nombre de métaclusters cibles pour la clusterisation hiérarchique finale des nœuds SOM
+        seed      = self$seed # Transmet également la graine en interne à FlowSOM pour une reproductibilité complète de l'algorithme
+      )
+      
+      clusters     <- FlowSOM::GetClusters(fsom) # Récupère l'assignation de chaque cellule à son nœud SOM individuel (cluster fin)
+      metaclusters <- FlowSOM::GetMetaclusters(fsom) # Récupère l'assignation de chaque cellule à son métacluster (regroupement de nœuds SOM voisins)
+      
+      if (is.null(self$clusters_flowsom)) self$clusters_flowsom <- list() # Sécurité : initialise la structure de stockage si absente
+      self$clusters_flowsom[[nom_gate]] <- list( # Archive le résultat complet sous le nom du gate, en écrasant un éventuel résultat précédent pour ce même gate
+        fsom                = fsom, # Objet FlowSOM complet (utile pour les visualisations natives : arbre SOM, heatmap des marqueurs, etc.)
+        clusters            = clusters, # Vecteur d'assignation aux clusters fins (nœuds SOM), un par cellule
+        metaclusters        = metaclusters, # Vecteur d'assignation aux métaclusters, un par cellule
+        echantillon_origine = donnees$echantillon_origine, # Vecteur de traçabilité : échantillon d'origine de chaque cellule clusterisée
+        canaux              = donnees$canaux, # Liste des canaux/marqueurs effectivement utilisés pour le calcul
+        aligne_sur          = reutiliser_donnees_de, # Mémorise si ce clustering est aligné sur une projection existante ("umap"/"tsne") ou indépendant (NULL)
+        expression          = donnees$expression, # Matrice d'expression brute poolée (mêmes lignes que les clusters), pour permettre les heatmaps de marqueurs par cluster
+        parametres          = list(xdim = xdim, ydim = ydim, n_metaclusters = n_metaclusters) # Mémorise les réglages utilisés pour traçabilité
+      )
+      
+      message("Clustering FlowSOM calculé pour le gate '", nom_gate, "' sur ", nrow(mat), " cellules (",
+              length(unique(metaclusters)), " métaclusters, grille ", xdim, "x", ydim, ").") # Confirme le succès et résume l'ampleur du clustering obtenu
+      return(invisible(self$clusters_flowsom[[nom_gate]])) # Renvoie de manière invisible le résultat complet, prêt à être exploité par l'interface Shiny
+    },
+    
+    # Calcule l'expression médiane de chaque canal, pour chaque (méta)cluster
+    # d'un clustering FlowSOM déjà réalisé — la matrice standard affichée en
+    # heatmap pour interpréter biologiquement un clustering (quels marqueurs
+    # définissent quel cluster). Les données étant déjà transformées (Arcsinh)
+    # lors de l'extraction, ces médianes sont directement comparables entre
+    # canaux. Si des noms personnalisés ont été définis via
+    # renommer_metacluster(), ils sont utilisés dans les identifiants de lignes.
+    resumer_expression_clusters = function(nom_gate, niveau = "metacluster") {
+      res <- self$clusters_flowsom[[nom_gate]]
+      if (is.null(res)) stop("Aucun clustering disponible pour le gate '", nom_gate, "'. Lancez creer_clusters() d'abord.")
+      
+      assignation <- if (identical(niveau, "metacluster")) res$metaclusters else res$clusters
+      mat <- res$expression
+      
+      ids <- sort(unique(assignation))
+      medianes <- do.call(rbind, lapply(ids, function(id) {
+        sous_mat <- mat[assignation == id, , drop = FALSE]
+        apply(sous_mat, 2, stats::median, na.rm = TRUE)
+      }))
+      
+      effectifs <- vapply(ids, function(id) sum(assignation == id), integer(1))
+      
+      etiquettes <- as.character(ids)
+      if (identical(niveau, "metacluster") && !is.null(res$noms_metaclusters)) {
+        etiquettes <- vapply(as.character(ids), function(id) {
+          nom_perso <- res$noms_metaclusters[[id]]
+          if (!is.null(nom_perso) && nchar(trimws(nom_perso)) > 0) paste0(id, " - ", nom_perso) else id
+        }, character(1))
+      }
+      rownames(medianes) <- paste0(etiquettes, " (n=", format(effectifs, big.mark = " "), ")")
+      
+      medianes
+    },
+    
+    # Attribue un nom biologique personnalisé à un métacluster (ex: "Lymphocytes T CD4+")
+    # une fois son identité déterminée à partir de la heatmap d'expression. Ce nom
+    # est ensuite repris dans tous les affichages (heatmap, légendes de projection).
+    renommer_metacluster = function(nom_gate, id_metacluster, nouveau_nom) {
+      if (is.null(self$clusters_flowsom) || is.null(self$clusters_flowsom[[nom_gate]])) {
+        stop("Aucun clustering disponible pour le gate '", nom_gate, "'. Lancez creer_clusters() d'abord.")
+      }
+      if (is.null(self$clusters_flowsom[[nom_gate]]$noms_metaclusters)) self$clusters_flowsom[[nom_gate]]$noms_metaclusters <- list()
+      self$clusters_flowsom[[nom_gate]]$noms_metaclusters[[as.character(id_metacluster)]] <- trimws(nouveau_nom)
+      message("Métacluster ", id_metacluster, " renommé : '", nouveau_nom, "'.")
       return(invisible(self))
     },
     
@@ -2581,5 +3089,80 @@ CARROT <- R6Class(
     
   ),
   
-  private = list(df_control_file = NULL)
+  private = list(
+    df_control_file = NULL,
+    
+    # Extrait et poole, à travers tous les échantillons disponibles, la matrice
+    # d'expression des cellules contenues dans un gate personnalisé donné (créé
+    # via creer_gate()). Utilisée par les 4 méthodes d'analyse avancée
+    # (projection_UMAP, projection_tSNE, projection_PCA, creer_clusters) pour
+    # partager exactement la même logique d'extraction.
+    extraire_donnees_gate = function(nom_gate, canaux = NULL, sous_echantillonnage_max = NULL, cofacteur = 150) {
+      if (is.null(self$gates_personnalisees) || is.null(self$gates_personnalisees[[nom_gate]])) { # Vérifie que le gate demandé a bien été créé au préalable
+        stop("Le gate '", nom_gate, "' n'existe pas. Créez-le d'abord avec creer_gate().")
+      }
+      
+      # resoudre_population_gate() applique déjà la chaîne complète de gates
+      # parents éventuelle (gating hiérarchique / sous-populations) : la
+      # population renvoyée ici correspond donc directement à ce que ce gate
+      # sélectionne réellement, qu'il parte de la cohorte totale ou d'une
+      # sous-population déjà filtrée par un gate parent.
+      population_gate <- self$resoudre_population_gate(nom_gate)
+      if (length(population_gate) == 0) {
+        stop("Aucune cellule trouvée dans le gate '", nom_gate, "' pour les échantillons disponibles.")
+      }
+      
+      liste_expr    <- list() # Accumule, pour chaque échantillon, la sous-matrice d'expression des cellules retenues par le gate
+      liste_origine <- list() # Accumule, pour chaque échantillon, un vecteur répétant son nom (traçabilité de l'origine de chaque cellule poolée)
+      
+      for (nom in names(population_gate)) { # Parcourt chaque échantillon où au moins une cellule est retenue par ce gate
+        ff_gate <- population_gate[[nom]]
+        canaux_disponibles <- flowCore::colnames(ff_gate) # Liste les canaux réellement présents dans ce fichier FCS précis
+        
+        canaux_a_garder <- if (is.null(canaux)) { # Si l'utilisateur n'a précisé aucun canal explicitement
+          canaux_disponibles[!grepl("FSC|SSC|Time", canaux_disponibles, ignore.case = TRUE)] # Par défaut : tous les canaux de fluorescence (exclut les paramètres morphologiques et le temps)
+        } else {
+          intersect(canaux, canaux_disponibles) # Sinon, ne garde que l'intersection entre les canaux demandés et ceux réellement présents dans ce fichier
+        }
+        if (length(canaux_a_garder) == 0) next
+        
+        # IMPORTANT : on transforme (Arcsinh) TOUS les canaux retenus ici, pas
+        # seulement les 2 axes du gate. UMAP/t-SNE/PCA/FlowSOM reposent tous sur
+        # des distances euclidiennes entre cellules ; sur une échelle linéaire
+        # brute, les canaux de forte intensité dominent entièrement ce calcul de
+        # distance et masquent la vraie structure biologique. La transformation
+        # doit donc s'appliquer à l'ensemble de la matrice d'expression utilisée
+        # pour l'analyse, exactement comme le ferait n'importe quel logiciel de
+        # cytométrie (FlowJo, OMIQ...) avant une projection ou un clustering.
+        trans_analyse <- flowCore::transformList(canaux_a_garder, flowCore::arcsinhTransform(a = 0, b = 1 / cofacteur, c = 0))
+        ff_transforme <- flowCore::transform(ff_gate, trans_analyse)
+        
+        mat <- flowCore::exprs(ff_transforme)[, canaux_a_garder, drop = FALSE] # Extrait la sous-matrice numérique d'expression TRANSFORMÉE pour les canaux retenus
+        liste_expr[[nom]]    <- mat # Mémorise cette sous-matrice pour l'échantillon courant
+        liste_origine[[nom]] <- rep(nom, nrow(mat)) # Mémorise, pour chaque cellule de cet échantillon, son nom d'origine
+      }
+      
+      if (length(liste_expr) == 0) {
+        stop("Aucune cellule trouvée dans le gate '", nom_gate, "' pour les échantillons disponibles.")
+      }
+      
+      canaux_communs <- Reduce(intersect, lapply(liste_expr, colnames)) # Détermine l'ensemble des canaux présents dans TOUS les échantillons retenus, pour un pooling cohérent
+      if (length(canaux_communs) == 0) {
+        stop("Aucun canal commun entre les échantillons pour ce gate.")
+      }
+      liste_expr <- lapply(liste_expr, function(m) m[, canaux_communs, drop = FALSE]) # Restreint chaque sous-matrice aux seuls canaux communs, pour garantir des colonnes identiques avant l'empilement
+      
+      expression_totale <- do.call(rbind, liste_expr) # Empile verticalement les sous-matrices de tous les échantillons en une seule matrice poolée
+      origine_totale    <- unlist(liste_origine, use.names = FALSE) # Empile de la même façon les vecteurs de traçabilité, dans le même ordre que les lignes de expression_totale
+      
+      if (!is.null(sous_echantillonnage_max) && nrow(expression_totale) > sous_echantillonnage_max) { # Si un plafond de sous-échantillonnage est fixé et dépassé (utile pour les algorithmes coûteux comme UMAP/t-SNE)
+        set.seed(self$seed) # Fixe la graine pour la reproductibilité du tirage aléatoire
+        indices_tires     <- sample(seq_len(nrow(expression_totale)), sous_echantillonnage_max) # Tire aléatoirement le nombre de cellules autorisé, toutes échantillons confondus
+        expression_totale <- expression_totale[indices_tires, , drop = FALSE]
+        origine_totale    <- origine_totale[indices_tires]
+      }
+      
+      list(expression = expression_totale, echantillon_origine = origine_totale, canaux = canaux_communs) # Renvoie la matrice poolée, sa traçabilité d'origine et la liste des canaux effectivement utilisés
+    }
+  )
 )

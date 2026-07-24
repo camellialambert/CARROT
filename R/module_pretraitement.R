@@ -3,8 +3,8 @@ library(shinydashboard)
 library(shinyjs)
 library(plotly)
 
-RES_PIXELS_GATING    <- 80
-TAILLE_PIXEL_GATING  <- 5
+RES_PIXELS_GATING    <- 200 # Résolution de la grille de densité pour le gating interactif (plotly) — rapprochée de celle des figures statiques (400) pour un rendu visuel cohérent, tout en restant fluide en direct dans le navigateur.
+TAILLE_PIXEL_GATING  <- 3 # Taille des marqueurs plotly représentant chaque pixel de densité (réduite en conséquence de la résolution plus fine, pour éviter tout chevauchement excessif)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # UI
@@ -22,14 +22,6 @@ pretraitement_ui <- function(id) {
         font-size:12px; color:#444; margin-top:6px;
       }
       .pretrait-instr b { color:#0077b6; }
-      .gate-chip {
-        display:inline-block; cursor:pointer;
-        background:#e3f2fd; border:1px solid #0077b6;
-        border-radius:12px; padding:3px 10px; margin:3px 2px;
-        font-size:12px; color:#0077b6; font-weight:600;
-      }
-      .gate-chip:hover { background:#bbdefb; }
-      .gate-chip.active { background:#0077b6; color:#fff; }
       .recap-row { font-size:12px; margin-bottom:6px; padding:6px 8px;
                    background:#f9f9f9; border-radius:4px; }
       .recap-row .label { font-weight:bold; color:#333; }
@@ -101,7 +93,8 @@ pretraitement_ui <- function(id) {
                    div(class = "pretrait-instr",
                        icon("hand-pointer"),
                        " Cliquez sur le graphique pour ajouter des sommets. ",
-                       tags$b("Double-clic"), " pour fermer le polygone."),
+                       tags$b("Double-clic"), " pour fermer le polygone. Le gate affiché est ",
+                       "celui de l'échantillon sélectionné : chaque échantillon peut avoir sa propre forme."),
                    br(),
                    
                    fluidRow(
@@ -111,11 +104,7 @@ pretraitement_ui <- function(id) {
                      column(6, actionButton(ns("btn_reset_gate"),
                                             tagList(icon("eraser"), " Effacer"),
                                             class = "btn-default btn-sm", style = "width:100%;"))
-                   ),
-                   br(),
-                   actionButton(ns("btn_save_gate"),
-                                tagList(icon("check-circle"), " Enregistrer le gate"),
-                                class = "btn-success", style = "width:100%; font-weight:bold;")
+                   )
                  )
           ),
           
@@ -125,12 +114,15 @@ pretraitement_ui <- function(id) {
           column(width = 6,
                  box(title = tagList(icon("draw-polygon"), " Dessin interactif du gate"),
                      width = NULL, status = "info", solidHeader = TRUE,
-                     plotlyOutput(ns("plot_gate_dessin"), height = "480px")
+                     plotlyOutput(ns("plot_gate_dessin"), height = "480px"),
+                     br(),
+                     actionButton(ns("btn_save_gate"),
+                                  tagList(icon("check-circle"), " Enregistrer ce gate"),
+                                  class = "btn-success", style = "width:100%; font-weight:bold;")
                  ),
                  
                  box(title = uiOutput(ns("titre_resultat")), width = NULL,
                      status = "success", solidHeader = TRUE,
-                     uiOutput(ns("ui_gate_chips")),
                      plotOutput(ns("plot_gate_resultat"), width = "100%", height = "420px")
                  )
           ),
@@ -199,12 +191,7 @@ pretraitement_ui <- function(id) {
                      numericInput(ns("facteur_sensibilite_doublet"),
                                   "Facteur de sensibilité :",
                                   value = 4, min = 0.5, step = 0.5),
-                     checkboxInput(ns("doublet_tous_echantillons_auto"),
-                                   "Appliquer à tous les échantillons", TRUE),
-                     conditionalPanel(
-                       condition = paste0("!input['", ns("doublet_tous_echantillons_auto"), "']"),
-                       uiOutput(ns("ui_select_echantillon_cible_auto"))
-                     ),
+                     uiOutput(ns("ui_statut_doublet_auto")),
                      br(),
                      actionButton(ns("btn_appliquer_doublet_auto"),
                                   tagList(icon("play"), " Appliquer le retrait automatique"),
@@ -217,7 +204,8 @@ pretraitement_ui <- function(id) {
                      div(class = "pretrait-instr",
                          icon("hand-pointer"),
                          " Cliquez sur le graphique pour ajouter des sommets. ",
-                         tags$b("Double-clic"), " pour fermer le polygone."),
+                         tags$b("Double-clic"), " pour fermer le polygone. Le gate affiché est ",
+                         "celui de l'échantillon sélectionné : chaque échantillon peut avoir sa propre forme."),
                      br(),
                      fluidRow(
                        column(6, actionButton(ns("btn_undo_sommet_doublet"),
@@ -226,18 +214,7 @@ pretraitement_ui <- function(id) {
                        column(6, actionButton(ns("btn_reset_gate_doublet"),
                                               tagList(icon("eraser"), " Effacer"),
                                               class = "btn-default btn-sm", style = "width:100%;"))
-                     ),
-                     br(),
-                     checkboxInput(ns("doublet_tous_echantillons_gate"),
-                                   "Appliquer le polygone à tous les échantillons", TRUE),
-                     conditionalPanel(
-                       condition = paste0("!input['", ns("doublet_tous_echantillons_gate"), "']"),
-                       uiOutput(ns("ui_select_echantillon_cible_gate"))
-                     ),
-                     br(),
-                     actionButton(ns("btn_save_gate_doublet"),
-                                  tagList(icon("check-circle"), " Enregistrer le gate"),
-                                  class = "btn-success", style = "width:100%; font-weight:bold;")
+                     )
                    )
                  )
           ),
@@ -250,7 +227,11 @@ pretraitement_ui <- function(id) {
                    condition = paste0("input['", ns("methode_doublet"), "'] == 'gate'"),
                    box(title = tagList(icon("draw-polygon"), " Dessin interactif du gate"),
                        width = NULL, status = "info", solidHeader = TRUE,
-                       plotlyOutput(ns("plot_gate_doublet_dessin"), height = "480px")
+                       plotlyOutput(ns("plot_gate_doublet_dessin"), height = "480px"),
+                       br(),
+                       actionButton(ns("btn_save_gate_doublet"),
+                                    tagList(icon("check-circle"), " Enregistrer ce gate"),
+                                    class = "btn-success", style = "width:100%; font-weight:bold;")
                    )
                  ),
                  box(title = uiOutput(ns("titre_resultat_doublet")), width = NULL,
@@ -318,7 +299,9 @@ pretraitement_ui <- function(id) {
                      div(class = "pretrait-instr",
                          icon("hand-pointer"),
                          " Cliquez sur le graphique pour ajouter des sommets autour des cellules ",
-                         tags$b("vivantes"), ". ", tags$b("Double-clic"), " pour fermer le polygone."),
+                         tags$b("vivantes"), ". ", tags$b("Double-clic"), " pour fermer le polygone. ",
+                         "Le gate affiché est celui de l'échantillon sélectionné : chaque échantillon ",
+                         "peut avoir sa propre forme."),
                      br(),
                      fluidRow(
                        column(6, actionButton(ns("btn_undo_sommet_viabilite"),
@@ -327,18 +310,7 @@ pretraitement_ui <- function(id) {
                        column(6, actionButton(ns("btn_reset_gate_viabilite"),
                                               tagList(icon("eraser"), " Effacer"),
                                               class = "btn-default btn-sm", style = "width:100%;"))
-                     ),
-                     br(),
-                     checkboxInput(ns("viabilite_tous_echantillons_gate"),
-                                   "Appliquer le polygone à tous les échantillons", TRUE),
-                     conditionalPanel(
-                       condition = paste0("!input['", ns("viabilite_tous_echantillons_gate"), "']"),
-                       uiOutput(ns("ui_select_echantillon_cible_gate_viabilite"))
-                     ),
-                     br(),
-                     actionButton(ns("btn_save_gate_viabilite"),
-                                  tagList(icon("check-circle"), " Enregistrer le gate"),
-                                  class = "btn-success", style = "width:100%; font-weight:bold;")
+                     )
                    )
                  )
           ),
@@ -349,7 +321,11 @@ pretraitement_ui <- function(id) {
           column(width = 6,
                  box(title = tagList(icon("draw-polygon"), " Dessin interactif du gate"),
                      width = NULL, status = "info", solidHeader = TRUE,
-                     plotlyOutput(ns("plot_gate_viabilite_dessin"), height = "480px")
+                     plotlyOutput(ns("plot_gate_viabilite_dessin"), height = "480px"),
+                     br(),
+                     actionButton(ns("btn_save_gate_viabilite"),
+                                  tagList(icon("check-circle"), " Enregistrer ce gate"),
+                                  class = "btn-success", style = "width:100%; font-weight:bold;")
                  ),
                  box(title = "Résultat — cellules vivantes", width = NULL,
                      status = "success", solidHeader = TRUE,
@@ -445,8 +421,13 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
     
     # Sommets du polygone en cours de dessin (débris)
     sommets_rv        <- reactiveVal(list())
-    # Nom du gate actuellement affiché dans le panneau résultat (débris)
-    gate_actif_rv     <- reactiveVal(NULL)
+    # Le gate "actif" (affiché en résultat / préchargé au changement d'échantillon)
+    # est simplement celui dont le nom est actuellement saisi dans le champ
+    # "Nom du gate" — plus besoin de suivre un état séparé.
+    nom_gate_actuel <- reactive({
+      nm <- trimws(input$nom_gate %||% "")
+      if (nchar(nm) == 0) NULL else nm
+    })
     
     # Sommets du polygone en cours de dessin (doublets)
     sommets_doublet_rv <- reactiveVal(list())
@@ -466,7 +447,17 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
     obtenir_source <- function(p, choix) {
       if (choix == "peacoqc" && length(p$post_PeacoQC) > 0) return(p$post_PeacoQC)
       if (choix == "flowai"  && length(p$post_flowAI)  > 0) return(p$post_flowAI)
-      return(p$get_derniere_source())
+      # "brutes" (ou repli) : on ne remonte JAMAIS au-delà de la source d'entrée
+      # du gating débris (bordures > PeacoQC/flowAI > compensées/démixées).
+      # Utiliser p$get_derniere_source() ici serait incorrect : une fois qu'un
+      # gate de débris existe déjà pour au moins un échantillon, cette méthode
+      # renvoie post_debris lui-même (résultat du filtrage), ce qui bouclerait
+      # sur sa propre sortie et n'afficherait plus que les événements déjà
+      # conservés par le gate, au lieu du nuage complet à gater.
+      if (!is.null(p$post_retrait_bordures) && length(p$post_retrait_bordures) > 0) return(p$post_retrait_bordures)
+      if (!is.null(p$post_PeacoQC) && length(p$post_PeacoQC) > 0) return(p$post_PeacoQC)
+      if (!is.null(p$post_flowAI)  && length(p$post_flowAI)  > 0) return(p$post_flowAI)
+      return(p$echantillons_traites)
     }
     
     # ════════════════════════════════════════════════════════════════════════
@@ -508,7 +499,14 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
       p  <- carrot_obj()
       src <- obtenir_source(p, input$source_debris %||% "brutes")
       req(length(src) > 0)
-      selectInput(ns("sel_ech_debris"), "Échantillon :", choices = names(src))
+      # Préserve la sélection en cours si elle est toujours valide, plutôt que
+      # de revenir systématiquement au premier échantillon à chaque
+      # reconstruction de ce sélecteur (par ex. après l'enregistrement d'un
+      # gate) — sans quoi l'utilisateur se retrouverait renvoyé sur un autre
+      # échantillon sans s'en rendre compte, en plein milieu d'une édition.
+      actuel <- input$sel_ech_debris
+      sel <- if (!is.null(actuel) && actuel %in% names(src)) actuel else names(src)[1]
+      selectInput(ns("sel_ech_debris"), "Échantillon :", choices = names(src), selected = sel)
     })
     
     output$ui_canal_x_debris <- renderUI({
@@ -541,6 +539,79 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
     # DONNÉES POUR LE GRAPHIQUE INTERACTIF (DÉBRIS)
     # ════════════════════════════════════════════════════════════════════════
     
+    # Calcule, pour un échantillon et des canaux donnés, la forme du gate à
+    # précharger (celle déjà enregistrée sous le nom de gate courant, si elle
+    # existe et correspond aux mêmes canaux X/Y) — ou une liste vide sinon.
+    # Utilisée à la fois pour synchroniser sommets_rv() (édition interactive)
+    # et pour dessiner directement la forme dans le rendu initial du graphique
+    # (afin que le tracé soit toujours correct dès le premier rendu, sans
+    # dépendre d'une mise à jour ultérieure via plotlyProxy).
+    # Construit, à partir d'une liste de sommets et du data.frame affiché, les
+    # coordonnées de la trace fermée (polygone) et les formes de poignées
+    # (cercles) correspondantes — utilisé à la fois pour le rendu initial du
+    # graphique et pour la mise à jour via plotlyProxy lors de l'édition.
+    # Quand l'utilisateur déplace un cercle-sommet (shape), Plotly renvoie via
+    # plotly_relayout les 4 coins de sa boîte englobante (shapes[i].x0/x1/y0/y1)
+    # simultanément dans le même événement — jamais le centre directement. Le
+    # centre réel du cercle (donc la position du sommet) est leur moyenne ;
+    # utiliser x0/y0 seuls décale systématiquement le sommet à chaque
+    # déplacement (d'un montant égal au rayon du cercle), ce qui le fait
+    # dériver de plus en plus loin du curseur au fil des mouvements.
+    # Renvoie la liste de sommets mise à jour, ou NULL si rien n'a changé.
+    appliquer_deplacement_shapes <- function(ev, soms) {
+      indices <- regmatches(names(ev), regexpr("(?<=shapes\\[)[0-9]+(?=\\]\\.)", names(ev), perl = TRUE))
+      indices <- unique(as.integer(indices[nchar(indices) > 0]))
+      if (length(indices) == 0) return(NULL)
+      
+      modifie <- FALSE
+      for (idx0 in indices) {
+        i <- idx0 + 1L   # 0-indexé en JS → 1-indexé en R
+        if (i < 1 || i > length(soms)) next
+        prefix <- paste0("shapes[", idx0, "].")
+        x0 <- ev[[paste0(prefix, "x0")]]; x1 <- ev[[paste0(prefix, "x1")]]
+        y0 <- ev[[paste0(prefix, "y0")]]; y1 <- ev[[paste0(prefix, "y1")]]
+        if (!is.null(x0) && !is.null(x1)) { soms[[i]]$x <- (x0 + x1) / 2; modifie <- TRUE }
+        if (!is.null(y0) && !is.null(y1)) { soms[[i]]$y <- (y0 + y1) / 2; modifie <- TRUE }
+      }
+      if (modifie) soms else NULL
+    }
+    
+    construire_trace_et_shapes_gate <- function(soms, df) {
+      if (length(soms) == 0) {
+        return(list(x = numeric(0), y = numeric(0), shapes = list()))
+      }
+      xs <- c(vapply(soms, `[[`, numeric(1), "x"), soms[[1]]$x)   # ferme visuellement
+      ys <- c(vapply(soms, `[[`, numeric(1), "y"), soms[[1]]$y)
+      
+      shapes <- list()
+      if (length(soms) >= 2) {
+        rx <- diff(range(df$X, na.rm = TRUE)); if (!is.finite(rx) || rx == 0) rx <- 1
+        ry <- diff(range(df$Y, na.rm = TRUE)); if (!is.finite(ry) || ry == 0) ry <- 1
+        shapes <- lapply(seq_along(soms), function(i) {
+          list(type = "circle",
+               x0 = soms[[i]]$x - 0.012 * rx, x1 = soms[[i]]$x + 0.012 * rx,
+               y0 = soms[[i]]$y - 0.012 * ry, y1 = soms[[i]]$y + 0.012 * ry,
+               xref = "x", yref = "y",
+               fillcolor = "rgba(230,101,0,0.3)",
+               line = list(color = "#e65100"))
+        })
+      }
+      list(x = xs, y = ys, shapes = shapes)
+    }
+    
+    calculer_soms_preload_debris <- function(p, nom, cx, cy) {
+      ga <- isolate(nom_gate_actuel())
+      if (is.null(ga) || is.null(nom)) return(list())
+      infos <- p$gates_history[[ga]][[nom]]
+      if (!is.null(infos) && !is.null(infos$polygone) &&
+          identical(infos$canal_x, cx) && identical(infos$canal_y, cy)) {
+        mat <- infos$polygone
+        lapply(seq_len(nrow(mat)), function(i) list(x = mat[i, 1], y = mat[i, 2]))
+      } else {
+        list()
+      }
+    }
+    
     donnees_plot <- reactive({
       bordures_trigger()
       p <- carrot_obj()
@@ -557,11 +628,23 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
       df
     })
     
-    # Réinitialise le polygone si l'utilisateur change de canal/échantillon/source
+    # Recharge (ou réinitialise) le polygone à chaque changement pertinent :
+    # échantillon, canaux, source ou nom du gate. Un seul observer gère tous
+    # les cas pour éviter toute course entre deux observers concurrents :
+    #  - si un gate de ce nom existe déjà pour CET échantillon ET sur ces
+    #    MÊMES canaux X/Y, on recharge sa forme (modifiable) ;
+    #  - sinon (canaux différents, nom inconnu, ou aucun gate pour cet
+    #    échantillon), le canevas repart vide pour un nouveau tracé.
     observeEvent(list(input$sel_ech_debris, input$canal_x_debris,
-                      input$canal_y_debris, input$source_debris), {
-                        sommets_rv(list())
-                      }, ignoreInit = TRUE)
+                      input$canal_y_debris, input$source_debris, input$nom_gate), {
+                        p   <- carrot_obj()
+                        nom <- input$sel_ech_debris
+                        cx  <- input$canal_x_debris
+                        cy  <- input$canal_y_debris
+                        req(nom)
+                        
+                        sommets_rv(calculer_soms_preload_debris(p, nom, cx, cy))
+                      }, ignoreInit = FALSE)
     
     # ════════════════════════════════════════════════════════════════════════
     # GESTION DU POLYGONE — clic par clic + double-clic pour fermer (DÉBRIS)
@@ -643,10 +726,16 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
                     marker = list(size = 2, color = "#0077b6", opacity = 0.4),
                     hoverinfo = "none")
       }
+      
+      # Précharge, dès le rendu initial, la forme du gate déjà enregistrée pour
+      # cet échantillon (si elle existe) — plutôt que de partir d'une trace
+      # vide en attendant une mise à jour ultérieure via plotlyProxy, ce qui
+      # évite toute course entre le redessin complet et l'injection du gate.
+      soms_init <- calculer_soms_preload_debris(p_obj, input$sel_ech_debris, input$canal_x_debris, input$canal_y_debris)
+      trace_init <- construire_trace_et_shapes_gate(soms_init, df)
+      
       plt %>%
-        # Trace vide dès le départ : elle sera mise à jour par plotlyProxy
-        # à chaque ajout/déplacement de sommet, sans toucher au fond de densité.
-        add_trace(x = numeric(0), y = numeric(0), type = "scatter",
+        add_trace(x = trace_init$x, y = trace_init$y, type = "scatter",
                   mode = "lines+markers", name = "Gate en cours",
                   line   = list(color = "#e65100", width = 2, dash = "dot"),
                   marker = list(size = 5, color = "#e65100", symbol = "circle"),
@@ -660,72 +749,35 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
           yaxis = list(title = lbl_y),
           legend = list(orientation = "h", y = -0.15),
           margin = list(b = 60),
-          shapes = list()
+          shapes = trace_init$shapes
         ) %>%
         config(displayModeBar = TRUE, editable = TRUE,
                modeBarButtonsToRemove = list("lasso2d", "select2d"),
-               displaylogo = FALSE)
+               displaylogo = FALSE,
+               # Désactive le double-clic natif de Plotly (reset des axes / des
+               # formes) : ce plot a son propre gestionnaire de double-clic
+               # (fermeture du polygone) et le comportement natif interférait
+               # avec lui en effaçant le tracé du gate en cours d'édition.
+               doubleClick = FALSE)
     })
     
     # Pousse les sommets courants vers le graphique déjà rendu, sans redraw complet
     observeEvent(sommets_rv(), {
-      soms <- sommets_rv()
+      soms  <- sommets_rv()
       proxy <- plotlyProxy(ns("plot_gate_dessin"), session)
+      df    <- isolate(donnees_plot())
+      trace <- construire_trace_et_shapes_gate(soms, df)
       
-      if (length(soms) == 0) {
-        plotlyProxyInvoke(proxy, "restyle", list(x = list(list()), y = list(list())), list(1))
-        plotlyProxyInvoke(proxy, "relayout", list(shapes = list()))
-        return(invisible(NULL))
-      }
-      
-      xs <- c(vapply(soms, `[[`, numeric(1), "x"), soms[[1]]$x)   # ferme visuellement
-      ys <- c(vapply(soms, `[[`, numeric(1), "y"), soms[[1]]$y)
-      
-      plotlyProxyInvoke(proxy, "restyle", list(x = list(xs), y = list(ys)), list(1))
-      
-      if (length(soms) >= 2) {
-        df <- isolate(donnees_plot())
-        rx <- diff(range(df$X, na.rm = TRUE)); if (!is.finite(rx) || rx == 0) rx <- 1
-        ry <- diff(range(df$Y, na.rm = TRUE)); if (!is.finite(ry) || ry == 0) ry <- 1
-        
-        shapes <- lapply(seq_along(soms), function(i) {
-          list(type = "circle",
-               x0 = soms[[i]]$x - 0.012 * rx, x1 = soms[[i]]$x + 0.012 * rx,
-               y0 = soms[[i]]$y - 0.012 * ry, y1 = soms[[i]]$y + 0.012 * ry,
-               xref = "x", yref = "y",
-               fillcolor = "rgba(230,101,0,0.3)",
-               line = list(color = "#e65100"))
-        })
-        plotlyProxyInvoke(proxy, "relayout", list(shapes = shapes))
-      } else {
-        plotlyProxyInvoke(proxy, "relayout", list(shapes = list()))
-      }
+      plotlyProxyInvoke(proxy, "restyle", list(x = list(trace$x), y = list(trace$y)), list(1))
+      plotlyProxyInvoke(proxy, "relayout", list(shapes = trace$shapes))
     }, ignoreNULL = FALSE)
     
     # Capture les déplacements de shapes (sommets éditables)
     observeEvent(event_data("plotly_relayout", source = ns("plot_gate_dessin")), {
       ev   <- event_data("plotly_relayout", source = ns("plot_gate_dessin"))
       req(ev)
-      soms <- sommets_rv()
-      
-      # Les shapes[i].x0 / shapes[i].y0 sont renvoyés quand on déplace un cercle
-      modifie <- FALSE
-      for (nm in names(ev)) {
-        m_idx <- regmatches(nm, regexpr("[0-9]+", nm))
-        if (length(m_idx) == 0) next
-        i <- as.integer(m_idx) + 1L   # 0-indexé en JS → 1-indexé en R
-        if (i < 1 || i > length(soms)) next
-        
-        if (grepl("\\.x0$", nm)) {
-          soms[[i]]$x <- ev[[nm]] + 0     # centrage : on récupère le bord gauche du cercle
-          modifie <- TRUE
-        }
-        if (grepl("\\.y0$", nm)) {
-          soms[[i]]$y <- ev[[nm]] + 0
-          modifie <- TRUE
-        }
-      }
-      if (modifie) sommets_rv(soms)
+      soms_maj <- appliquer_deplacement_shapes(ev, sommets_rv())
+      if (!is.null(soms_maj)) sommets_rv(soms_maj)
     }, ignoreInit = TRUE)
     
     # ════════════════════════════════════════════════════════════════════════
@@ -748,17 +800,22 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
       p <- carrot_obj()
       
       # Construction de la matrice polygone à partir des sommets courants
+      # (l'enveloppe convexe garantit un polygone propre même si les sommets
+      # n'ont pas été cliqués dans un ordre parfaitement séquentiel).
       xs <- sapply(soms, `[[`, "x")
       ys <- sapply(soms, `[[`, "y")
       cx <- input$canal_x_debris
       cy <- input$canal_y_debris
       
-      # Les shapes éditables décalent le centre d'un rayon → on utilise directement x0/y0
-      # (le centre réel est x0 + rayon, mais pour polygonGate on veut les vrais sommets)
-      # On calcule l'enveloppe convexe pour garantir un polygone propre
       idx_hull <- grDevices::chull(xs, ys)
       mat_poly <- cbind(xs[idx_hull], ys[idx_hull])
       colnames(mat_poly) <- c(cx, cy)
+      
+      # Ce nom de gate a-t-il déjà été enregistré pour au moins un échantillon ?
+      # Si non, l'enregistrement qui suit est le tout premier : il s'appliquera
+      # par défaut à toute la cohorte (cf. appliquer_gate_nomme) — on le
+      # signale explicitement à l'utilisateur pour lever toute ambiguïté.
+      premier_enregistrement <- is.null(p$gates_history[[nom_g]]) || length(p$gates_history[[nom_g]]) == 0
       
       withProgress(message = paste0("Application du gate '", nom_g, "'..."), value = 0.4, {
         tryCatch({
@@ -767,84 +824,46 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
             matrice_points = mat_poly,
             canal_x        = cx,
             canal_y        = cy,
-            source_nettoyage = input$source_debris %||% "brutes"
+            source_nettoyage = input$source_debris %||% "brutes",
+            nom_echantillon  = input$sel_ech_debris
           )
           pipeline(p)
           gates_trigger(gates_trigger() + 1L)
-          gate_actif_rv(nom_g)
-          sommets_rv(list())   # remet à zéro pour le prochain gate
-          showNotification(paste0("Gate '", nom_g, "' enregistré."), type = "message")
+          
+          if (premier_enregistrement) {
+            nb <- length(p$gates_history[[nom_g]])
+            showNotification(
+              paste0("Gate '", nom_g, "' créé et appliqué par défaut à ", nb, " échantillon(s). ",
+                     "Changez d'échantillon pour ajuster sa forme individuellement, puis ré-enregistrez."),
+              type = "message", duration = 8
+            )
+          } else {
+            showNotification(paste0("Gate '", nom_g, "' mis à jour pour ", input$sel_ech_debris, " uniquement."),
+                             type = "message")
+          }
         }, error = function(e) showNotification(conditionMessage(e), type = "error"))
       })
     })
     
     # ════════════════════════════════════════════════════════════════════════
-    # PANNEAU RÉSULTAT — chips de navigation + graphique (DÉBRIS)
+    # PANNEAU RÉSULTAT (DÉBRIS)
     # ════════════════════════════════════════════════════════════════════════
     
     output$titre_resultat <- renderUI({
-      ga <- gate_actif_rv()
+      gates_trigger()
+      ga <- nom_gate_actuel()
       if (is.null(ga)) "Résultat après filtration"
       else paste0("Résultat — gate : ", ga)
     })
-    
-    # Chips cliquables (un bouton par gate nommé enregistré)
-    output$ui_gate_chips <- renderUI({
-      gates_trigger()
-      p  <- carrot_obj()
-      nms <- names(p$gates_history)
-      if (length(nms) == 0) return(NULL)
-      
-      ga <- gate_actif_rv()
-      
-      chips <- lapply(nms, function(nm) {
-        cls <- paste0("gate-chip", if (!is.null(ga) && ga == nm) " active" else "")
-        actionLink(ns(paste0("chip_", gsub("[^a-zA-Z0-9]", "_", nm))),
-                   label = nm,
-                   class = cls,
-                   onclick = paste0("Shiny.setInputValue('", ns("gate_chip_clicked"), "', '",
-                                    nm, "', {priority: 'event'})"))
-      })
-      
-      tagList(
-        div(style = "margin-bottom:8px; font-size:11px; color:#888;",
-            "Cliquer sur un gate pour l'afficher ou le modifier :"),
-        do.call(tagList, chips)
-      )
-    })
-    
-    # Réaction au clic sur un chip → charge le polygone pour réajustement
-    observeEvent(input$gate_chip_clicked, {
-      nm <- input$gate_chip_clicked
-      req(nchar(nm) > 0)
-      
-      p <- carrot_obj()
-      infos_gate <- p$gates_history[[nm]]
-      req(!is.null(infos_gate))
-      
-      # Prend les coordonnées du premier échantillon (référence)
-      premier_ech <- infos_gate[[input$sel_ech_debris %||% names(infos_gate)[1]]]
-      if (is.null(premier_ech)) premier_ech <- infos_gate[[1]]
-      req(!is.null(premier_ech))
-      
-      mat <- premier_ech$polygone
-      soms <- lapply(seq_len(nrow(mat)), function(i) {
-        list(x = mat[i, 1], y = mat[i, 2])
-      })
-      
-      sommets_rv(soms)
-      gate_actif_rv(nm)
-      updateTextInput(session, "nom_gate", value = nm)
-    }, ignoreInit = TRUE)
     
     # Graphique résultat (ggplot via visualiser_debris)
     output$plot_gate_resultat <- renderPlot({
       gates_trigger()
       p  <- carrot_obj()
-      ga <- gate_actif_rv()
+      ga <- nom_gate_actuel()
       req(input$sel_ech_debris)
       
-      if (is.null(ga) || length(p$gates_history) == 0) {
+      if (is.null(ga) || is.null(p$gates_history[[ga]])) {
         validate("Enregistrez un gate pour afficher le résultat.")
       }
       
@@ -877,10 +896,16 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
       if (identical(etape, "SSC")) {
         if (!is.null(p$post_doublets_FSC) && length(p$post_doublets_FSC) > 0) return(p$post_doublets_FSC)
         if (!is.null(p$post_debris) && length(p$post_debris) > 0) return(p$post_debris)
-        return(p$get_derniere_source())
+        if (!is.null(p$post_retrait_bordures) && length(p$post_retrait_bordures) > 0) return(p$post_retrait_bordures)
+        if (!is.null(p$post_PeacoQC) && length(p$post_PeacoQC) > 0) return(p$post_PeacoQC)
+        if (!is.null(p$post_flowAI)  && length(p$post_flowAI)  > 0) return(p$post_flowAI)
+        return(p$echantillons_traites)
       }
       if (!is.null(p$post_debris) && length(p$post_debris) > 0) return(p$post_debris)
-      return(p$get_derniere_source())
+      if (!is.null(p$post_retrait_bordures) && length(p$post_retrait_bordures) > 0) return(p$post_retrait_bordures)
+      if (!is.null(p$post_PeacoQC) && length(p$post_PeacoQC) > 0) return(p$post_PeacoQC)
+      if (!is.null(p$post_flowAI)  && length(p$post_flowAI)  > 0) return(p$post_flowAI)
+      return(p$echantillons_traites)
     }
     
     libelle_source_doublet <- function(p, etape) {
@@ -929,24 +954,13 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
       etape <- input$etape_doublet %||% "FSC"
       src   <- obtenir_source_doublet(p, etape)
       req(length(src) > 0)
-      selectInput(ns("sel_ech_doublet"), "Échantillon (référence pour le tracé) :",
-                  choices = names(src))
-    })
-    
-    output$ui_select_echantillon_cible_auto <- renderUI({
-      p     <- carrot_obj()
-      etape <- input$etape_doublet %||% "FSC"
-      src   <- obtenir_source_doublet(p, etape)
-      req(length(src) > 0)
-      selectInput(ns("sel_ech_cible_auto"), "Échantillon ciblé :", choices = names(src))
-    })
-    
-    output$ui_select_echantillon_cible_gate <- renderUI({
-      p     <- carrot_obj()
-      etape <- input$etape_doublet %||% "FSC"
-      src   <- obtenir_source_doublet(p, etape)
-      req(length(src) > 0)
-      selectInput(ns("sel_ech_cible_gate"), "Échantillon ciblé :", choices = names(src))
+      # Préserve la sélection en cours si elle est toujours valide (cf. même
+      # correctif que pour les débris : éviter un retour silencieux au
+      # premier échantillon après l'enregistrement d'un gate).
+      actuel <- input$sel_ech_doublet
+      sel <- if (!is.null(actuel) && actuel %in% names(src)) actuel else names(src)[1]
+      selectInput(ns("sel_ech_doublet"), "Échantillon :",
+                  choices = names(src), selected = sel)
     })
     
     output$ui_canaux_info_doublet <- renderUI({
@@ -993,11 +1007,43 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
       df
     })
     
-    # Réinitialise le polygone si l'utilisateur change étape/axe/échantillon/méthode
+    # Calcule, pour l'échantillon/étape/axe courants, la forme du gate manuel
+    # (polygone) déjà enregistrée — ou une liste vide sinon. Utilisée à la
+    # fois pour synchroniser sommets_doublet_rv() et pour dessiner directement
+    # la forme dans le rendu initial du graphique.
+    calculer_soms_preload_doublet <- function(p, etape, axe, nom) {
+      if (is.null(nom)) return(list())
+      infos_gate <- if (etape == "FSC") p$gate_doublets_FSC[[nom]] else p$gate_doublets_SSC[[nom]]
+      
+      src <- obtenir_source_doublet(p, etape)
+      canaux_actuels <- if (length(src) > 0) {
+        resoudre_canaux_doublet(flowCore::colnames(src[[1]]), etape, axe)
+      } else {
+        c(x = NA, y = NA)
+      }
+      
+      if (!is.null(infos_gate) && identical(infos_gate$type, "poly") && !is.null(infos_gate$gate) &&
+          identical(unname(infos_gate$channels), unname(canaux_actuels))) {
+        mat <- infos_gate$gate@boundaries
+        lapply(seq_len(nrow(mat)), function(i) list(x = mat[i, 1], y = mat[i, 2]))
+      } else {
+        list()
+      }
+    }
+    
+    # Recharge (ou réinitialise) le polygone à chaque changement pertinent :
+    # étape, axe, méthode ou échantillon. Un seul observer gère les deux cas
+    # pour éviter toute course entre deux observers concurrents.
     observeEvent(list(input$etape_doublet, input$axe_doublet,
-                      input$sel_ech_doublet, input$methode_doublet), {
-                        sommets_doublet_rv(list())
-                      }, ignoreInit = TRUE)
+                      input$methode_doublet, input$sel_ech_doublet), {
+                        p     <- carrot_obj()
+                        etape <- input$etape_doublet %||% "FSC"
+                        axe   <- input$axe_doublet %||% "H_A"
+                        nom   <- input$sel_ech_doublet
+                        req(nom)
+                        
+                        sommets_doublet_rv(calculer_soms_preload_doublet(p, etape, axe, nom))
+                      }, ignoreInit = FALSE)
     
     # ════════════════════════════════════════════════════════════════════════
     # GESTION DU POLYGONE — clic par clic + double-clic pour fermer (DOUBLETS)
@@ -1074,8 +1120,15 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
                     marker = list(size = 2, color = "#0077b6", opacity = 0.4),
                     hoverinfo = "none")
       }
+      
+      # Précharge, dès le rendu initial, la forme du gate déjà enregistrée pour
+      # cet échantillon (si elle existe), afin d'éviter toute course entre le
+      # redessin complet et l'injection ultérieure via plotlyProxy.
+      soms_init  <- calculer_soms_preload_doublet(p_obj, etape, input$axe_doublet %||% "H_A", input$sel_ech_doublet)
+      trace_init <- construire_trace_et_shapes_gate(soms_init, df)
+      
       plt %>%
-        add_trace(x = numeric(0), y = numeric(0), type = "scatter",
+        add_trace(x = trace_init$x, y = trace_init$y, type = "scatter",
                   mode = "lines+markers", name = "Gate en cours",
                   line   = list(color = "#e65100", width = 2, dash = "dot"),
                   marker = list(size = 5, color = "#e65100", symbol = "circle"),
@@ -1089,64 +1142,59 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
           yaxis = list(title = lbl_y),
           legend = list(orientation = "h", y = -0.15),
           margin = list(b = 60),
-          shapes = list()
+          shapes = trace_init$shapes
         ) %>%
         config(displayModeBar = TRUE, editable = TRUE,
                modeBarButtonsToRemove = list("lasso2d", "select2d"),
-               displaylogo = FALSE)
+               displaylogo = FALSE,
+               # Désactive le double-clic natif de Plotly (reset des axes / des
+               # formes) : ce plot a son propre gestionnaire de double-clic
+               # (fermeture du polygone) et le comportement natif interférait
+               # avec lui en effaçant le tracé du gate en cours d'édition.
+               doubleClick = FALSE)
     })
     
     observeEvent(sommets_doublet_rv(), {
-      soms <- sommets_doublet_rv()
+      soms  <- sommets_doublet_rv()
       proxy <- plotlyProxy(ns("plot_gate_doublet_dessin"), session)
+      df    <- isolate(donnees_plot_doublet())
+      trace <- construire_trace_et_shapes_gate(soms, df)
       
-      if (length(soms) == 0) {
-        plotlyProxyInvoke(proxy, "restyle", list(x = list(list()), y = list(list())), list(1))
-        plotlyProxyInvoke(proxy, "relayout", list(shapes = list()))
-        return(invisible(NULL))
-      }
-      
-      xs <- c(vapply(soms, `[[`, numeric(1), "x"), soms[[1]]$x)
-      ys <- c(vapply(soms, `[[`, numeric(1), "y"), soms[[1]]$y)
-      
-      plotlyProxyInvoke(proxy, "restyle", list(x = list(xs), y = list(ys)), list(1))
-      
-      if (length(soms) >= 2) {
-        df <- isolate(donnees_plot_doublet())
-        rx <- diff(range(df$X, na.rm = TRUE)); if (!is.finite(rx) || rx == 0) rx <- 1
-        ry <- diff(range(df$Y, na.rm = TRUE)); if (!is.finite(ry) || ry == 0) ry <- 1
-        
-        shapes <- lapply(seq_along(soms), function(i) {
-          list(type = "circle",
-               x0 = soms[[i]]$x - 0.012 * rx, x1 = soms[[i]]$x + 0.012 * rx,
-               y0 = soms[[i]]$y - 0.012 * ry, y1 = soms[[i]]$y + 0.012 * ry,
-               xref = "x", yref = "y",
-               fillcolor = "rgba(230,101,0,0.3)",
-               line = list(color = "#e65100"))
-        })
-        plotlyProxyInvoke(proxy, "relayout", list(shapes = shapes))
-      } else {
-        plotlyProxyInvoke(proxy, "relayout", list(shapes = list()))
-      }
+      plotlyProxyInvoke(proxy, "restyle", list(x = list(trace$x), y = list(trace$y)), list(1))
+      plotlyProxyInvoke(proxy, "relayout", list(shapes = trace$shapes))
     }, ignoreNULL = FALSE)
     
     observeEvent(event_data("plotly_relayout", source = ns("plot_gate_doublet_dessin")), {
       ev   <- event_data("plotly_relayout", source = ns("plot_gate_doublet_dessin"))
       req(ev)
-      soms <- sommets_doublet_rv()
-      
-      modifie <- FALSE
-      for (nm in names(ev)) {
-        m_idx <- regmatches(nm, regexpr("[0-9]+", nm))
-        if (length(m_idx) == 0) next
-        i <- as.integer(m_idx) + 1L
-        if (i < 1 || i > length(soms)) next
-        
-        if (grepl("\\.x0$", nm)) { soms[[i]]$x <- ev[[nm]] + 0; modifie <- TRUE }
-        if (grepl("\\.y0$", nm)) { soms[[i]]$y <- ev[[nm]] + 0; modifie <- TRUE }
-      }
-      if (modifie) sommets_doublet_rv(soms)
+      soms_maj <- appliquer_deplacement_shapes(ev, sommets_doublet_rv())
+      if (!is.null(soms_maj)) sommets_doublet_rv(soms_maj)
     }, ignoreInit = TRUE)
+    
+    # Affiche le seuil (facteur/valeur) déjà enregistré pour l'échantillon
+    # actuellement sélectionné, pour référence avant un nouvel enregistrement.
+    output$ui_statut_doublet_auto <- renderUI({
+      doublet_trigger()
+      p     <- carrot_obj()
+      etape <- input$etape_doublet %||% "FSC"
+      nom   <- input$sel_ech_doublet
+      req(nom)
+      
+      infos_gate <- if (etape == "FSC") p$gate_doublets_FSC[[nom]] else p$gate_doublets_SSC[[nom]]
+      
+      if (!is.null(infos_gate) && identical(infos_gate$type, "stat")) {
+        div(class = "source-info-box",
+            icon("check-circle"),
+            " Seuil déjà enregistré pour cet échantillon : facteur = ", tags$b(infos_gate$facteur),
+            " (seuil = ", round(infos_gate$seuil, 3), ").")
+      } else if (!is.null(infos_gate)) {
+        div(class = "source-info-box",
+            icon("info-circle"),
+            " Cet échantillon utilise actuellement un gate manuel (polygone) pour cette étape.")
+      } else {
+        NULL
+      }
+    })
     
     # ════════════════════════════════════════════════════════════════════════
     # APPLICATION — MÉTHODE AUTOMATIQUE (STATISTIQUE)
@@ -1157,21 +1205,34 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
       etape <- input$etape_doublet %||% "FSC"
       fs    <- input$facteur_sensibilite_doublet %||% 4
       axe   <- input$axe_doublet %||% "H_A"
-      cible <- if (isTRUE(input$doublet_tous_echantillons_auto)) NULL else input$sel_ech_cible_auto
+      req(input$sel_ech_doublet)
+      
+      gate_store <- if (etape == "FSC") p$gate_doublets_FSC else p$gate_doublets_SSC
+      premier_enregistrement <- length(gate_store) == 0
       
       withProgress(message = paste0("Retrait automatique des doublets ", etape, "..."), value = 0.4, {
         tryCatch({
           if (etape == "FSC") {
             p$retirer_doublets_FSC(facteur_sensibilite = fs, axe_discrimination = axe,
-                                   nom_echantillon = cible)
+                                   nom_echantillon = input$sel_ech_doublet)
           } else {
             p$retirer_doublets_SSC(facteur_sensibilite = fs, axe_discrimination = axe,
-                                   nom_echantillon = cible)
+                                   nom_echantillon = input$sel_ech_doublet)
           }
           pipeline(p)
           doublet_trigger(doublet_trigger() + 1L)
-          showNotification(paste0("Doublets ", etape, " retirés (méthode statistique, facteur = ", fs, ")."),
-                           type = "message")
+          
+          if (premier_enregistrement) {
+            nb <- length(if (etape == "FSC") p$gate_doublets_FSC else p$gate_doublets_SSC)
+            showNotification(
+              paste0("Seuil ", etape, " (facteur = ", fs, ") appliqué par défaut à ", nb, " échantillon(s). ",
+                     "Changez d'échantillon pour ajuster le seuil individuellement, puis ré-enregistrez."),
+              type = "message", duration = 8
+            )
+          } else {
+            showNotification(paste0("Seuil ", etape, " (facteur = ", fs, ") mis à jour pour ", input$sel_ech_doublet, " uniquement."),
+                             type = "message")
+          }
         }, error = function(e) showNotification(conditionMessage(e), type = "error"))
       })
     })
@@ -1189,6 +1250,7 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
         showNotification("Tracez au moins 3 sommets pour définir un gate.", type = "error")
         return(invisible(NULL))
       }
+      req(input$sel_ech_doublet)
       
       p <- carrot_obj()
       
@@ -1197,21 +1259,31 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
       idx_hull <- grDevices::chull(xs, ys)
       mat_poly <- cbind(xs[idx_hull], ys[idx_hull])
       
-      cible <- if (isTRUE(input$doublet_tous_echantillons_gate)) NULL else input$sel_ech_cible_gate
+      gate_store <- if (etape == "FSC") p$gate_doublets_FSC else p$gate_doublets_SSC
+      premier_enregistrement <- length(gate_store) == 0
       
       withProgress(message = paste0("Application du gate de doublets ", etape, "..."), value = 0.4, {
         tryCatch({
           if (etape == "FSC") {
             p$gate_les_doublets_FSC(points_utilisateur = mat_poly, axe_discrimination = axe,
-                                    nom_echantillon = cible)
+                                    nom_echantillon = input$sel_ech_doublet)
           } else {
             p$gate_les_doublets_SSC(points_utilisateur = mat_poly, axe_discrimination = axe,
-                                    nom_echantillon = cible)
+                                    nom_echantillon = input$sel_ech_doublet)
           }
           pipeline(p)
           doublet_trigger(doublet_trigger() + 1L)
-          sommets_doublet_rv(list())
-          showNotification(paste0("Gate de doublets ", etape, " enregistré."), type = "message")
+          
+          if (premier_enregistrement) {
+            nb <- length(if (etape == "FSC") p$gate_doublets_FSC else p$gate_doublets_SSC)
+            showNotification(
+              paste0("Gate de doublets ", etape, " créé et appliqué par défaut à ", nb, " échantillon(s). ",
+                     "Changez d'échantillon pour ajuster sa forme individuellement, puis ré-enregistrez."),
+              type = "message", duration = 8
+            )
+          } else {
+            showNotification(paste0("Gate de doublets ", etape, " mis à jour pour ", input$sel_ech_doublet, " uniquement."), type = "message")
+          }
         }, error = function(e) showNotification(conditionMessage(e), type = "error"))
       })
     })
@@ -1295,9 +1367,9 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
     })
     
     # Réinitialise l'état de transformation si l'utilisateur change de canal
+    # (le polygone de gating est réinitialisé/rechargé séparément ci-dessous).
     observeEvent(input$canal_viabilite, {
       canal_transforme_rv(NULL)
-      sommets_viabilite_rv(list())
     }, ignoreInit = TRUE, ignoreNULL = TRUE)
     
     output$ui_select_echantillon_viabilite_transfo_cible <- renderUI({
@@ -1358,17 +1430,13 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
       canal <- input$canal_viabilite
       req(canal, identical(canal_transforme_rv(), canal))
       req(!is.null(p$post_transformation), length(p$post_transformation) > 0)
-      selectInput(ns("sel_ech_viabilite"), "Échantillon (référence pour le tracé) :",
-                  choices = names(p$post_transformation))
-    })
-    
-    output$ui_select_echantillon_cible_gate_viabilite <- renderUI({
-      p     <- carrot_obj()
-      canal <- input$canal_viabilite
-      req(canal, identical(canal_transforme_rv(), canal))
-      req(!is.null(p$post_transformation), length(p$post_transformation) > 0)
-      selectInput(ns("sel_ech_cible_gate_viabilite"), "Échantillon ciblé :",
-                  choices = names(p$post_transformation))
+      # Préserve la sélection en cours si elle est toujours valide (cf. même
+      # correctif que pour les débris et les doublets).
+      actuel <- input$sel_ech_viabilite
+      noms   <- names(p$post_transformation)
+      sel <- if (!is.null(actuel) && actuel %in% noms) actuel else noms[1]
+      selectInput(ns("sel_ech_viabilite"), "Échantillon :",
+                  choices = noms, selected = sel)
     })
     
     # ════════════════════════════════════════════════════════════════════════
@@ -1396,9 +1464,33 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
       df
     })
     
-    observeEvent(list(input$sel_ech_viabilite, input$canal_viabilite), {
-      sommets_viabilite_rv(list())
-    }, ignoreInit = TRUE)
+    # Calcule, pour l'échantillon/canal courants, la forme du gate de
+    # viabilité déjà enregistrée — ou une liste vide sinon. Utilisée à la fois
+    # pour synchroniser sommets_viabilite_rv() et pour dessiner directement la
+    # forme dans le rendu initial du graphique.
+    calculer_soms_preload_viabilite <- function(p, nom, canal) {
+      if (is.null(nom) || is.null(canal)) return(list())
+      gate_sample <- p$gate_viabilite[[nom]]
+      if (!is.null(gate_sample) && !is.null(gate_sample@boundaries) &&
+          canal %in% colnames(gate_sample@boundaries)) {
+        mat <- gate_sample@boundaries
+        lapply(seq_len(nrow(mat)), function(i) list(x = mat[i, 1], y = mat[i, 2]))
+      } else {
+        list()
+      }
+    }
+    
+    # Recharge (ou réinitialise) le polygone à chaque changement pertinent :
+    # canal ou échantillon. Un seul observer gère les deux cas pour éviter
+    # toute course entre deux observers concurrents.
+    observeEvent(list(input$canal_viabilite, input$sel_ech_viabilite), {
+      p     <- carrot_obj()
+      nom   <- input$sel_ech_viabilite
+      canal <- input$canal_viabilite
+      req(nom, canal)
+      
+      sommets_viabilite_rv(calculer_soms_preload_viabilite(p, nom, canal))
+    }, ignoreInit = FALSE)
     
     # ════════════════════════════════════════════════════════════════════════
     # GESTION DU POLYGONE — clic par clic + double-clic pour fermer (VIABILITÉ)
@@ -1470,8 +1562,15 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
                     marker = list(size = 2, color = "#0077b6", opacity = 0.4),
                     hoverinfo = "none")
       }
+      
+      # Précharge, dès le rendu initial, la forme du gate déjà enregistrée pour
+      # cet échantillon (si elle existe), afin d'éviter toute course entre le
+      # redessin complet et l'injection ultérieure via plotlyProxy.
+      soms_init  <- calculer_soms_preload_viabilite(p_obj, input$sel_ech_viabilite, input$canal_viabilite)
+      trace_init <- construire_trace_et_shapes_gate(soms_init, df)
+      
       plt %>%
-        add_trace(x = numeric(0), y = numeric(0), type = "scatter",
+        add_trace(x = trace_init$x, y = trace_init$y, type = "scatter",
                   mode = "lines+markers", name = "Gate en cours",
                   line   = list(color = "#e65100", width = 2, dash = "dot"),
                   marker = list(size = 5, color = "#e65100", symbol = "circle"),
@@ -1485,63 +1584,33 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
           yaxis = list(title = lbl_y),
           legend = list(orientation = "h", y = -0.15),
           margin = list(b = 60),
-          shapes = list()
+          shapes = trace_init$shapes
         ) %>%
         config(displayModeBar = TRUE, editable = TRUE,
                modeBarButtonsToRemove = list("lasso2d", "select2d"),
-               displaylogo = FALSE)
+               displaylogo = FALSE,
+               # Désactive le double-clic natif de Plotly (reset des axes / des
+               # formes) : ce plot a son propre gestionnaire de double-clic
+               # (fermeture du polygone) et le comportement natif interférait
+               # avec lui en effaçant le tracé du gate en cours d'édition.
+               doubleClick = FALSE)
     })
     
     observeEvent(sommets_viabilite_rv(), {
-      soms <- sommets_viabilite_rv()
+      soms  <- sommets_viabilite_rv()
       proxy <- plotlyProxy(ns("plot_gate_viabilite_dessin"), session)
+      df    <- isolate(donnees_plot_viabilite())
+      trace <- construire_trace_et_shapes_gate(soms, df)
       
-      if (length(soms) == 0) {
-        plotlyProxyInvoke(proxy, "restyle", list(x = list(list()), y = list(list())), list(1))
-        plotlyProxyInvoke(proxy, "relayout", list(shapes = list()))
-        return(invisible(NULL))
-      }
-      
-      xs <- c(vapply(soms, `[[`, numeric(1), "x"), soms[[1]]$x)
-      ys <- c(vapply(soms, `[[`, numeric(1), "y"), soms[[1]]$y)
-      
-      plotlyProxyInvoke(proxy, "restyle", list(x = list(xs), y = list(ys)), list(1))
-      
-      if (length(soms) >= 2) {
-        df <- isolate(donnees_plot_viabilite())
-        rx <- diff(range(df$X, na.rm = TRUE)); if (!is.finite(rx) || rx == 0) rx <- 1
-        ry <- diff(range(df$Y, na.rm = TRUE)); if (!is.finite(ry) || ry == 0) ry <- 1
-        
-        shapes <- lapply(seq_along(soms), function(i) {
-          list(type = "circle",
-               x0 = soms[[i]]$x - 0.012 * rx, x1 = soms[[i]]$x + 0.012 * rx,
-               y0 = soms[[i]]$y - 0.012 * ry, y1 = soms[[i]]$y + 0.012 * ry,
-               xref = "x", yref = "y",
-               fillcolor = "rgba(230,101,0,0.3)",
-               line = list(color = "#e65100"))
-        })
-        plotlyProxyInvoke(proxy, "relayout", list(shapes = shapes))
-      } else {
-        plotlyProxyInvoke(proxy, "relayout", list(shapes = list()))
-      }
+      plotlyProxyInvoke(proxy, "restyle", list(x = list(trace$x), y = list(trace$y)), list(1))
+      plotlyProxyInvoke(proxy, "relayout", list(shapes = trace$shapes))
     }, ignoreNULL = FALSE)
     
     observeEvent(event_data("plotly_relayout", source = ns("plot_gate_viabilite_dessin")), {
       ev   <- event_data("plotly_relayout", source = ns("plot_gate_viabilite_dessin"))
       req(ev)
-      soms <- sommets_viabilite_rv()
-      
-      modifie <- FALSE
-      for (nm in names(ev)) {
-        m_idx <- regmatches(nm, regexpr("[0-9]+", nm))
-        if (length(m_idx) == 0) next
-        i <- as.integer(m_idx) + 1L
-        if (i < 1 || i > length(soms)) next
-        
-        if (grepl("\\.x0$", nm)) { soms[[i]]$x <- ev[[nm]] + 0; modifie <- TRUE }
-        if (grepl("\\.y0$", nm)) { soms[[i]]$y <- ev[[nm]] + 0; modifie <- TRUE }
-      }
-      if (modifie) sommets_viabilite_rv(soms)
+      soms_maj <- appliquer_deplacement_shapes(ev, sommets_viabilite_rv())
+      if (!is.null(soms_maj)) sommets_viabilite_rv(soms_maj)
     }, ignoreInit = TRUE)
     
     # ════════════════════════════════════════════════════════════════════════
@@ -1560,6 +1629,7 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
         showNotification("Tracez au moins 3 sommets pour définir un gate.", type = "error")
         return(invisible(NULL))
       }
+      req(input$sel_ech_viabilite)
       
       p   <- carrot_obj()
       fcs <- p$post_transformation[[input$sel_ech_viabilite]]
@@ -1572,7 +1642,7 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
       idx_hull <- grDevices::chull(xs, ys)
       mat_poly <- cbind(xs[idx_hull], ys[idx_hull])
       
-      cible <- if (isTRUE(input$viabilite_tous_echantillons_gate)) NULL else input$sel_ech_cible_gate_viabilite
+      premier_enregistrement <- length(p$gate_viabilite) == 0
       
       withProgress(message = "Application du gate de viabilité...", value = 0.4, {
         tryCatch({
@@ -1580,12 +1650,21 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
             canal_fsc          = canal_fsc,
             marqueur_viabilite  = canal,
             points_utilisateur  = mat_poly,
-            nom_echantillon     = cible
+            nom_echantillon     = input$sel_ech_viabilite
           )
           pipeline(p)
           viabilite_trigger(viabilite_trigger() + 1L)
-          sommets_viabilite_rv(list())
-          showNotification("Gate de cellules vivantes enregistré.", type = "message")
+          
+          if (premier_enregistrement) {
+            nb <- length(p$gate_viabilite)
+            showNotification(
+              paste0("Gate de cellules vivantes créé et appliqué par défaut à ", nb, " échantillon(s). ",
+                     "Changez d'échantillon pour ajuster sa forme individuellement, puis ré-enregistrez."),
+              type = "message", duration = 8
+            )
+          } else {
+            showNotification(paste0("Gate de cellules vivantes mis à jour pour ", input$sel_ech_viabilite, " uniquement."), type = "message")
+          }
         }, error = function(e) showNotification(conditionMessage(e), type = "error"))
       })
     })

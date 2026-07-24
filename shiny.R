@@ -13,6 +13,7 @@ source("~/Desktop/Institut_Cochin/Code/CARROT/R/module_compensation.R")
 source("~/Desktop/Institut_Cochin/Code/CARROT/R/module_demixage.R")
 source("~/Desktop/Institut_Cochin/Code/CARROT/R/module_qc.R")
 source("~/Desktop/Institut_Cochin/Code/CARROT/R/module_pretraitement.R")
+source("~/Desktop/Institut_Cochin/Code/CARROT/R/module_analyse.R")
 
 
 CANAUX_CONNUS <- c(
@@ -403,7 +404,8 @@ ui <- dashboardPage(
               pretraitement_ui("mon_module_pretrait")),
       tabItem(tabName = "unmixing_tab",  
               demixage_ui("mon_module_demixage")),
-      tabItem(tabName = "analyses_tab",  "Analyses statistiques en attente.")
+      tabItem(tabName = "analyses_tab",
+              analyse_ui("mon_module_analyse"))
     )
   )
 )
@@ -434,6 +436,10 @@ server <- function(input, output, session) {
   pretraitement_server("mon_module_pretrait",
                        pipeline         = my_pipeline,
                        pipeline_version = my_pipeline_version)
+  
+  analyse_server("mon_module_analyse",
+                 pipeline         = my_pipeline,
+                 pipeline_version = my_pipeline_version)
 }
 
 shinyApp(ui, server)

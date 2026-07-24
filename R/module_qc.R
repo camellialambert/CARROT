@@ -41,13 +41,16 @@ qc_ui <- function(id) {
                        " du signal (flux, débit) sur les données compensées."),
                    hr(),
                    
-                   selectInput(ns("peaco_determine_good_cells"), "Cellules évaluées :",
-                               choices = c("all", "channels"), selected = "all"),
+                   selectInput(ns("peaco_determine_good_cells"), "Méthode de détection des anomalies :",
+                               choices = c("All" = "all",
+                                           "Isolation Tree (IT)" = "IT",
+                                           "MAD" = "MAD"),
+                               selected = "all"),
                    
                    numericInput(ns("peaco_min_cells"), "Cellules minimales par bin :",
                                 value = 150, min = 1, step = 10),
                    numericInput(ns("peaco_max_bins"), "Nombre maximal de bins :",
-                                value = 100, min = 1, step = 5),
+                                value = 500, min = 1, step = 5),
                    numericInput(ns("peaco_step"), "Pas glissant (step) :",
                                 value = 500, min = 1, step = 50),
                    numericInput(ns("peaco_MAD"), "Multiplicateur MAD :",
@@ -79,12 +82,7 @@ qc_ui <- function(id) {
           column(width = 6,
                  wellPanel(
                    style = "padding:10px 15px;",
-                   fluidRow(
-                     column(width = 8, uiOutput(ns("ui_select_echantillon_peacoqc"))),
-                     column(width = 4,
-                            numericInput(ns("peaco_max_points"), "Points affichés :",
-                                         value = 10000, min = 1000, step = 1000))
-                   )
+                   uiOutput(ns("ui_select_echantillon_peacoqc"))
                  ),
                  box(title = "Visualisation cinétique (Temps vs FSC)", width = NULL,
                      status = "warning", solidHeader = TRUE,
@@ -169,12 +167,7 @@ qc_ui <- function(id) {
           column(width = 6,
                  wellPanel(
                    style = "padding:10px 15px;",
-                   fluidRow(
-                     column(width = 8, uiOutput(ns("ui_select_echantillon_flowai"))),
-                     column(width = 4,
-                            numericInput(ns("flowai_max_points"), "Points affichés :",
-                                         value = 10000, min = 1000, step = 1000))
-                   )
+                   uiOutput(ns("ui_select_echantillon_flowai"))
                  ),
                  box(title = "Visualisation cinétique (Temps vs FSC)", width = NULL,
                      status = "warning", solidHeader = TRUE,
@@ -266,7 +259,7 @@ qc_server <- function(id, pipeline, pipeline_version) {
     
     # Valeurs par défaut (synchronisées avec parametres_par_defaut de appliquer_peacoqc)
     defaults_peacoqc <- list(
-      determine_good_cells = "all", min_cells = 150, max_bins = 100, step = 500,
+      determine_good_cells = "all", min_cells = 150, max_bins = 500, step = 500,
       MAD = 6, IT_limit = 0.6, consecutive_bins = 5, remove_zeros = FALSE,
       force_IT = 150, peak_removal = 1/3, min_nr_bins_peakdetection = 10
     )
@@ -341,10 +334,7 @@ qc_server <- function(id, pipeline, pipeline_version) {
       }
       
       res <- tryCatch(
-        p$visualiser_peacoqc(
-          nom_echantillon = input$sel_echantillon_peacoqc,
-          max_points       = input$peaco_max_points %||% 10000
-        ),
+        p$visualiser_peacoqc(nom_echantillon = input$sel_echantillon_peacoqc),
         error = function(e) {
           showNotification(paste("Erreur visualisation PeacoQC :", conditionMessage(e)), type = "error")
           NULL
@@ -467,7 +457,7 @@ qc_server <- function(id, pipeline, pipeline_version) {
         timeCh            = time_ch,
         second_fractionFR = input$flowai_second_fractionFR,
         alphaFR           = input$flowai_alphaFR,
-        decompFR          = if (isTRUE(input$flowai_decompFR)) "cffilter" else "loess",
+        decompFR          = if (isTRUE(input$flowai_decompFR)) "cffilter" else FALSE,
         ChExcludeFS       = ch_exclude_fs,
         outlier_binsFS    = input$flowai_outlier_binsFS,
         pen_valueFS       = input$flowai_pen_valueFS,
@@ -500,10 +490,7 @@ qc_server <- function(id, pipeline, pipeline_version) {
       }
       
       res <- tryCatch(
-        p$visualiser_flowai(
-          nom_echantillon = input$sel_echantillon_flowai,
-          max_points       = input$flowai_max_points %||% 10000
-        ),
+        p$visualiser_flowai(nom_echantillon = input$sel_echantillon_flowai),
         error = function(e) {
           showNotification(paste("Erreur visualisation flowAI :", conditionMessage(e)), type = "error")
           NULL
