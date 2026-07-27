@@ -10,7 +10,7 @@ CARROT <- R6Class(
   public = list(
     # Importation des fichiers
     mode = "Conventionnel", # l'utilisateur précise si ses données sont issues d'un cytomètre conventionnel ou spectral
-    mapping_canal_fichier = NULL,
+    mapping_canal_fichier = NULL, # correspondance canal -> nom de fichier saisie par l'utilisateur à l'import (non systématiquement utilisée selon le flux d'import choisi)
     canaux = NULL, # liste des canaux (PE-A, FITC-A, etc) présents dans le fichier
     chemins_monomarques = NULL, # chemins utilisés pour accéder aux fichiers controles (monomarqués et unstained)
     tubes_monomarques = list(), # liste contenant le nom du fichier, le canal, le type (Monomarqué ou Unstained), et le chemin
@@ -34,8 +34,8 @@ CARROT <- R6Class(
     
     # Variable de l'unmixing
     dossier_racine = NULL, # nom du dossier dans lequel l'utilisateur souhaite accueillir les sorties d'AutoSpectral
-    dossier_monomarques = NULL,
-    dossier_echantillons = NULL,
+    dossier_monomarques = NULL, # dossier source contenant les fichiers monomarqués/unstained originaux (avant filtrage dans dossier_controles_asp)
+    dossier_echantillons = NULL, # dossier source contenant les fichiers échantillons à unmixer
     dossier_controles_asp = NULL, # dossier de travail isolé ne contenant QUE les fichiers monomarqués/unstained réellement sélectionnés à l'import (voir preparer_dossier_controles_asp) : empêche AutoSpectral de scanner tout un dossier source et d'y confondre échantillons, contrôles non sélectionnés ou fichiers d'une expérience précédente
     asp_control_file = "fcs_control_file.csv", # nom du fichier d'entrée d'AutoSpectral
     asp_config = NULL, # paramètres de configuration d'AutoSpectral
@@ -54,7 +54,7 @@ CARROT <- R6Class(
     pipeline_status = list(), # Enregistre l'état d'avancement du nettoyage (ex: TRUE/FALSE ou étapes validées) pour chaque échantillon
     canaux_bordures = NULL, # Liste technique des canaux ou détecteurs ciblés pour l'analyse et le retrait des événements saturés aux bordures
     post_PeacoQC = list(), # Contient les données des fichiers FCS après le contrôle qualité de PeacoQC (retrait des anomalies de débit et d'instabilité du signal)
-    post_flowAI = list(), # Contient les données des fichiers FCS après le contrôle qualité alternatif flowAI (vérification du débit, de la lueur et0 de la stabilité)
+    post_flowAI = list(), # Contient les données des fichiers FCS après le contrôle qualité alternatif flowAI (vérification du débit, de la lueur et de la stabilité)
     rapports_flowai = list(), # Contient, par échantillon, le chemin du dossier temporaire regroupant le rapport natif flowAI (HTML, TXT, PNG) généré par flow_auto_qc
     parametres_peacoqc_utilises = NULL, # Mémorise les derniers réglages PeacoQC appliqués à la cohorte (pour affichage dans le résumé PDF)
     parametres_flowai_utilises = NULL, # Mémorise les derniers réglages flowAI appliqués à la cohorte (pour affichage dans le résumé PDF)
@@ -69,6 +69,7 @@ CARROT <- R6Class(
     analyses_tsne        = list(), # Résultats de projection_tSNE(), indexés par nom de gate, même structure que analyses_umap
     analyses_pca         = list(), # Résultats de projection_PCA(), indexés par nom de gate : list(nom_gate -> list(embedding, echantillon_origine, canaux, variance_expliquee, rotation, parametres))
     clusters_flowsom     = list(), # Résultats de creer_clusters(), indexés par nom de gate : list(nom_gate -> list(fsom, clusters, metaclusters, echantillon_origine, canaux, parametres))
+    groupes_echantillons = list(), # Assignation échantillon -> groupe/condition (definir_groupe_echantillon()), utilisée par comparer_groupes()
     
     gate_doublets_FSC = list(), # Contient les coordonnées du gate de discrimination des doublets basé sur les paramètres du Forward Scatter (ex: FSC-A vs FSC-H)
     gate_doublets_SSC = list(), # Contient les coordonnées du gate de discrimination des doublets basé sur les paramètres du Side Scatter (ex: SSC-A vs SSC-H)
@@ -88,15 +89,15 @@ CARROT <- R6Class(
     
     # variables d'analyses
     post_transformation = list(), # Stocke les données des échantillons après application de la transformation (ex: arcsinh)
-    cofactor_transformation = NULL,
-    canaux_transformes = list(),
+    cofactor_transformation = NULL, # Cofacteur Arcsinh utilisé lors du dernier appel à transformation_arcsinh() (archivé pour le résumé de session RDS)
+    canaux_transformes = list(), # Liste des canaux ayant effectivement reçu la transformation, par échantillon
     
-    # variable 
+    # variable de rappel Shiny (callback) : permet à un module d'être notifié quand le pipeline change sans dépendance circulaire directe
     pipeline_callback = NULL,
     
-    #pour siny
+    # config/dictionnaire marqueurs (pour Shiny)
     config_marqueurs = NULL, # data.frame brut (lignes = tubes/échantillons, colonnes = canaux) des annotations marqueurs saisies par l'utilisateur
-    dictionnaire_marqueurs = NULL, # vecteur nommé canal -> marqueur biologique, dérivé de config_marqueurs, utilisé par get_label() pour tous les libellés d'axes
+    dictionnaire_marqueurs = NULL, # vecteur nommé canal -> marqueur biologique, dérivé de config_marqueurs, utilisé par obtenir_label() pour tous les libellés d'axes
     
     #pour l'import sans fichiers contrôles (échantillons déjà compensés / unmixés)
     sans_controles = FALSE, # TRUE si l'utilisateur n'a fourni aucun tube monomarqué/unstained
@@ -147,36 +148,36 @@ CARROT <- R6Class(
       # ── Tubes contrôles (monomarqués / unstained) : optionnels ──────────────
       # Si l'utilisateur n'a fourni aucun fichier contrôle (échantillons déjà
       # compensés ou déjà unmixés), on saute simplement cette étape.
-      if (!is.null(self$chemins_monomarques) && nrow(self$chemins_monomarques) > 0) {
-        self$tubes_monomarques <- lapply(seq_len(nrow(self$chemins_monomarques)), function(i) {
+      if (!is.null(self$chemins_monomarques) && nrow(self$chemins_monomarques) > 0) { # Si au moins un tube contrôle a été fourni à l'import
+        self$tubes_monomarques <- lapply(seq_len(nrow(self$chemins_monomarques)), function(i) { # Lit chaque fichier FCS contrôle un par un, dans l'ordre du tableau d'import
           row <- self$chemins_monomarques[i, ]
-          flowCore::read.FCS(row$chemin, transformation = FALSE, truncate_max_range = FALSE)
+          flowCore::read.FCS(row$chemin, transformation = FALSE, truncate_max_range = FALSE) # transformation=FALSE : on garde les valeurs brutes, la transformation (Arcsinh) est appliquée plus tard et séparément ; truncate_max_range=FALSE : ne tronque pas les événements saturés en bord de plage (gérés ensuite par le retrait des bordures)
         })
-        noms_tubes <- sapply(seq_len(nrow(self$chemins_monomarques)), function(i) {
+        noms_tubes <- sapply(seq_len(nrow(self$chemins_monomarques)), function(i) { # Détermine le nom à donner à chaque tube dans self$tubes_monomarques
           row <- self$chemins_monomarques[i, ]
-          if (!is.na(row$type) && row$type == "Unstained") return("TUBE_UNSTAINED")
-          return(row$canal)
+          if (!is.na(row$type) && row$type == "Unstained") return("TUBE_UNSTAINED") # Nom conventionnel fixe pour le tube non marqué, quel que soit son nom de fichier d'origine (repéré ainsi partout ailleurs dans le pipeline)
+          return(row$canal) # Pour un tube monomarqué, le nom est directement le canal sur lequel il a été acquis (ex: "PE-A")
         })
         names(self$tubes_monomarques) <- noms_tubes
-        self$sans_controles <- FALSE
+        self$sans_controles <- FALSE # Au moins un contrôle existe : le pipeline suivra le flux "avec contrôles" (compensation calculée depuis ces tubes)
       } else {
         self$tubes_monomarques <- list()
-        self$sans_controles <- TRUE
+        self$sans_controles <- TRUE # Aucun contrôle : le pipeline suivra le flux "sans contrôles" (voir plus bas : transformation par défaut, éventuel import de spillover déjà présent dans le FCS)
       }
       
       # ── Échantillons biologiques : toujours requis ───────────────────────────
       self$echantillons = lapply(self$chemins_echantillons$chemin, function(f) {
-        flowCore::read.FCS(f, transformation = FALSE, truncate_max_range = FALSE)
+        flowCore::read.FCS(f, transformation = FALSE, truncate_max_range = FALSE) # Mêmes réglages que pour les contrôles : lecture brute, sans transformation ni troncature
       }) 
-      names(self$echantillons) <- self$chemins_echantillons$tube_name
+      names(self$echantillons) <- self$chemins_echantillons$tube_name # Les échantillons sont indexés par leur nom de tube partout dans le pipeline (clé de toutes les listes post_*)
       
-      if (self$sans_controles && self$mode == "Conventionnel" && self$deja_traite) {
-        invisible(tryCatch(self$importer_spillover_fcs(), error = function(e) NULL))
+      if (self$sans_controles && self$mode == "Conventionnel" && self$deja_traite) { # Cas particulier : cytométrie conventionnelle, pas de contrôles fournis, mais données annoncées déjà compensées
+        invisible(tryCatch(self$importer_spillover_fcs(), error = function(e) NULL)) # Tente de récupérer la matrice de spillover déjà appliquée, directement depuis les métadonnées du FCS (mot-clé $SPILLOVER ou équivalent) ; échec silencieux si absente (juste informatif, non bloquant)
       }
       
-      if (self$sans_controles) {
+      if (self$sans_controles) { # Sans contrôles (quel que soit le mode) : il faut quand même pouvoir visualiser/gater les données, donc une transformation par défaut est appliquée
         invisible(tryCatch(self$transformer_fcs(cofacteur = self$cofacteur_defaut),
-                           error = function(e) NULL))
+                           error = function(e) NULL)) # Échec silencieux si la transformation par défaut ne peut pas s'appliquer (ex: canaux non standards) ; l'utilisateur pourra la relancer manuellement depuis l'onglet Transformation
       }
       
       # ── Transition directe vers echantillons_traites ────────────────────────
@@ -191,22 +192,28 @@ CARROT <- R6Class(
       # ensuite les modules QC et Prétraitement, quel que soit le type de
       # cytomètre (Conventionnel ou Spectral).
       if (isTRUE(self$deja_traite)) {
-        self$echantillons_traites <- self$echantillons
+        self$echantillons_traites <- self$echantillons # Copie directe (mêmes objets flowFrame, pas de recalcul) : voir le bloc de commentaire ci-dessus pour la justification complète
       }
     },
     
+    # Tente de récupérer, directement depuis les métadonnées d'un fichier FCS déjà
+    # compensé (mot-clé standard $SPILLOVER/SPILL/COMP), la matrice de spillover qui
+    # y a été appliquée en amont — utile uniquement pour affichage/traçabilité
+    # (aucune recompensation n'est effectuée à partir de cette matrice : voir le
+    # commentaire de charger_fcs() sur pourquoi on ne recompense jamais des
+    # données déjà annoncées comme compensées).
     importer_spillover_fcs = function(nom_echantillon = NULL) {
       if (is.null(self$echantillons) || length(self$echantillons) == 0) {
         stop("Aucun échantillon chargé.")
       }
-      nom <- if (!is.null(nom_echantillon)) nom_echantillon else names(self$echantillons)[1]
+      nom <- if (!is.null(nom_echantillon)) nom_echantillon else names(self$echantillons)[1] # Par défaut, inspecte le premier échantillon disponible (la matrice de spillover est en principe identique pour toute la cohorte acquise dans la même session)
       fcs <- self$echantillons[[nom]]
       if (is.null(fcs)) stop("Échantillon introuvable : ", nom)
       
-      mat <- extraire_spillover_depuis_fcs(fcs)
+      mat <- extraire_spillover_depuis_fcs(fcs) # Fonction utilitaire (utils.R) : cherche et parse tous les formats connus de mot-clé de compensation dans les métadonnées FCS
       
-      if (is.null(mat)) {
-        cles_trouvees <- lister_cles_spillover_fcs(fcs)
+      if (is.null(mat)) { # Aucune matrice exploitable trouvée : construit un message d'erreur informatif plutôt que de simplement échouer
+        cles_trouvees <- lister_cles_spillover_fcs(fcs) # Recherche large (toute clé contenant "spill"/"comp") pour aider au diagnostic, même si le format n'est pas reconnu
         if (length(cles_trouvees) == 0) {
           return(list(succes = FALSE,
                       message = "Aucun mot-clé de compensation (SPILL/SPILLOVER/COMP) n'a été trouvé dans les métadonnées de ce fichier FCS."))
@@ -219,7 +226,7 @@ CARROT <- R6Class(
       }
       
       # On ne conserve que les canaux réellement présents dans l'échantillon
-      canaux_valides <- intersect(rownames(mat), flowCore::colnames(fcs))
+      canaux_valides <- intersect(rownames(mat), flowCore::colnames(fcs)) # Sécurité : la matrice du FCS peut lister des canaux qui n'existent plus/pas dans ce fichier précis (panel modifié entre-temps, etc.)
       if (length(canaux_valides) == 0) {
         return(list(succes = FALSE,
                     message = paste0("Une matrice a été trouvée (canaux : ",
@@ -228,15 +235,15 @@ CARROT <- R6Class(
                                      paste(flowCore::colnames(fcs), collapse = ", "), ").")))
       }
       
-      mat <- mat[canaux_valides, canaux_valides, drop = FALSE]
+      mat <- mat[canaux_valides, canaux_valides, drop = FALSE] # Restreint la matrice (carrée) aux seuls canaux valides, dans le même ordre pour lignes et colonnes
       
-      self$S_matrix <- mat
+      self$S_matrix <- mat # Stocke la matrice pour affichage/export (informatif uniquement, cf. en-tête de méthode)
       self$canaux   <- canaux_valides
       return(list(succes = TRUE,
                   message = paste0("Matrice importée pour ", length(canaux_valides), " canaux.")))
     },
     
-    get_label = function(fcs, canal) { # Permet d'extraire le nom des marqueurs biologiques à afficher sur les axes des graphiques
+    obtenir_label = function(fcs, canal) { # Permet d'extraire le nom des marqueurs biologiques à afficher sur les axes des graphiques
       if (is.na(canal) || canal == "") return(canal) # Si aucun canal n'est donné, on retourne tel quel
       
       # Priorité à l'annotation manuelle de l'utilisateur (onglet "Configuration Marqueurs"),
@@ -283,7 +290,7 @@ CARROT <- R6Class(
       invisible(self$dictionnaire_marqueurs)
     },
     
-    update_pipeline = function(etape, nom_echantillon = NULL) { # méthode qui permet de savoir à quelle étape on se situe
+    mettre_a_jour_pipeline = function(etape, nom_echantillon = NULL) { # méthode qui permet de savoir à quelle étape on se situe
       if (is.null(self$pipeline_status)) self$pipeline_status <- list() 
       horodatage <- format(Sys.time(), "%H:%M:%S") 
       if (is.null(nom_echantillon)) { 
@@ -390,7 +397,7 @@ CARROT <- R6Class(
         tube_neg_a_tracer <- if(afficher_unstained_neg && existe_unstained) "TUBE_UNSTAINED" else canal
         
         fcs_brut  <- self$tubes_monomarques[[canal]]
-        nom_bio   <- self$get_label(fcs_brut, canal) 
+        nom_bio   <- self$obtenir_label(fcs_brut, canal) 
         
         df_trans_pos  <- as.data.frame(flowCore::exprs(self$monomarques_trans[[canal]]))
         df_trans_neg  <- as.data.frame(flowCore::exprs(self$monomarques_trans[[tube_neg_a_tracer]]))
@@ -558,8 +565,8 @@ CARROT <- R6Class(
       # on garde systématiquement l'intégralité des événements, sans sous-échantillonnage.
       df_avant <- as.data.frame(mat_avant) # Crée un tableau R contenant l'intégralité des événements non compensés
       df_apres <- as.data.frame(mat_apres) # Crée un tableau R contenant l'intégralité des événements compensés
-      label_x_explicite <- self$get_label(fcs_brut_original, canal_x) # Génère le libellé biologique complet pour l'axe X (ex: "V3-A | CD4")
-      label_y_explicite <- self$get_label(fcs_brut_original, canal_y) # Génère le libellé biologique complet pour l'axe Y (ex: "B1-A | CD8")
+      label_x_explicite <- self$obtenir_label(fcs_brut_original, canal_x) # Génère le libellé biologique complet pour l'axe X (ex: "V3-A | CD4")
+      label_y_explicite <- self$obtenir_label(fcs_brut_original, canal_y) # Génère le libellé biologique complet pour l'axe Y (ex: "B1-A | CD8")
       limite_x <- range(c(df_avant[[canal_x]], df_apres[[canal_x]]), na.rm = TRUE) + c(-0.5, 0.5) # Calcule des limites d'affichage identiques en abscisse pour les deux graphiques
       limite_y <- range(c(df_avant[[canal_y]], df_apres[[canal_y]]), na.rm = TRUE) + c(-0.5, 0.5) # Calcule des limites d'affichage identiques en ordonnée pour les deux graphiques
       
@@ -645,8 +652,8 @@ CARROT <- R6Class(
       # ───────────────────────────────────────────────
       # Cas simple : une paire de canaux
       # ───────────────────────────────────────────────
-      label_x <- self$get_label(fcs_source, canal_x)
-      label_y <- self$get_label(fcs_source, canal_y)
+      label_x <- self$obtenir_label(fcs_source, canal_x)
+      label_y <- self$obtenir_label(fcs_source, canal_y)
       
       extraire_matrice <- function(fcs, cx, cy) {
         if (is.null(fcs)) return(NULL)
@@ -932,13 +939,26 @@ CARROT <- R6Class(
       )
     },
     
-    verifier_asp = function(warning = 5000, error = 1000) {
+    # Vérifie le fichier de contrôle AutoSpectral (fcs_control_file.csv) déjà
+    # généré par lancer_asp() : contrôle sa cohérence avec les fichiers FCS
+    # présents sur le disque et le nombre d'événements par contrôle, via
+    # AutoSpectral::check.control.file(). seuil_warning/seuil_error sont
+    # transmis tels quels à ses propres paramètres min.event.warning/
+    # min.event.error (nombre minimal d'événements en dessous duquel un
+    # avertissement, puis une erreur, sont levés).
+    # NOTE : les paramètres ne s'appellent volontairement PAS "warning"/"error"
+    # (comme dans une version précédente) : "warning" est aussi le nom d'une
+    # fonction de base de R (warning()) — un paramètre portant ce nom masque
+    # cette fonction dans tout le corps de la méthode, ce qui aurait provoqué
+    # une erreur "attempt to apply non-function" au moindre appel à warning(...)
+    # ajouté plus tard à l'intérieur de cette méthode.
+    verifier_asp = function(seuil_warning = 5000, seuil_error = 1000) {
       
       if (is.null(self$asp_config)) {
         stop("Erreur : asp_config est NULL. Lancez d'abord lancer_asp().")
       }
-      chemin_csv_complet <- file.path(path.expand(self$dossier_racine), "fcs_control_file.csv")
-      dossier_fcs <- path.expand(dirname(self$chemins_monomarques$chemin[1]))
+      chemin_csv_complet <- file.path(path.expand(self$dossier_racine), "fcs_control_file.csv") # Chemin du fichier de métadonnées AutoSpectral, généré précédemment par lancer_asp()
+      dossier_fcs <- path.expand(dirname(self$chemins_monomarques$chemin[1])) # Déduit le dossier des fichiers contrôles à partir du chemin du premier tube monomarqué importé
       
       if (!file.exists(chemin_csv_complet)) {
         stop("Fichier de contrôle introuvable à : ", chemin_csv_complet)
@@ -948,13 +968,13 @@ CARROT <- R6Class(
         control.dir = dossier_fcs, 
         control.def.file = chemin_csv_complet, 
         asp = self$asp_config,
-        min.event.warning = warning, 
-        min.event.error = error
+        min.event.warning = seuil_warning, 
+        min.event.error = seuil_error
       )
       
       if (is.null(verification)) {
       } else {
-        print(verification)
+        print(verification) # Affiche le tableau de vérification (une ligne par contrôle) dans la console R
       }
       return(verification)
     },
@@ -1101,7 +1121,7 @@ CARROT <- R6Class(
       return(invisible(self$flow.control))
     },
     
-    extraire_fluorophore_spectre = function() {
+    extraire_spectre_fluorophore = function() {
       if (is.null(self$flow.control)) {
         stop("Erreur : flow.control n'est pas chargé.")
       }
@@ -1125,7 +1145,7 @@ CARROT <- R6Class(
     extraire_spectre_af = function(unstained_fcs_path, tissue_name, refine = TRUE) {
       
       if (is.null(self$spectra)) {
-        stop("Erreur : Les spectres fluorophores n'ont pas été extraits. Lancez extraire_fluorophore_spectre() d'abord.")
+        stop("Erreur : Les spectres fluorophores n'ont pas été extraits. Lancez extraire_spectre_fluorophore() d'abord.")
       }
       
       dossier_figures <- path.expand(file.path(self$dossier_racine, "figure_autofluorescence"))
@@ -1265,7 +1285,7 @@ CARROT <- R6Class(
       dossier_gates <- file.path(self$dossier_racine, "figure_gate")
       if (!dir.exists(dossier_gates)) dir.create(dossier_gates, recursive = TRUE)
       if (is.null(self$spectra)) {
-        stop("Erreur : Les spectres n'ont pas été extraits. Lancez extraire_fluorophore_spectre() d'abord.")
+        stop("Erreur : Les spectres n'ont pas été extraits. Lancez extraire_spectre_fluorophore() d'abord.")
       }
       
       if (!fluorophore %in% rownames(self$spectra)) {
@@ -1307,7 +1327,7 @@ CARROT <- R6Class(
     },
     
     
-    get_chemins_figures = function(control_name) {
+    obtenir_chemins_figures = function(control_name) {
       dossier <- file.path(self$dossier_racine, "figure_gate")
       if (!dir.exists(dossier)) return(NULL)
       list.files(dossier, pattern=paste0(control_name, ".*\\.png$"), full.names=TRUE)
@@ -1332,7 +1352,7 @@ CARROT <- R6Class(
         return(ggplot() + theme_bw() +
                  labs(title = paste("Résultat après Unmixing :", nom_fichier_fcs),
                       subtitle = "Pas assez d'événements pour tracer la densité",
-                      x = self$get_label(fcs_unmixed, canal_x), y = self$get_label(fcs_unmixed, canal_y)))
+                      x = self$obtenir_label(fcs_unmixed, canal_x), y = self$obtenir_label(fcs_unmixed, canal_y)))
       }
       
       ggplot(df_densite, aes(x = X, y = Y, fill = densite)) +
@@ -1343,8 +1363,8 @@ CARROT <- R6Class(
         theme(legend.position = "none", aspect.ratio = 1) +
         labs(
           title = paste("Résultat après Unmixing :", nom_fichier_fcs), 
-          x = self$get_label(fcs_unmixed, canal_x), 
-          y = self$get_label(fcs_unmixed, canal_y)
+          x = self$obtenir_label(fcs_unmixed, canal_x), 
+          y = self$obtenir_label(fcs_unmixed, canal_y)
         )
     },
     
@@ -1368,7 +1388,7 @@ CARROT <- R6Class(
     #       ️ SECTION PRÉ-TRAITEMENT
     # ============================================================
     
-    get_derniere_source = function() {
+    obtenir_derniere_source = function() {
       # 1. Étapes de transformation et gating final
       if (!is.null(self$post_transformation) && length(self$post_transformation) > 0) return(self$post_transformation)
       if (!is.null(self$post_viabilite) && length(self$post_viabilite) > 0) return(self$post_viabilite)
@@ -1478,7 +1498,7 @@ CARROT <- R6Class(
       self$parametres_peacoqc_utilises <- config_qc
       
       # Mise à jour pipeline
-      if (!is.null(self$update_pipeline)) self$update_pipeline("PeacoQC")
+      if (!is.null(self$mettre_a_jour_pipeline)) self$mettre_a_jour_pipeline("PeacoQC")
     },
     
     appliquer_flowai = function(reglages_specifiques = list()) {
@@ -1566,13 +1586,13 @@ CARROT <- R6Class(
         self$rapports_flowai[[nom]] <- dossier_tmp
       }
       
-      self$update_pipeline("flowAI")
+      self$mettre_a_jour_pipeline("flowAI")
       invisible(TRUE)
     },
     
     retirer_les_bordures = function(canal1, canal2, nom_echantillon = NULL) {
       self$canaux_bordures <- c(canal1, canal2)
-      liste_source <- self$get_derniere_source()
+      liste_source <- self$obtenir_derniere_source()
       noms_a_traiter <- if (is.null(nom_echantillon)) names(liste_source) else nom_echantillon
       
       if (is.null(noms_a_traiter) || length(noms_a_traiter) == 0) {
@@ -1589,7 +1609,7 @@ CARROT <- R6Class(
           )
         }
       }
-      if (!is.null(self$update_pipeline)) self$update_pipeline("bordures", nom_echantillon)
+      if (!is.null(self$mettre_a_jour_pipeline)) self$mettre_a_jour_pipeline("bordures", nom_echantillon)
     },
     
     retirer_les_debris = function(matrice_points, canal_x, canal_y, nom_echantillon = NULL, source_nettoyage = "brutes") {
@@ -1638,8 +1658,8 @@ CARROT <- R6Class(
         appliquer_le_filtrage(nom) 
       }
       
-      if (!is.null(self$update_pipeline)) {
-        self$update_pipeline("debris", nom_echantillon)
+      if (!is.null(self$mettre_a_jour_pipeline)) {
+        self$mettre_a_jour_pipeline("debris", nom_echantillon)
       }
       
       return(invisible(self))
@@ -1672,7 +1692,7 @@ CARROT <- R6Class(
           liste_source <- lapply(names(gate_precedent), function(n) gate_precedent[[n]]$post_data)
           names(liste_source) <- names(gate_precedent)
         } else {
-          liste_source <- self$get_derniere_source()
+          liste_source <- self$obtenir_derniere_source()
         }
       } else {
         if (source_nettoyage == "peacoqc" && length(self$post_PeacoQC) > 0) {
@@ -1680,7 +1700,7 @@ CARROT <- R6Class(
         } else if (source_nettoyage == "flowai" && length(self$post_flowAI) > 0) {
           liste_source <- self$post_flowAI
         } else {
-          liste_source <- self$get_derniere_source()
+          liste_source <- self$obtenir_derniere_source()
         }
       }
       
@@ -1730,7 +1750,7 @@ CARROT <- R6Class(
     },
     
     retirer_doublets_FSC = function(facteur_sensibilite = 4, axe_discrimination = "H_A", nom_echantillon = NULL) { # Méthode statistique éliminant les agrégats cellulaires (doublets) sur l'axe Forward Scatter (FSC) en évaluant la linéarité géométrique des signaux
-      liste_fcs_source <- if (!is.null(self$post_debris) && length(self$post_debris) > 0) self$post_debris else self$get_derniere_source() # Sélectionne par défaut les données issues du filtre débris ou applique le mécanisme de repli pyramidal sur le dernier état valide
+      liste_fcs_source <- if (!is.null(self$post_debris) && length(self$post_debris) > 0) self$post_debris else self$obtenir_derniere_source() # Sélectionne par défaut les données issues du filtre débris ou applique le mécanisme de repli pyramidal sur le dernier état valide
       label_source <- if (!is.null(self$post_debris) && length(self$post_debris) > 0) "post_debris" else "source_parente" # Génère une étiquette textuelle décrivant le niveau d'origine des données pour la traçabilité du pipeline
       
       if (is.null(self$gate_doublets_FSC)) self$gate_doublets_FSC <- list()
@@ -1778,7 +1798,7 @@ CARROT <- R6Class(
       
       noms_a_traiter <- if (is.null(nom_echantillon) || length(self$gate_doublets_FSC) == 0) names(liste_fcs_source) else nom_echantillon # Applique à toute la cohorte la toute première fois (aucun gate FSC encore enregistré) ; sinon restreint la mise à jour à l'échantillon ciblé, pour permettre un seuil différent par échantillon
       for (nom in noms_a_traiter) { calculer_doublets(nom, label_source) } # Parcourt et traite séquentiellement via la boucle chaque échantillon configuré dans la liste cible
-      self$update_pipeline("doublets_FSC", nom_echantillon) # Active la mise à jour des graphes d'état ou rafraîchit l'interface Shiny pour cette étape d'isolement
+      self$mettre_a_jour_pipeline("doublets_FSC", nom_echantillon) # Active la mise à jour des graphes d'état ou rafraîchit l'interface Shiny pour cette étape d'isolement
     },
     
     retirer_doublets_SSC = function(facteur_sensibilite = 4, axe_discrimination = "H_A", nom_echantillon = NULL) { # Méthode statistique éliminant les agrégats cellulaires (doublets) sur l'axe Side Scatter (SSC) en évaluant la linéarité géométrique des signaux de granularité
@@ -1787,7 +1807,7 @@ CARROT <- R6Class(
       } else if (!is.null(self$post_debris) && length(self$post_debris) > 0) { # À défaut, évalue si la liste filtrée pour les débris est accessible
         self$post_debris # Se connecte en aval de l'étape de filtration des débris cellulaires
       } else { # Si aucune des structures de tri précédentes n'est peuplée ou initialisée
-        self$get_derniere_source() # Active le mécanisme de repli automatique sur le dernier niveau de traitement valide du pipeline
+        self$obtenir_derniere_source() # Active le mécanisme de repli automatique sur le dernier niveau de traitement valide du pipeline
       } 
       
       label_source <- if (!is.null(self$post_doublets_FSC) && length(self$post_doublets_FSC) > 0) { # Détermine l'origine exacte des données pour documenter l'historique d'analyse
@@ -1844,11 +1864,11 @@ CARROT <- R6Class(
       
       noms_a_traiter <- if (is.null(nom_echantillon) || length(self$gate_doublets_SSC) == 0) names(liste_fcs_source) else nom_echantillon # Applique à toute la cohorte la toute première fois (aucun gate SSC encore enregistré) ; sinon restreint la mise à jour à l'échantillon ciblé, pour permettre un seuil différent par échantillon
       for (nom in noms_a_traiter) { calculer_doublets(nom, label_source) } # Parcourt et traite séquentiellement l'ensemble de la liste via une boucle d'exécution unitaire
-      self$update_pipeline("doublets_SSC", nom_echantillon) # Déclenche directement la mise à jour des graphes de suivi ou actualise l'interface graphique UI Shiny
+      self$mettre_a_jour_pipeline("doublets_SSC", nom_echantillon) # Déclenche directement la mise à jour des graphes de suivi ou actualise l'interface graphique UI Shiny
     },
     
     gate_les_doublets_FSC = function(points_utilisateur, axe_discrimination = "H_A", nom_echantillon = NULL) { # Méthode appliquant un fenêtrage polygonal manuel (PolygonGate) fourni par l'utilisateur pour discriminer et exclure les doublets sur les axes Forward Scatter
-      liste_fcs_source <- if (!is.null(self$post_debris) && length(self$post_debris) > 0) self$post_debris else self$get_derniere_source() # Sélectionne en priorité les données issues du filtre débris ou active le mécanisme de repli hiérarchique pyramidal
+      liste_fcs_source <- if (!is.null(self$post_debris) && length(self$post_debris) > 0) self$post_debris else self$obtenir_derniere_source() # Sélectionne en priorité les données issues du filtre débris ou active le mécanisme de repli hiérarchique pyramidal
       if (length(liste_fcs_source) == 0) stop("Aucune donnée source disponible pour le gating des doublets FSC.") # Sécurité : bloque l'exécution si aucune matrice cellulaire n'est localisée en mémoire vive
       
       premier_ff  <- liste_fcs_source[[1]] # Extrait le premier objet flowFrame disponible de la liste pour analyser sa structure technique
@@ -1881,7 +1901,7 @@ CARROT <- R6Class(
       
       noms <- if (is.null(nom_echantillon) || length(self$gate_doublets_FSC) == 0) names(liste_fcs_source) else nom_echantillon # Applique à toute la cohorte la toute première fois (aucun gate FSC encore enregistré) ; sinon restreint la mise à jour à l'échantillon ciblé, pour permettre une forme de gate différente par échantillon
       for (n in noms) { appliquer_fsc(n) } # Parcourt et traite séquentiellement l'ensemble de la liste via une boucle d'exécution unitaire
-      if (!is.null(self$update_pipeline)) self$update_pipeline("doublets_FSC", nom_echantillon) # Déclenche la mise à jour des graphes de suivi ou actualise l'interface graphique Shiny
+      if (!is.null(self$mettre_a_jour_pipeline)) self$mettre_a_jour_pipeline("doublets_FSC", nom_echantillon) # Déclenche la mise à jour des graphes de suivi ou actualise l'interface graphique Shiny
     },
     
     gate_les_doublets_SSC = function(points_utilisateur, axe_discrimination = "H_A", nom_echantillon = NULL) { # Méthode appliquant un fenêtrage polygonal manuel (PolygonGate) fourni par l'utilisateur pour discriminer et exclure les doublets sur les axes Side Scatter
@@ -1890,7 +1910,7 @@ CARROT <- R6Class(
       } else if (!is.null(self$post_debris) && length(self$post_debris) > 0) { # À défaut, évalue si la liste filtrée pour les débris cellulaires est accessible
         self$post_debris # Connecte le flux en aval immédiat de l'étape de filtration des débris
       } else { # Si aucune des structures de tri précédentes n'est peuplée ou initialisée
-        self$get_derniere_source() # Active le mécanisme de repli automatique sur le dernier niveau de traitement valide détecté dans le pipeline
+        self$obtenir_derniere_source() # Active le mécanisme de repli automatique sur le dernier niveau de traitement valide détecté dans le pipeline
       } 
       if (length(liste_fcs_source) == 0) stop("Aucune donnée source disponible pour le gating des doublets SSC.") # Sécurité : bloque l'exécution si aucune matrice cellulaire n'est localisée en mémoire vive
       
@@ -1924,7 +1944,7 @@ CARROT <- R6Class(
       
       noms <- if (is.null(nom_echantillon) || length(self$gate_doublets_SSC) == 0) names(liste_fcs_source) else nom_echantillon # Applique à toute la cohorte la toute première fois (aucun gate SSC encore enregistré) ; sinon restreint la mise à jour à l'échantillon ciblé, pour permettre une forme de gate différente par échantillon
       for (n in noms) { appliquer_ssc(n) } # Parcourt et traite séquentiellement l'ensemble de la liste via une boucle d'exécution unitaire
-      if (!is.null(self$update_pipeline)) self$update_pipeline("doublets_SSC", nom_echantillon) # Déclenche la mise à jour des graphes de suivi ou actualise l'interface graphique Shiny
+      if (!is.null(self$mettre_a_jour_pipeline)) self$mettre_a_jour_pipeline("doublets_SSC", nom_echantillon) # Déclenche la mise à jour des graphes de suivi ou actualise l'interface graphique Shiny
     },
     
     visualiser_peacoqc = function(nom_echantillon) { # Méthode générant un graphique cinétique comparatif pour évaluer visuellement l'efficacité du filtrage de bruit de flux opéré par PeacoQC
@@ -1959,8 +1979,8 @@ CARROT <- R6Class(
         donnees_exclues <- donnees_initiales
       }
       
-      lbl_x <- if (!is.null(self$get_label)) self$get_label(flowframe_initial, canal_temps) else canal_temps # Extrait le libellé biologique de l'axe X via get_label, ou utilise le nom technique brut
-      lbl_y <- if (!is.null(self$get_label)) self$get_label(flowframe_initial, canal_fsc) else canal_fsc # Extrait le libellé biologique de l'axe Y via get_label, ou utilise le nom technique brut
+      lbl_x <- if (!is.null(self$obtenir_label)) self$obtenir_label(flowframe_initial, canal_temps) else canal_temps # Extrait le libellé biologique de l'axe X via obtenir_label, ou utilise le nom technique brut
+      lbl_y <- if (!is.null(self$obtenir_label)) self$obtenir_label(flowframe_initial, canal_fsc) else canal_fsc # Extrait le libellé biologique de l'axe Y via obtenir_label, ou utilise le nom technique brut
       
       # Densité calculée par binning raster (rapide, indépendant du nombre d'événements) pour
       # la population conservée, plutôt que par sous-échantillonnage aléatoire de points.
@@ -2105,8 +2125,8 @@ CARROT <- R6Class(
       pourcentage_conservation <- if (total_evenements_avant > 0)
         round((total_evenements_apres / total_evenements_avant) * 100, 1) else 0
       
-      lbl_x <- self$get_label(flowframe_avant, canal_x)
-      lbl_y <- self$get_label(flowframe_avant, canal_y)
+      lbl_x <- self$obtenir_label(flowframe_avant, canal_x)
+      lbl_y <- self$obtenir_label(flowframe_avant, canal_y)
       
       lim_x_globale <- c(0, max(donnees_globales[[canal_x]], na.rm = TRUE))
       lim_y_globale <- c(0, max(donnees_globales[[canal_y]], na.rm = TRUE))
@@ -2167,14 +2187,14 @@ CARROT <- R6Class(
       if (is.null(infos_gate)) return(NULL) # interrompt proprement la fonction si aucune information de gating n'est localisée pour cet échantillon
       
       ff_avant <- if (type_analyse == "FSC") { # Routage adaptatif de la source amont : si l'analyse porte sur les doublets Forward Scatter
-        if (!is.null(self$post_debris) && length(self$post_debris) > 0) self$post_debris[[nom_echantillon]] else self$get_derniere_source()[[nom_echantillon]] # Récupère les données post-débris ou applique le mécanisme de repli hiérarchique sur la dernière source valide
+        if (!is.null(self$post_debris) && length(self$post_debris) > 0) self$post_debris[[nom_echantillon]] else self$obtenir_derniere_source()[[nom_echantillon]] # Récupère les données post-débris ou applique le mécanisme de repli hiérarchique sur la dernière source valide
       } else { # Sinon, si l'analyse porte sur les doublets Side Scatter (granularité)
         if (!is.null(self$post_doublets_FSC) && length(self$post_doublets_FSC) > 0) { # Évalue si les cellules ont déjà subi l'exclusion des doublets sur l'axe FSC
           self$post_doublets_FSC[[nom_echantillon]] # Charge la matrice cellulaire résultant du premier niveau d'exclusion des doublets FSC
         } else if (!is.null(self$post_debris) && length(self$post_debris) > 0) { # À défaut, vérifie si la structure filtrée pour les débris est accessible
           self$post_debris[[nom_echantillon]] # Connecte le flux en aval immédiat de l'étape de filtration des débris
         } else { # Si aucun filtre intermédiaire n'est présent en mémoire de l'objet
-          self$get_derniere_source()[[nom_echantillon]] # Se replie automatiquement sur le dernier état de traitement valide disponible
+          self$obtenir_derniere_source()[[nom_echantillon]] # Se replie automatiquement sur le dernier état de traitement valide disponible
         } 
       } 
       if (is.null(ff_avant)) return(NULL) # Sécurité critique : quitte proprement la routine si aucun flowFrame antécédent valide n'est identifié
@@ -2192,8 +2212,8 @@ CARROT <- R6Class(
       nb_apres    <- if (!is.null(ff_apres)) nrow(flowCore::exprs(ff_apres)) else 0 # Dénombre précisément la population de cellules uniques (singlets) conservée après application de la coupure
       pourcentage <- if (nb_avant > 0) round((nb_apres / nb_avant) * 100, 1) else 0 # Déduit le rendement de la filtration en pourcentage, arrondi au dixième
       limite_max  <- max(donnees_source[, c(canal_x, canal_y)], na.rm = TRUE) # Détermine la valeur maximale absolue observée sur les deux canaux pour harmoniser et proportionner les axes de la figure
-      lbl_x <- if (!is.null(self$get_label)) self$get_label(ff_avant, canal_x) else canal_x # Extrait le libellé biologique ou l'étiquette de l'axe X via get_label, ou garde le nom technique brut
-      lbl_y <- if (!is.null(self$get_label)) self$get_label(ff_avant, canal_y) else canal_y # Extrait le libellé biologique ou l'étiquette de l'axe Y via get_label, ou garde le nom technique brut
+      lbl_x <- if (!is.null(self$obtenir_label)) self$obtenir_label(ff_avant, canal_x) else canal_x # Extrait le libellé biologique ou l'étiquette de l'axe X via obtenir_label, ou garde le nom technique brut
+      lbl_y <- if (!is.null(self$obtenir_label)) self$obtenir_label(ff_avant, canal_y) else canal_y # Extrait le libellé biologique ou l'étiquette de l'axe Y via obtenir_label, ou garde le nom technique brut
       
       # --- Détermination de l'appartenance conservé / retiré pour chaque évènement échantillonné ---
       if (!is.null(ff_apres) && nb_apres > 0) { # Seulement si un résultat de filtration existe réellement pour cet échantillon
@@ -2279,7 +2299,7 @@ CARROT <- R6Class(
       } else if (!is.null(self$post_debris) && length(self$post_debris) > 0) {
         self$post_debris
       } else {
-        self$get_derniere_source()
+        self$obtenir_derniere_source()
       }
       
       if (is.null(self$gate_viabilite)) self$gate_viabilite <- list()
@@ -2303,7 +2323,7 @@ CARROT <- R6Class(
       echantillons <- if (is.null(nom_echantillon) || length(self$gate_viabilite) == 0) names(liste_fcs_source) else nom_echantillon # Applique à toute la cohorte la toute première fois (aucun gate de viabilité encore enregistré) ; sinon restreint la mise à jour à l'échantillon ciblé, pour permettre une forme de gate différente par échantillon
       for (nom in echantillons) appliquer_le_gate_vivantes(nom)
       
-      self$update_pipeline("viabilite", nom_echantillon)
+      self$mettre_a_jour_pipeline("viabilite", nom_echantillon)
     },
     
     visualiser_viabilite = function(nom_echantillon) {
@@ -2322,7 +2342,7 @@ CARROT <- R6Class(
       } else if (!is.null(self$post_debris[[nom_echantillon]])) {
         self$post_debris[[nom_echantillon]]
       } else {
-        self$get_derniere_source()[[nom_echantillon]]
+        self$obtenir_derniere_source()[[nom_echantillon]]
       }
       
       if (is.null(flowframe_avant)) return(NULL)
@@ -2395,8 +2415,8 @@ CARROT <- R6Class(
       total_evenements_apres <- nrow(flowCore::exprs(flowframe_apres))
       pourcentage_conservation <- round((total_evenements_apres / total_evenements_avant) * 100, 1)
       
-      lbl_x <- if (!is.null(self$get_label)) self$get_label(flowframe_avant, canal_x) else canal_x
-      lbl_y <- if (!is.null(self$get_label)) self$get_label(flowframe_avant, canal_y) else canal_y
+      lbl_x <- if (!is.null(self$obtenir_label)) self$obtenir_label(flowframe_avant, canal_x) else canal_x
+      lbl_y <- if (!is.null(self$obtenir_label)) self$obtenir_label(flowframe_avant, canal_y) else canal_y
       
       lim_x_viab <- range(donnees_globales[[canal_x]], na.rm = TRUE)
       lim_y_viab <- range(donnees_globales[[canal_y]], na.rm = TRUE)
@@ -2535,7 +2555,7 @@ CARROT <- R6Class(
           gate_parent <- NULL
         }
         
-        source_par_echantillon <- if (is.null(gate_parent)) self$get_derniere_source() else self$resoudre_population_gate(gate_parent)
+        source_par_echantillon <- if (is.null(gate_parent)) self$obtenir_derniere_source() else self$resoudre_population_gate(gate_parent)
         if (is.null(source_par_echantillon) || length(source_par_echantillon) == 0) {
           stop("Aucune donnée disponible pour créer ce gate (vérifiez le prétraitement ou le gate parent choisi).")
         }
@@ -2606,7 +2626,7 @@ CARROT <- R6Class(
       cofacteur  <- infos_gate$cofacteur %||% 150 # Rétrocompatibilité : les gates créés avant l'ajout de ce réglage utilisent la valeur par défaut
       
       source_par_echantillon <- if (is.null(infos_gate$gate_parent)) {
-        self$get_derniere_source() # Pas de parent : part de l'étape la plus avancée disponible du pipeline
+        self$obtenir_derniere_source() # Pas de parent : part de l'étape la plus avancée disponible du pipeline
       } else {
         self$resoudre_population_gate(infos_gate$gate_parent) # Avec un parent : ne considère que la sous-population déjà sélectionnée par celui-ci (récursif sur toute la chaîne)
       }
@@ -2647,7 +2667,7 @@ CARROT <- R6Class(
       infos_gate <- self$gates_personnalisees[[nom_gate]]
       
       population_gate  <- self$resoudre_population_gate(nom_gate)
-      population_amont <- if (is.null(infos_gate$gate_parent)) self$get_derniere_source() else self$resoudre_population_gate(infos_gate$gate_parent)
+      population_amont <- if (is.null(infos_gate$gate_parent)) self$obtenir_derniere_source() else self$resoudre_population_gate(infos_gate$gate_parent)
       
       noms <- union(names(population_gate), names(population_amont))
       if (length(noms) == 0) return(data.frame(echantillon = character(0), n_evenements = integer(0), pct_parent = numeric(0)))
@@ -2903,6 +2923,93 @@ CARROT <- R6Class(
       self$clusters_flowsom[[nom_gate]]$noms_metaclusters[[as.character(id_metacluster)]] <- trimws(nouveau_nom)
       message("Métacluster ", id_metacluster, " renommé : '", nouveau_nom, "'.")
       return(invisible(self))
+    },
+    
+    # ===========================================
+    # SECTION ANALYSES — statistiques comparatives entre groupes/conditions
+    # ===========================================
+    
+    # Assigne un échantillon à un groupe/condition (ex: "Contrôle", "Traité",
+    # "J0", "J7"...) pour permettre des comparaisons statistiques ultérieures
+    # via comparer_groupes(). Un échantillon non assigné est simplement exclu
+    # des comparaisons (il reste disponible partout ailleurs dans le pipeline).
+    definir_groupe_echantillon = function(nom_echantillon, groupe) {
+      if (is.null(self$groupes_echantillons)) self$groupes_echantillons <- list()
+      groupe <- trimws(groupe)
+      if (nchar(groupe) == 0) {
+        self$groupes_echantillons[[nom_echantillon]] <- NULL # Une valeur vide retire l'échantillon de tout groupe
+      } else {
+        self$groupes_echantillons[[nom_echantillon]] <- groupe
+      }
+      return(invisible(self))
+    },
+    
+    # Compare, entre les groupes/conditions définis via definir_groupe_echantillon(),
+    # soit le pourcentage d'un gate par rapport à sa population parente
+    # (variable = "pourcentage"), soit la MFI (intensité médiane) d'un canal au
+    # sein de ce gate (variable = "MFI", canal requis). Applique un test de
+    # Wilcoxon (2 groupes) ou de Kruskal-Wallis (3 groupes ou plus) — des tests
+    # non paramétriques, plus prudents ici compte tenu des effectifs par groupe
+    # (nombre d'échantillons) généralement faibles et non garantis normaux en
+    # cytométrie. Renvoie une liste avec le tableau de données par échantillon,
+    # la méthode utilisée et la p-value obtenue.
+    comparer_groupes = function(nom_gate, variable = "pourcentage", canal = NULL) {
+      if (identical(variable, "MFI") && (is.null(canal) || nchar(canal) == 0)) {
+        stop("Précisez un canal pour comparer la MFI (intensité médiane de fluorescence).")
+      }
+      if (is.null(self$groupes_echantillons) || length(self$groupes_echantillons) == 0) {
+        stop("Aucun groupe défini. Assignez chaque échantillon à un groupe avec definir_groupe_echantillon() avant de comparer.")
+      }
+      
+      resume <- self$resumer_gate(nom_gate) # data.frame : echantillon / n_evenements / pct_parent
+      
+      resume$groupe <- vapply(resume$echantillon, function(n) {
+        g <- self$groupes_echantillons[[n]]
+        if (is.null(g)) NA_character_ else g
+      }, character(1))
+      
+      if (identical(variable, "MFI")) {
+        population_gate <- self$resoudre_population_gate(nom_gate)
+        resume$valeur <- vapply(resume$echantillon, function(n) {
+          ff <- population_gate[[n]]
+          if (is.null(ff) || !(canal %in% flowCore::colnames(ff))) return(NA_real_)
+          stats::median(flowCore::exprs(ff)[, canal], na.rm = TRUE)
+        }, numeric(1))
+      } else {
+        resume$valeur <- resume$pct_parent
+      }
+      
+      resume <- resume[!is.na(resume$groupe) & !is.na(resume$valeur), , drop = FALSE]
+      if (nrow(resume) == 0) {
+        stop("Aucun échantillon avec à la fois un groupe assigné et une valeur disponible pour ce gate/canal.")
+      }
+      
+      groupes_presents <- unique(resume$groupe)
+      if (length(groupes_presents) < 2) {
+        stop("Il faut au moins 2 groupes distincts (avec des échantillons assignés) pour comparer.")
+      }
+      
+      p_value <- NA_real_
+      methode <- NA_character_
+      
+      if (length(groupes_presents) == 2) {
+        valeurs_a <- resume$valeur[resume$groupe == groupes_presents[1]]
+        valeurs_b <- resume$valeur[resume$groupe == groupes_presents[2]]
+        test <- tryCatch(stats::wilcox.test(valeurs_a, valeurs_b), error = function(e) NULL)
+        if (!is.null(test)) { p_value <- test$p.value; methode <- "Wilcoxon-Mann-Whitney" }
+      } else {
+        test <- tryCatch(stats::kruskal.test(valeur ~ factor(groupe), data = resume), error = function(e) NULL)
+        if (!is.null(test)) { p_value <- test$p.value; methode <- "Kruskal-Wallis" }
+      }
+      
+      list(
+        donnees  = resume, # data.frame échantillon / n_evenements / pct_parent / groupe / valeur
+        variable = variable,
+        canal    = canal,
+        methode  = methode,
+        p_value  = p_value,
+        groupes  = groupes_presents
+      )
     },
     
     # ===========================================

@@ -4,7 +4,13 @@ library(shinyjs)
 library(base64enc)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# UI
+# UI — Module de Contrôle Qualité : 3 onglets, PeacoQC et flowAI (deux
+# algorithmes concurrents de détection d'anomalies d'acquisition — instabilités
+# de débit/signal au cours du temps), puis un onglet Export commun aux deux.
+# Chaque algorithme dispose de son propre onglet paramètres/visualisation
+# indépendant : l'utilisateur peut appliquer l'un, l'autre, ou les deux, sans
+# dépendance entre eux (voir p$appliquer_peacoqc()/p$appliquer_flowai() côté
+# pipeline, qui partent toutes deux de p$echantillons_traites).
 # ══════════════════════════════════════════════════════════════════════════════
 
 qc_ui <- function(id) {
@@ -41,6 +47,12 @@ qc_ui <- function(id) {
                        " du signal (flux, débit) sur les données compensées."),
                    hr(),
                    
+                   # Les 3 choix ci-dessous sont les SEULES valeurs valides pour
+                   # PeacoQC::PeacoQC(determine_good_cells=...) : "all" combine
+                   # les deux méthodes (IT + MAD), les deux autres n'en
+                   # utilisent qu'une seule. Toute autre valeur (ex: l'ancien
+                   # choix "channels", invalide) fait échouer PeacoQC avec
+                   # l'erreur "should be of following values: all, IT or MAD".
                    selectInput(ns("peaco_determine_good_cells"), "Méthode de détection des anomalies :",
                                choices = c("All" = "all",
                                            "Isolation Tree (IT)" = "IT",
@@ -48,15 +60,15 @@ qc_ui <- function(id) {
                                selected = "all"),
                    
                    numericInput(ns("peaco_min_cells"), "Cellules minimales par bin :",
-                                value = 150, min = 1, step = 10),
+                                value = 150, min = 1, step = 10), # min_cells : taille minimale d'un bin temporel pour être statistiquement exploitable
                    numericInput(ns("peaco_max_bins"), "Nombre maximal de bins :",
-                                value = 500, min = 1, step = 5),
+                                value = 500, min = 1, step = 5), # max_bins : valeur par défaut officielle de PeacoQC (voir pipeline_cytometrie.R, où elle avait été fixée par erreur à 100)
                    numericInput(ns("peaco_step"), "Pas glissant (step) :",
                                 value = 500, min = 1, step = 50),
                    numericInput(ns("peaco_MAD"), "Multiplicateur MAD :",
-                                value = 6, min = 0, step = 0.5),
+                                value = 6, min = 0, step = 0.5), # Nombre d'écarts absolus à la médiane au-delà duquel un bin est jugé aberrant (méthode MAD)
                    numericInput(ns("peaco_IT_limit"), "Limite IT (Intervalle de Temps) :",
-                                value = 0.6, min = 0, max = 1, step = 0.05),
+                                value = 0.6, min = 0, max = 1, step = 0.05), # Seuil de la méthode Isolation Tree (0 à 1) : plus il est bas, plus la détection d'anomalies est stricte
                    numericInput(ns("peaco_consecutive_bins"), "Bins consécutifs tolérés :",
                                 value = 5, min = 1, step = 1),
                    checkboxInput(ns("peaco_remove_zeros"), "Retirer les valeurs nulles/négatives",
@@ -86,11 +98,11 @@ qc_ui <- function(id) {
                  ),
                  box(title = "Visualisation cinétique (Temps vs FSC)", width = NULL,
                      status = "warning", solidHeader = TRUE,
-                     plotOutput(ns("plot_peacoqc"), width = "100%", height = "550px")
+                     plotOutput(ns("plot_peacoqc"), width = "100%", height = "550px") # Figure "maison" (densité raster + points exclus en rouge), générée par p$visualiser_peacoqc() — distincte du rapport natif ci-dessous
                  ),
                  box(title = tagList(icon("image"), " Rapport diagnostique natif PeacoQC"), width = NULL,
                      status = "warning", solidHeader = TRUE, collapsible = TRUE, collapsed = FALSE,
-                     uiOutput(ns("ui_plot_peacoqc_natif"))
+                     uiOutput(ns("ui_plot_peacoqc_natif")) # Image PNG générée DIRECTEMENT par le package PeacoQC lui-même (une figure par canal, montrant les bins retirés) — complémentaire de la figure "maison" ci-dessus
                  )
           ),
           
@@ -122,26 +134,26 @@ qc_ui <- function(id) {
                    hr(),
                    
                    selectInput(ns("flowai_remove_from"), "Critères évalués (remove_from) :",
-                               choices = c("all", "FR", "FS", "FM", "FR_FS", "FR_FM", "FS_FM"),
+                               choices = c("all", "FR", "FS", "FM", "FR_FS", "FR_FM", "FS_FM"), # Combinaisons possibles des 3 critères FR/FS/FM ; "all" = les 3 combinés
                                selected = "all"),
                    textInput(ns("flowai_timeCh"), "Canal temporel (timeCh) — vide = auto :",
-                             value = ""),
+                             value = ""), # Vide = flowAI détecte automatiquement le canal "Time" du FCS ; sinon nom explicite si le canal a un nom non standard
                    
                    h5(tags$b("Flow Rate (débit)")),
                    numericInput(ns("flowai_second_fractionFR"), "Fraction de seconde :",
-                                value = 0.1, min = 0.01, step = 0.01),
+                                value = 0.1, min = 0.01, step = 0.01), # Taille de la fenêtre temporelle (en fraction de seconde) sur laquelle le débit est moyenné pour la détection d'anomalies
                    numericInput(ns("flowai_alphaFR"), "Seuil alpha :",
-                                value = 0.01, min = 0, max = 1, step = 0.01),
+                                value = 0.01, min = 0, max = 1, step = 0.01), # Seuil de significativité statistique du test de rupture de débit
                    checkboxInput(ns("flowai_decompFR"), "Décomposer tendance/cycle (decompFR)",
-                                 value = TRUE),
+                                 value = TRUE), # Coché = "cffilter" (méthode de décomposition tendance/cycle) ; décoché = FALSE (pas de décomposition) — voir la conversion exacte plus bas, JAMAIS la chaîne "loess" qui n'est pas une valeur reconnue par flowAI
                    
                    h5(tags$b("Flow Signal")),
                    numericInput(ns("flowai_max_cptFS"), "Nombre max. de points de changement :",
                                 value = 3, min = 1, step = 1),
                    numericInput(ns("flowai_pen_valueFS"), "Valeur de pénalité :",
-                                value = 500, min = 1, step = 50),
+                                value = 500, min = 1, step = 50), # Pénalité appliquée à l'algorithme de détection de points de rupture du signal (plus élevée = moins de points de changement détectés)
                    textInput(ns("flowai_ChExcludeFS"), "Canaux exclus (séparés par virgule) :",
-                             value = "FSC,SSC"),
+                             value = "FSC,SSC"), # Canaux à ignorer pour ce critère (FSC/SSC exclus par défaut : valeur officielle de flowAI, ne jamais laisser vide en pratique — voir le repli côté pipeline si l'utilisateur vide quand même le champ)
                    checkboxInput(ns("flowai_outlier_binsFS"), "Retirer les bins aberrants (outlier_binsFS)",
                                  value = FALSE),
                    
@@ -149,7 +161,7 @@ qc_ui <- function(id) {
                    selectInput(ns("flowai_neg_valuesFM"), "Gestion valeurs négatives :",
                                choices = c("1" = 1, "2" = 2), selected = 1),
                    selectInput(ns("flowai_sideFM"), "Côté de la plage dynamique (sideFM) :",
-                               choices = c("both", "upper", "lower"), selected = "both"),
+                               choices = c("both", "upper", "lower"), selected = "both"), # Quel bord de la plage dynamique du détecteur surveiller (saturation haute, basse, ou les deux)
                    textInput(ns("flowai_ChExcludeFM"), "Canaux exclus (séparés par virgule) :",
                              value = "FSC,SSC"),
                    hr(),
@@ -182,7 +194,7 @@ qc_ui <- function(id) {
                  ),
                  box(title = tagList(icon("file-lines"), " Rapport natif flowAI"), width = NULL,
                      status = "warning", solidHeader = TRUE,
-                     uiOutput(ns("ui_dl_rapport_flowai"))
+                     uiOutput(ns("ui_dl_rapport_flowai")) # Contrairement à PeacoQC (affiché inline en PNG), le rapport natif flowAI est un ensemble de fichiers (HTML/TXT/PNG) proposé au téléchargement en .zip
                  )
           )
         )
@@ -245,7 +257,7 @@ qc_server <- function(id, pipeline, pipeline_version) {
     
     # ── Accès à l'objet CARROT ────────────────────────────────────────────────
     carrot_obj <- reactive({
-      pipeline_version()
+      pipeline_version() # Dépendance explicite : force la réévaluation à chaque incrémentation du compteur global (changement effectué par N'IMPORTE QUEL module, pas seulement celui-ci)
       pipeline()
     })
     
@@ -257,7 +269,8 @@ qc_server <- function(id, pipeline, pipeline_version) {
     # SECTION 1 — PeacoQC
     # ════════════════════════════════════════════════════════════════════════
     
-    # Valeurs par défaut (synchronisées avec parametres_par_defaut de appliquer_peacoqc)
+    # Valeurs par défaut (synchronisées avec parametres_par_defaut de appliquer_peacoqc,
+    # elles-mêmes alignées sur les valeurs par défaut officielles de PeacoQC::PeacoQC())
     defaults_peacoqc <- list(
       determine_good_cells = "all", min_cells = 150, max_bins = 500, step = 500,
       MAD = 6, IT_limit = 0.6, consecutive_bins = 5, remove_zeros = FALSE,
@@ -282,7 +295,7 @@ qc_server <- function(id, pipeline, pipeline_version) {
     # Sélecteur d'échantillon (alimenté par les échantillons compensés disponibles)
     output$ui_select_echantillon_peacoqc <- renderUI({
       p <- carrot_obj()
-      req(length(p$echantillons_traites) > 0)
+      req(length(p$echantillons_traites) > 0) # PeacoQC part toujours de echantillons_traites (données compensées OU déjà annoncées comme telles, cf. p$charger_fcs())
       selectInput(ns("sel_echantillon_peacoqc"), "Échantillon à visualiser :",
                   choices = names(p$echantillons_traites))
     })
@@ -297,7 +310,7 @@ qc_server <- function(id, pipeline, pipeline_version) {
         return(invisible(NULL))
       }
       
-      reglages <- list(
+      reglages <- list( # Transmis tel quel à p$appliquer_peacoqc(reglages_specifiques=), qui les fusionne avec ses propres valeurs par défaut si un champ venait à manquer
         determine_good_cells      = input$peaco_determine_good_cells,
         min_cells                 = input$peaco_min_cells,
         max_bins                  = input$peaco_max_bins,
@@ -313,7 +326,7 @@ qc_server <- function(id, pipeline, pipeline_version) {
       
       withProgress(message = "Exécution de PeacoQC en cours...", value = 0.3, {
         tryCatch({
-          p$appliquer_peacoqc(reglages_specifiques = reglages)
+          p$appliquer_peacoqc(reglages_specifiques = reglages) # Applique l'algorithme à TOUTE la cohorte en une fois (pas échantillon par échantillon) ; peuple p$post_PeacoQC pour chaque échantillon traité avec succès
           pipeline(p)
           peacoqc_trigger(peacoqc_trigger() + 1L)
           showNotification("✔ PeacoQC appliqué à la cohorte.", type = "message")
@@ -334,7 +347,7 @@ qc_server <- function(id, pipeline, pipeline_version) {
       }
       
       res <- tryCatch(
-        p$visualiser_peacoqc(nom_echantillon = input$sel_echantillon_peacoqc),
+        p$visualiser_peacoqc(nom_echantillon = input$sel_echantillon_peacoqc), # Dessine directement sur le périphérique graphique actif (graphiques de base R, densité raster + points exclus) — voir pipeline_cytometrie.R
         error = function(e) {
           showNotification(paste("Erreur visualisation PeacoQC :", conditionMessage(e)), type = "error")
           NULL
@@ -346,7 +359,7 @@ qc_server <- function(id, pipeline, pipeline_version) {
         text(0.5, 0.5, "Aucune donnée à afficher.", cex = 1.1, col = "grey40")
         return()
       }
-      print(res)
+      print(res) # Nécessaire pour que le graphique de base R déjà dessiné dans p$visualiser_peacoqc() s'affiche réellement dans le périphérique Shiny (renderPlot capte ce qui est "affiché", print() force cet affichage)
     })
     
     # Rapport diagnostique natif PeacoQC (PNG généré par PeacoQC::PeacoQC, encodé en base64 pour affichage inline)
@@ -355,7 +368,7 @@ qc_server <- function(id, pipeline, pipeline_version) {
       p <- carrot_obj()
       req(input$sel_echantillon_peacoqc)
       
-      chemin_png <- p$plots_peacoqc_natif[[input$sel_echantillon_peacoqc]]
+      chemin_png <- p$plots_peacoqc_natif[[input$sel_echantillon_peacoqc]] # Chemin (sur le disque du serveur) du PNG généré directement par le package PeacoQC lors de p$appliquer_peacoqc()
       
       if (is.null(chemin_png) || !file.exists(chemin_png)) {
         return(div(style = "padding:30px; text-align:center; color:grey; font-size:12px;",
@@ -363,8 +376,8 @@ qc_server <- function(id, pipeline, pipeline_version) {
                    " Le rapport natif PeacoQC apparaîtra ici après l'exécution de l'algorithme."))
       }
       
-      donnees_brutes <- readBin(chemin_png, "raw", file.info(chemin_png)$size)
-      encode_b64     <- base64enc::base64encode(donnees_brutes)
+      donnees_brutes <- readBin(chemin_png, "raw", file.info(chemin_png)$size) # Lit le fichier PNG en octets bruts
+      encode_b64     <- base64enc::base64encode(donnees_brutes) # Encode en base64, pour intégrer l'image directement dans le HTML (balise <img src="data:...">) sans avoir besoin de servir le fichier via une URL statique séparée
       
       tags$img(src = paste0("data:image/png;base64,", encode_b64),
                style = "width:100%; height:auto; border:1px solid #eee; border-radius:4px;")
@@ -381,7 +394,7 @@ qc_server <- function(id, pipeline, pipeline_version) {
       }
       
       lignes <- lapply(names(p$post_PeacoQC), function(nom) {
-        avant <- p$echantillons_traites[[nom]]
+        avant <- p$echantillons_traites[[nom]] # Population de référence (avant QC) pour calculer le pourcentage de conservation
         apres <- p$post_PeacoQC[[nom]]
         if (is.null(avant) || is.null(apres)) return(NULL)
         
@@ -389,7 +402,7 @@ qc_server <- function(id, pipeline, pipeline_version) {
         n_apres <- nrow(flowCore::exprs(apres))
         pct     <- if (n_avant > 0) round(n_apres / n_avant * 100, 1) else 0
         
-        couleur <- if (pct >= 90) "#2e7d32" else if (pct >= 70) "#e65100" else "#c62828"
+        couleur <- if (pct >= 90) "#2e7d32" else if (pct >= 70) "#e65100" else "#c62828" # Code couleur d'alerte visuelle : vert (bon rendement), orange (à surveiller), rouge (rendement faible, possible problème d'acquisition)
         
         div(style = "margin-bottom:8px; font-size:12px;",
             strong(nom), br(),
@@ -399,13 +412,18 @@ qc_server <- function(id, pipeline, pipeline_version) {
         )
       })
       
-      tagList(Filter(Negate(is.null), lignes))
+      tagList(Filter(Negate(is.null), lignes)) # Retire les échantillons pour lesquels le calcul a échoué (avant/après manquant), sans faire planter l'affichage du reste
     })
     
     # ════════════════════════════════════════════════════════════════════════
     # SECTION 2 — flowAI
     # ════════════════════════════════════════════════════════════════════════
     
+    # Valeurs par défaut, alignées sur les valeurs par défaut officielles de
+    # flowAI::flow_auto_qc() (voir pipeline_cytometrie.R::appliquer_flowai()
+    # pour l'historique des corrections apportées ici : ChExcludeFS/FM
+    # défaillaient vers NULL au lieu de c("FSC","SSC"), et decompFR utilisait
+    # la chaîne invalide "loess" au lieu de FALSE).
     defaults_flowai <- list(
       remove_from = "all", timeCh = NULL, second_fractionFR = 0.1, alphaFR = 0.01, decompFR = TRUE,
       ChExcludeFS = c("FSC", "SSC"), outlier_binsFS = FALSE, pen_valueFS = 500, max_cptFS = 3,
@@ -443,6 +461,9 @@ qc_server <- function(id, pipeline, pipeline_version) {
         return()
       }
       
+      # Parse les champs texte "FSC,SSC" en vecteurs de caractères ; NULL si le
+      # champ est vidé, pour laisser p$appliquer_flowai() retomber sur son
+      # propre repli par défaut c("FSC","SSC") plutôt que d'exclure aucun canal.
       ch_exclude_fs <- trimws(strsplit(input$flowai_ChExcludeFS, ",")[[1]])
       ch_exclude_fs <- ch_exclude_fs[nchar(ch_exclude_fs) > 0]
       if (length(ch_exclude_fs) == 0) ch_exclude_fs <- NULL
@@ -450,21 +471,21 @@ qc_server <- function(id, pipeline, pipeline_version) {
       ch_exclude_fm <- ch_exclude_fm[nchar(ch_exclude_fm) > 0]
       if (length(ch_exclude_fm) == 0) ch_exclude_fm <- NULL
       time_ch <- trimws(input$flowai_timeCh)
-      time_ch <- if (nchar(time_ch) == 0) NULL else time_ch
+      time_ch <- if (nchar(time_ch) == 0) NULL else time_ch # Champ vide = détection automatique du canal temporel par flowAI (timeCh = NULL)
       
       reglages <- list(
         remove_from       = input$flowai_remove_from,
         timeCh            = time_ch,
         second_fractionFR = input$flowai_second_fractionFR,
         alphaFR           = input$flowai_alphaFR,
-        decompFR          = if (isTRUE(input$flowai_decompFR)) "cffilter" else FALSE,
+        decompFR          = if (isTRUE(input$flowai_decompFR)) "cffilter" else FALSE, # "cffilter" (coché) est la valeur par défaut officielle de flowAI ; FALSE (décoché) désactive la décomposition — jamais la chaîne "loess", non reconnue par le package
         ChExcludeFS       = ch_exclude_fs,
         outlier_binsFS    = input$flowai_outlier_binsFS,
         pen_valueFS       = input$flowai_pen_valueFS,
         max_cptFS         = input$flowai_max_cptFS,
         ChExcludeFM       = ch_exclude_fm,
         sideFM            = input$flowai_sideFM,
-        neg_valuesFM      = as.numeric(input$flowai_neg_valuesFM)
+        neg_valuesFM      = as.numeric(input$flowai_neg_valuesFM) # selectInput renvoie une chaîne même pour des choix numériques ; conversion explicite requise par flowAI
       )
       
       withProgress(message = "Exécution de flowAI...", value = 0.3, {
@@ -490,7 +511,7 @@ qc_server <- function(id, pipeline, pipeline_version) {
       }
       
       res <- tryCatch(
-        p$visualiser_flowai(nom_echantillon = input$sel_echantillon_flowai),
+        p$visualiser_flowai(nom_echantillon = input$sel_echantillon_flowai), # Même principe que visualiser_peacoqc() ci-dessus : dessine directement en base R (densité raster + points exclus en rouge)
         error = function(e) {
           showNotification(paste("Erreur visualisation flowAI :", conditionMessage(e)), type = "error")
           NULL
@@ -542,7 +563,7 @@ qc_server <- function(id, pipeline, pipeline_version) {
       p <- carrot_obj()
       req(input$sel_echantillon_flowai)
       
-      chemin_rapport <- p$rapports_flowai[[input$sel_echantillon_flowai]]
+      chemin_rapport <- p$rapports_flowai[[input$sel_echantillon_flowai]] # Dossier temporaire (côté serveur) regroupant tous les fichiers du rapport natif généré par flow_auto_qc()
       
       if (is.null(chemin_rapport) || !dir.exists(chemin_rapport)) {
         return(div(style = "padding:10px; text-align:center; color:grey; font-size:12px;",
@@ -556,7 +577,7 @@ qc_server <- function(id, pipeline, pipeline_version) {
     
     output$dl_rapport_flowai <- downloadHandler(
       filename = function() {
-        paste0("flowAI_rapport_", gsub("[^a-zA-Z0-9_]", "_", input$sel_echantillon_flowai), ".zip")
+        paste0("flowAI_rapport_", gsub("[^a-zA-Z0-9_]", "_", input$sel_echantillon_flowai), ".zip") # Nettoie le nom d'échantillon de tout caractère non alphanumérique pour un nom de fichier sûr sur tous les systèmes d'exploitation
       },
       content = function(file) {
         p <- carrot_obj()
@@ -566,8 +587,8 @@ qc_server <- function(id, pipeline, pipeline_version) {
         fichiers <- list.files(chemin_rapport, recursive = TRUE, full.names = TRUE)
         req(length(fichiers) > 0)
         
-        ancien_wd <- setwd(chemin_rapport)
-        on.exit(setwd(ancien_wd), add = TRUE)
+        ancien_wd <- setwd(chemin_rapport) # Se place temporairement dans le dossier du rapport pour que les chemins dans le zip soient relatifs (pas de chemin absolu du serveur exposé dans l'archive téléchargée)
+        on.exit(setwd(ancien_wd), add = TRUE) # Revient systématiquement au dossier de travail précédent, même en cas d'erreur
         fichiers_relatifs <- list.files(".", recursive = TRUE, full.names = TRUE)
         utils::zip(zipfile = file, files = fichiers_relatifs)
       },
@@ -597,7 +618,7 @@ qc_server <- function(id, pipeline, pipeline_version) {
       }
       
       selectizeInput(ns("export_echantillons"), "Échantillons à exporter :",
-                     choices = noms_disponibles, selected = noms_disponibles,
+                     choices = noms_disponibles, selected = noms_disponibles, # Tous sélectionnés par défaut : l'utilisateur retire ceux qu'il ne veut pas plutôt que de devoir tout cocher
                      multiple = TRUE, options = list(plugins = list("remove_button")))
     })
     
@@ -640,7 +661,7 @@ qc_server <- function(id, pipeline, pipeline_version) {
         p <- carrot_obj()
         req(length(input$export_sources) > 0, length(input$export_echantillons) > 0)
         
-        dossier_temp <- file.path(tempdir(), paste0("export_fcs_qc_", as.integer(Sys.time())))
+        dossier_temp <- file.path(tempdir(), paste0("export_fcs_qc_", as.integer(Sys.time()))) # Nom de dossier unique basé sur l'horodatage : évite toute collision entre exports simultanés de sessions Shiny différentes
         dir.create(dossier_temp, recursive = TRUE)
         
         tryCatch({
@@ -671,7 +692,7 @@ qc_server <- function(id, pipeline, pipeline_version) {
         req(length(input$export_sources) > 0, length(input$export_echantillons) > 0)
         
         tryCatch({
-          p$generer_pdf_resume_qc(
+          p$generer_pdf_resume_qc( # Redessine chaque figure directement dans le document PDF ouvert (voir pipeline_cytometrie.R) : chaque appel à un graphique de base R démarre automatiquement une nouvelle page
             chemin_pdf        = file,
             noms_echantillons = input$export_echantillons,
             sources           = input$export_sources

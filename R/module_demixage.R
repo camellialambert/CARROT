@@ -6,7 +6,17 @@ library(shinyFiles)
 library(DT)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# UI
+# UI — Module de Démixage spectral. Interface complète autour du package
+# AutoSpectral (Cyril Cros/DrCytometer), en 6 onglets suivant l'ordre logique du
+# workflow AutoSpectral lui-même :
+#   1. Paramètres        : dossiers, cytomètre, génération/édition du fichier de contrôle (fcs_control_file.csv)
+#   2. Vérification       : validité du fichier de contrôle vs fichiers réels sur le disque
+#   3. Définition des gates : gating des contrôles monomarqués (3 méthodes possibles)
+#   4. Extraction des spectres : spectres de fluorophores, autofluorescence, variants
+#   5. Démixage            : unmixing effectif (fichier unique ou dossier entier)
+#   6. Contrôle Qualité    : vérification post-démixage (verifier_qualite_unmix)
+# Cette étape ne concerne QUE le mode Spectral (voir module_import_R.R) ; en
+# conventionnel, c'est le module Compensation qui joue ce rôle équivalent.
 # ══════════════════════════════════════════════════════════════════════════════
 
 demixage_ui <- function(id) {
@@ -37,7 +47,7 @@ demixage_ui <- function(id) {
                   column(4,
                          h5("Dossier racine (sorties AutoSpectral)", style = "margin-top:0;"),
                          shinyDirButton(ns("dir_root"), "Parcourir…", "Sélectionner le dossier racine",
-                                        icon = icon("folder-open"), class = "btn-primary", style = "width:100%;"),
+                                        icon = icon("folder-open"), class = "btn-primary", style = "width:100%;"), # Dossier où AutoSpectral écrit TOUTES ses sorties (fcs_control_file.csv, figures de gating/spectres, fichiers unmixés...)
                          br(), uiOutput(ns("root_display"))
                   ),
                   column(4,
@@ -45,7 +55,7 @@ demixage_ui <- function(id) {
                          shinyDirButton(ns("dir_monomarques"), "Parcourir…", "Sélectionner le dossier des contrôles",
                                         icon = icon("folder-open"), class = "btn-primary", style = "width:100%;"),
                          br(), uiOutput(ns("monomarques_display")),
-                         uiOutput(ns("unstained_picker"))
+                         uiOutput(ns("unstained_picker")) # Désignation manuelle, parmi les fichiers détectés, de celui qui sert de référence négative (Unstained)
                   ),
                   column(4,
                          h5("Échantillons biologiques", style = "margin-top:0;"),
@@ -59,13 +69,13 @@ demixage_ui <- function(id) {
                   column(4,
                          h5(tagList(icon("microscope"), " Type de cytomètre spectral")),
                          selectInput(ns("type_cytometre"), NULL,
-                                     choices = c("aurora", "a8", "s8", "a5se", "id7000", "mosaic", "opteon", "xenith", "minimal", "auroraNL"),
+                                     choices = c("aurora", "a8", "s8", "a5se", "id7000", "mosaic", "opteon", "xenith", "minimal", "auroraNL"), # Modèles de cytomètres spectraux supportés nativement par AutoSpectral (chacun a sa propre configuration de détecteurs/filtres)
                                      selected = "aurora")
                   ),
                   column(4,
                          br(),
                          actionButton(ns("btn_lancer_asp"), tagList(icon("play"), " Lancer lancer_asp()"),
-                                      class = "btn-success", style = "width:100%; font-weight:bold; margin-top:5px;")
+                                      class = "btn-success", style = "width:100%; font-weight:bold; margin-top:5px;") # Initialise la configuration AutoSpectral (asp_config) ET génère le fichier de contrôle (fcs_control_file.csv) à partir des dossiers ci-dessus
                   ),
                   column(4, uiOutput(ns("asp_status")))
                 ))
@@ -73,6 +83,12 @@ demixage_ui <- function(id) {
         ),
         
         # ── Bulle 2 : Aperçu, sur toute la largeur de la page ──────────────
+        # Éditeur complet du fichier de contrôle AutoSpectral : ce CSV associe
+        # chaque fichier FCS contrôle à son fluorophore/marqueur (colonnes
+        # requises par AutoSpectral). lancer_asp() le génère automatiquement,
+        # mais l'utilisateur peut ensuite le corriger manuellement ici (cas
+        # fréquent : fluorophores non reconnus automatiquement, à renseigner
+        # à la main) sans jamais quitter l'application.
         fluidRow(
           column(
             width = 12,
@@ -120,8 +136,8 @@ demixage_ui <- function(id) {
             width = 4,
             wellPanel(
               h4(tagList(icon("sliders-h"), " Seuils"), style = "margin-top:0; color:#605ca8;"),
-              numericInput(ns("seuil_error"), "Seuil critique d'erreur (évènements min.)", value = 1000, min = 0, step = 100),
-              numericInput(ns("seuil_warning"), "Seuil d'avertissement (évènements min.)", value = 5000, min = 0, step = 500),
+              numericInput(ns("seuil_error"), "Seuil critique d'erreur (évènements min.)", value = 1000, min = 0, step = 100), # En dessous de ce nombre d'événements, AutoSpectral::check.control.file() signale une ERREUR bloquante pour ce contrôle
+              numericInput(ns("seuil_warning"), "Seuil d'avertissement (évènements min.)", value = 5000, min = 0, step = 500), # En dessous de ce nombre (mais au-dessus du seuil d'erreur), un simple AVERTISSEMENT est émis
               actionButton(ns("btn_verifier_asp"), tagList(icon("search"), " Lancer verifier_asp()"),
                            class = "btn-primary", style = "width:100%; font-weight:bold;")
             )
@@ -129,7 +145,7 @@ demixage_ui <- function(id) {
           column(
             width = 8,
             box(title = tagList(icon("clipboard-list"), " Résultat"), width = NULL, status = "warning", solidHeader = TRUE,
-                verbatimTextOutput(ns("verif_result")))
+                verbatimTextOutput(ns("verif_result"))) # Sortie texte brute de AutoSpectral::check.control.file() (via p$verifier_asp()), affichée telle quelle
           )
         )
       ),
@@ -137,6 +153,15 @@ demixage_ui <- function(id) {
       # ───────────────────────────────────────────────────────────────
       # ONGLET 3 — DÉFINITION DES GATES
       # ───────────────────────────────────────────────────────────────
+      # Les gates ici concernent le gating des CONTRÔLES monomarqués (isoler
+      # la population de cellules d'intérêt sur chaque tube contrôle avant
+      # extraction de son spectre) — sans rapport avec le gating des
+      # ÉCHANTILLONS fait dans module_pretraitement.R/module_analyse.R.
+      # AutoSpectral propose 3 méthodes de gating, au choix de l'utilisateur :
+      # "tune" (ajustement fin d'un gate existant), "landmarks" (détection
+      # automatique de repères sur la distribution), "density" (détection par
+      # pics de densité). Chaque méthode a ses propres paramètres, affichés
+      # conditionnellement ci-dessous selon le choix.
       tabPanel(
         title = tagList(icon("crosshairs"), " Définition des Gates"),
         
@@ -150,21 +175,21 @@ demixage_ui <- function(id) {
                           choices = c("Tune gate" = "tune", "Landmarks" = "landmarks", "Densité" = "density")),
               
               textInput(ns("gate_name"), "Nom de la gate (gate.name / control_name)", value = ""),
-              numericInput(ns("gate_n_cells"), "n.cells", value = 2000, min = 1, step = 100),
+              numericInput(ns("gate_n_cells"), "n.cells", value = 2000, min = 1, step = 100), # Nombre de cellules utilisées pour l'estimation du gate (échantillonnage interne à AutoSpectral)
               
               conditionalPanel(
                 condition = sprintf("input['%s'] == 'tune' || input['%s'] == 'landmarks'", ns("gate_methode"), ns("gate_methode")),
-                numericInput(ns("gate_percentile"), "percentile", value = 70, min = 1, max = 100, step = 1)
+                numericInput(ns("gate_percentile"), "percentile", value = 70, min = 1, max = 100, step = 1) # Percentile de la distribution utilisé comme seuil de gating (commun aux méthodes tune et landmarks)
               ),
               conditionalPanel(
                 condition = sprintf("input['%s'] == 'tune'", ns("gate_methode")),
-                numericInput(ns("gate_bandwidth"), "bandwidth", value = 1, min = 0.1, step = 0.1)
+                numericInput(ns("gate_bandwidth"), "bandwidth", value = 1, min = 0.1, step = 0.1) # Largeur de bande du noyau de lissage utilisé par la méthode "tune" uniquement
               ),
               conditionalPanel(
                 condition = sprintf("input['%s'] == 'landmarks' || input['%s'] == 'density'", ns("gate_methode"), ns("gate_methode")),
-                numericInput(ns("gate_grid_n"), "grid.n", value = 100, min = 10, step = 10),
+                numericInput(ns("gate_grid_n"), "grid.n", value = 100, min = 10, step = 10), # Résolution de la grille de densité utilisée par landmarks/density pour repérer les pics
                 numericInput(ns("gate_bandwidth_factor"), "bandwidth.factor", value = 1, min = 0.1, step = 0.1),
-                textInput(ns("gate_fsc_channel"), "fsc.channel (optionnel)", value = ""),
+                textInput(ns("gate_fsc_channel"), "fsc.channel (optionnel)", value = ""), # Vide = détection automatique du canal FSC par AutoSpectral
                 textInput(ns("gate_ssc_channel"), "ssc.channel (optionnel)", value = "")
               ),
               
@@ -176,7 +201,7 @@ demixage_ui <- function(id) {
               h4(tagList(icon("broom"), " Nettoyage des contrôles"), style = "color:#605ca8;"),
               p("Appelle charger_et_nettoyer() une fois toutes les gates nécessaires définies.", style = "font-size:12px; color:#666;"),
               actionButton(ns("btn_charger_nettoyer"), tagList(icon("play"), " Lancer charger_et_nettoyer()"),
-                           class = "btn-primary", style = "width:100%; font-weight:bold;"),
+                           class = "btn-primary", style = "width:100%; font-weight:bold;"), # Applique TOUTES les gates définies ci-dessus à l'ensemble des contrôles chargés, en une seule passe (self$flow.control)
               br(), br(), uiOutput(ns("nettoyage_status"))
             )
           ),
@@ -185,7 +210,7 @@ demixage_ui <- function(id) {
             box(title = tagList(icon("image"), " Aperçu des figures de gating"), width = NULL, status = "primary", solidHeader = TRUE,
                 fluidRow(
                   column(6, selectInput(ns("gate_figure_dossier"), "Dossier",
-                                        choices = c("figure_gate", "figure_gate_tuning"))),
+                                        choices = c("figure_gate", "figure_gate_tuning"))), # Deux sous-dossiers distincts générés par AutoSpectral : figures de gating "définitif" vs figures de réglage fin ("tuning")
                   column(6, uiOutput(ns("gate_figure_fichier_ui")))
                 ),
                 actionButton(ns("btn_rafraichir_figures"), tagList(icon("rotate"), " Rafraîchir la liste"), class = "btn-default"),
@@ -215,7 +240,7 @@ demixage_ui <- function(id) {
                                             selected = c("figure_gate", "figure_gate_tuning")),
                          checkboxInput(ns("reset_vider_gates"), "Vider aussi la liste complète des gates (self$gates)", value = TRUE),
                          actionButton(ns("btn_reset_gates"), tagList(icon("trash-can"), " Tout réinitialiser"),
-                                      class = "btn-danger", style = "width:100%; font-weight:bold;"),
+                                      class = "btn-danger", style = "width:100%; font-weight:bold;"), # Action destructive et irréversible : confirmée par une boîte de dialogue modale côté serveur avant exécution
                          br(), br(), uiOutput(ns("reset_gates_status"))
                   )
                 ))
@@ -226,6 +251,10 @@ demixage_ui <- function(id) {
       # ───────────────────────────────────────────────────────────────
       # ONGLET 4 — EXTRACTION DES SPECTRES
       # ───────────────────────────────────────────────────────────────
+      # 3 étapes indépendantes, dans l'ordre logique du workflow AutoSpectral :
+      # spectres de fluorophores (obligatoire) -> autofluorescence (optionnel,
+      # nécessite un tube Unstained) -> variants spectraux (optionnel,
+      # nécessite l'autofluorescence déjà extraite pour un tissu donné).
       tabPanel(
         title = tagList(icon("wave-square"), " Extraction des Spectres"),
         
@@ -234,14 +263,14 @@ demixage_ui <- function(id) {
             width = 4,
             wellPanel(
               h4(tagList(icon("wave-square"), " 1. Spectres de fluorophores"), style = "margin-top:0; color:#605ca8;"),
-              actionButton(ns("btn_extract_spectra"), tagList(icon("play"), " Lancer extraire_fluorophore_spectre()"),
-                           class = "btn-success", style = "width:100%; font-weight:bold;"),
+              actionButton(ns("btn_extract_spectra"), tagList(icon("play"), " Lancer extraire_spectre_fluorophore()"),
+                           class = "btn-success", style = "width:100%; font-weight:bold;"), # Extrait, pour chaque tube monomarqué nettoyé, la signature spectrale pure de son fluorophore (self$spectra)
               br(), br(), uiOutput(ns("spectra_status")),
               
               hr(),
               h4(tagList(icon("adjust"), " 2. Autofluorescence (optionnel)"), style = "color:#605ca8;"),
               uiOutput(ns("unstained_path_ui")),
-              textInput(ns("af_tissue_name"), "tissue_name", value = "Cells"),
+              textInput(ns("af_tissue_name"), "tissue_name", value = "Cells"), # Nom du type cellulaire/tissu concerné (une signature d'autofluorescence est propre à un tissu donné, ex: "Cells", "Beads"...)
               checkboxInput(ns("af_refine"), "refine", value = TRUE),
               actionButton(ns("btn_extract_af"), tagList(icon("play"), " Lancer extraire_spectre_af()"),
                            class = "btn-primary", style = "width:100%; font-weight:bold;"),
@@ -252,7 +281,7 @@ demixage_ui <- function(id) {
               uiOutput(ns("variants_tissue_ui")),
               checkboxInput(ns("variants_refine"), "refine", value = TRUE),
               actionButton(ns("btn_variants"), tagList(icon("play"), " Lancer preparer_variants_spectraux()"),
-                           class = "btn-primary", style = "width:100%; font-weight:bold;"),
+                           class = "btn-primary", style = "width:100%; font-weight:bold;"), # Génère des variantes de spectres pour un même fluorophore (utile quand son signal varie significativement d'une cellule à l'autre selon le tissu)
               br(), br(), uiOutput(ns("variants_status"))
             )
           ),
@@ -285,7 +314,7 @@ demixage_ui <- function(id) {
               
               radioButtons(ns("unmix_cible"), "Cible",
                            choices = c("Un seul fichier (unmix_fcs)" = "fichier",
-                                       "Tout le dossier (unmix_folder)" = "dossier")),
+                                       "Tout le dossier (unmix_folder)" = "dossier")), # Deux fonctions AutoSpectral distinctes selon la cible : utile pour tester le démixage sur un seul fichier avant de lancer tout le dossier
               
               conditionalPanel(
                 condition = sprintf("input['%s'] == 'fichier'", ns("unmix_cible")),
@@ -293,8 +322,8 @@ demixage_ui <- function(id) {
               ),
               
               uiOutput(ns("unmix_tissue_ui")),
-              selectInput(ns("unmix_method"), "method", choices = c("AutoSpectral", "WLS", "OLS")),
-              selectInput(ns("unmix_speed"), "speed", choices = c("slow", "fast")),
+              selectInput(ns("unmix_method"), "method", choices = c("AutoSpectral", "WLS", "OLS")), # Méthode de résolution de la matrice de démixage : AutoSpectral (approche autofluorescence-aware propre au package), WLS (moindres carrés pondérés) ou OLS (moindres carrés ordinaires, plus simple/rapide)
+              selectInput(ns("unmix_speed"), "speed", choices = c("slow", "fast")), # "slow" = optimisation par cellule (plus précis, plus lent) ; "fast" = approche globale plus rapide mais moins fine
               
               actionButton(ns("btn_unmix"), tagList(icon("play"), " Démixer"),
                            class = "btn-success", style = "width:100%; font-weight:bold;"),
@@ -304,7 +333,7 @@ demixage_ui <- function(id) {
               h4(tagList(icon("folder-open"), " Charger les résultats en mémoire"), style = "color:#605ca8;"),
               textInput(ns("unmix_dossier_resultats"), "Sous-dossier des fichiers unmixés", value = "AutoSpectral_unmixed"),
               actionButton(ns("btn_charger_unmixes"), tagList(icon("play"), " Lancer charger_fcs_unmixes()"),
-                           class = "btn-primary", style = "width:100%; font-weight:bold;"),
+                           class = "btn-primary", style = "width:100%; font-weight:bold;"), # Étape SÉPARÉE et OBLIGATOIRE après le démixage : lit les fichiers .fcs unmixés depuis le disque et les charge dans p$echantillons_traites, pour qu'ils deviennent disponibles aux étapes suivantes (QC, Prétraitement)
               br(), br(), uiOutput(ns("charger_unmixes_status"))
             )
           ),
@@ -317,7 +346,7 @@ demixage_ui <- function(id) {
                   column(6, uiOutput(ns("visu_canal_y_ui")))
                 ),
                 fluidRow(
-                  column(6, numericInput(ns("visu_cofacteur"), "cofacteur", value = 150, min = 1, step = 10))
+                  column(6, numericInput(ns("visu_cofacteur"), "cofacteur", value = 150, min = 1, step = 10)) # Cofacteur de la transformation Arcsinh appliquée uniquement pour l'affichage (ne modifie pas les données stockées)
                 ),
                 actionButton(ns("btn_visualiser"), tagList(icon("eye"), " Afficher"), class = "btn-primary"),
                 br(), br(),
@@ -329,6 +358,11 @@ demixage_ui <- function(id) {
       # ───────────────────────────────────────────────────────────────
       # ONGLET 6 — CONTRÔLE QUALITÉ
       # ───────────────────────────────────────────────────────────────
+      # Contrôle qualité SPÉCIFIQUE à l'unmixing (à ne pas confondre avec le
+      # module QC général de l'application, qui porte sur PeacoQC/flowAI et
+      # s'applique après cette étape, quel que soit le mode conventionnel ou
+      # spectral). Compare, pour un fluorophore donné, son signal unmixé au
+      # signal attendu sur son tube monomarqué d'origine et sur l'Unstained.
       tabPanel(
         title = tagList(icon("chart-area"), " Contrôle Qualité"),
         
@@ -343,7 +377,7 @@ demixage_ui <- function(id) {
               uiOutput(ns("qc_unstained_ui")),
               selectInput(ns("qc_cytometer"), "cytometer",
                           choices = c("aurora", "a8", "s8", "a5se", "id7000", "mosaic", "opteon", "xenith", "minimal", "auroraNL")),
-              checkboxInput(ns("qc_gate"), "gate", value = TRUE),
+              checkboxInput(ns("qc_gate"), "gate", value = TRUE), # Applique le gating défini à l'onglet 3 avant de calculer les métriques de qualité, plutôt que sur la totalité brute du tube
               
               actionButton(ns("btn_qc"), tagList(icon("play"), " Lancer verifier_qualite_unmix()"),
                            class = "btn-success", style = "width:100%; font-weight:bold;")
@@ -369,6 +403,9 @@ demixage_server <- function(id, pipeline, pipeline_version) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
     
+    # shinyFiles nécessite un enregistrement explicite des "racines" de
+    # navigation (Home + tous les volumes/disques détectés sur la machine
+    # serveur) et un shinyDirChoose() par bouton de sélection de dossier.
     volumes <- c(Home = path.expand("~"), shinyFiles::getVolumes()())
     
     shinyFiles::shinyDirChoose(input, "dir_root", roots = volumes, session = session)
@@ -422,7 +459,7 @@ demixage_server <- function(id, pipeline, pipeline_version) {
         stop("Impossible de déterminer le séparateur du fichier CSV (aucune colonne détectée avec ',' ou ';').")
       }
       
-      if (n_pointvirgule > n_virgule) d_pointvirgule else d_virgule
+      if (n_pointvirgule > n_virgule) d_pointvirgule else d_virgule # Le séparateur qui donne le PLUS de colonnes est presque toujours le bon (un séparateur incorrect fait tenir toute la ligne dans une seule colonne)
     }
     
     # Affiche une barre de progression ET désactive/anime le bouton pendant
@@ -432,12 +469,17 @@ demixage_server <- function(id, pipeline, pipeline_version) {
     # pas un pourcentage exact. Le changement du bouton (désactivé + spinner)
     # est le signal le plus visible et le plus fiable, la barre de progression
     # (style "old", pleine largeur en haut de page) vient en complément.
+    #
+    # PATTERN RÉPÉTÉ DANS TOUT CE FICHIER : chaque action AutoSpectral suit la
+    # même structure observeEvent(bouton) -> tryCatch(executer_avec_progression(...))
+    # -> statut vert (succès) ou rouge (erreur) affiché dans un uiOutput dédié.
+    # Ce commentaire unique vaut pour toutes les occurrences suivantes.
     executer_avec_progression <- function(message, fn, bouton_id = NULL, label_repos = NULL, icone_repos = "play") {
       if (!is.null(bouton_id)) {
         shinyjs::disable(bouton_id)
         shinyjs::html(bouton_id, as.character(tagList(icon("spinner", class = "fa-spin"), paste0(" ", message))))
       }
-      on.exit({
+      on.exit({ # Garantit la remise en état du bouton même si fn() lève une erreur (pas seulement en cas de succès)
         if (!is.null(bouton_id)) {
           shinyjs::enable(bouton_id)
           if (!is.null(label_repos)) {
@@ -456,7 +498,7 @@ demixage_server <- function(id, pipeline, pipeline_version) {
     # ── Dossier racine ──────────────────────────────────────────────────────
     observeEvent(input$dir_root, {
       req(pipeline())
-      if (is.integer(input$dir_root)) return(invisible(NULL))
+      if (is.integer(input$dir_root)) return(invisible(NULL)) # shinyDirChoose renvoie un entier (pas une liste de chemin) tant que l'utilisateur n'a rien sélectionné : sécurité contre le déclenchement initial vide
       chemin_choisi <- shinyFiles::parseDirPath(volumes, input$dir_root)
       req(length(chemin_choisi) > 0)
       if (!dir.exists(chemin_choisi)) {
@@ -499,7 +541,7 @@ demixage_server <- function(id, pipeline, pipeline_version) {
       p$chemins_monomarques <- data.frame(
         chemin = fichiers,
         type   = "Monomarque",
-        canal  = NA_character_,
+        canal  = NA_character_, # Pas de canal à cette étape (spectral) : ce champ existe dans la structure de données pour compatibilité avec le mode Conventionnel, mais n'est pas exploité par AutoSpectral
         stringsAsFactors = FALSE
       )
       pipeline_version(pipeline_version() + 1L)
@@ -516,7 +558,9 @@ demixage_server <- function(id, pipeline, pipeline_version) {
       }
     })
     
-    # Désignation du fichier "Unstained" parmi les fichiers détectés
+    # Désignation du fichier "Unstained" parmi les fichiers détectés (aucun
+    # n'est présélectionné par défaut : voir l'observeEvent ci-dessous, qui ne
+    # marque un fichier comme Unstained qu'après un choix explicite ici).
     output$unstained_picker <- renderUI({
       fichiers <- fichiers_monomarques()
       req(length(fichiers) > 0)
@@ -531,7 +575,7 @@ demixage_server <- function(id, pipeline, pipeline_version) {
       p <- pipeline()
       p$chemins_monomarques <- data.frame(
         chemin = fichiers,
-        type   = ifelse(basename(fichiers) == input$fichier_unstained, "Unstained", "Monomarque"),
+        type   = ifelse(basename(fichiers) == input$fichier_unstained, "Unstained", "Monomarque"), # Marque UN SEUL fichier comme Unstained (celui choisi), tous les autres redeviennent/restent Monomarque
         canal  = NA_character_,
         stringsAsFactors = FALSE
       )
@@ -576,7 +620,7 @@ demixage_server <- function(id, pipeline, pipeline_version) {
       p <- pipeline()
       tryCatch({
         executer_avec_progression("Génération du fichier de contrôle AutoSpectral…", function() {
-          p$lancer_asp(type_cytometre = input$type_cytometre)
+          p$lancer_asp(type_cytometre = input$type_cytometre) # Construit self$asp_config (spécifique au modèle de cytomètre choisi) puis génère fcs_control_file.csv à partir des dossiers de contrôles/échantillons déjà sélectionnés
         }, bouton_id = ns("btn_lancer_asp"), label_repos = "Lancer lancer_asp()")
         pipeline_version(pipeline_version() + 1L)
         
@@ -616,9 +660,9 @@ demixage_server <- function(id, pipeline, pipeline_version) {
       req(donnees_csv())
       datatable(
         donnees_csv(),
-        editable = TRUE,
+        editable = TRUE, # Toutes les cellules sont éditables ici (contrairement aux tables du module Import, où seules certaines colonnes le sont) : ce CSV est un fichier de configuration technique librement modifiable
         rownames = FALSE,
-        selection = "multiple",
+        selection = "multiple", # Sélection multi-lignes activée : nécessaire pour la suppression groupée de lignes (voir bouton "Supprimer la/les ligne(s) sélectionnée(s)")
         width = "100%",
         options = list(pageLength = 15, scrollX = TRUE, autoWidth = FALSE,
                        columnDefs = list(list(width = "auto", targets = "_all")))
@@ -629,7 +673,7 @@ demixage_server <- function(id, pipeline, pipeline_version) {
       info <- input$csv_preview_cell_edit
       df <- donnees_csv()
       req(df)
-      df[info$row, info$col + 1] <- DT::coerceValue(info$value, df[info$row, info$col + 1])
+      df[info$row, info$col + 1] <- DT::coerceValue(info$value, df[info$row, info$col + 1]) # info$col est 0-indexé (JS) alors que R indexe à partir de 1 ; coerceValue() reconvertit la nouvelle valeur (toujours reçue en texte) dans le type d'origine de la colonne (numérique, logique...)
       donnees_csv(df)
     })
     
@@ -637,7 +681,7 @@ demixage_server <- function(id, pipeline, pipeline_version) {
     observeEvent(input$btn_ajouter_ligne, {
       df <- donnees_csv()
       req(df)
-      nouvelle_ligne <- df[1, , drop = FALSE]
+      nouvelle_ligne <- df[1, , drop = FALSE] # Duplique la structure (types de colonnes) de la première ligne existante, plutôt que de construire une ligne vide manuellement
       nouvelle_ligne[1, ] <- NA
       donnees_csv(rbind(df, nouvelle_ligne))
       output$csv_save_status <- renderUI({
@@ -744,7 +788,7 @@ demixage_server <- function(id, pipeline, pipeline_version) {
       output$verif_result <- renderPrint({
         tryCatch({
           executer_avec_progression("Vérification des contrôles…", function() {
-            p$verifier_asp(warning = input$seuil_warning, error = input$seuil_error)
+            p$verifier_asp(seuil_warning = input$seuil_warning, seuil_error = input$seuil_error) # Noms de paramètres volontairement différents de "warning"/"error" côté pipeline (qui masqueraient la fonction de base R warning()) — voir pipeline_cytometrie.R
           }, bouton_id = ns("btn_verifier_asp"), label_repos = "Lancer verifier_asp()", icone_repos = "search")
         }, error = function(e) {
           cat("Erreur :", e$message, "\n")
@@ -759,11 +803,11 @@ demixage_server <- function(id, pipeline, pipeline_version) {
       req(nzchar(input$gate_name))
       
       tryCatch({
-        fsc <- if (nzchar(input$gate_fsc_channel)) input$gate_fsc_channel else NULL
+        fsc <- if (nzchar(input$gate_fsc_channel)) input$gate_fsc_channel else NULL # Champ vide = NULL = détection automatique du canal par AutoSpectral, plutôt qu'une chaîne vide littérale qui serait interprétée comme un nom de canal invalide
         ssc <- if (nzchar(input$gate_ssc_channel)) input$gate_ssc_channel else NULL
         
         executer_avec_progression(paste0("Création de la gate \"", input$gate_name, "\"…"), function() {
-          if (input$gate_methode == "tune") {
+          if (input$gate_methode == "tune") { # Chacune des 3 méthodes appelle une méthode pipeline DIFFÉRENTE, avec des paramètres partiellement différents (voir les conditionalPanel correspondants dans l'UI ci-dessus)
             p$definir_tune_gates(
               gate.name  = input$gate_name,
               n_cells    = input$gate_n_cells,
@@ -826,7 +870,7 @@ demixage_server <- function(id, pipeline, pipeline_version) {
       }
       tryCatch({
         for (nom in input$gates_selectionnees) {
-          p$gates[[nom]] <- NULL
+          p$gates[[nom]] <- NULL # Retire uniquement les gates cochées de la liste (self$gates), les autres restent intactes
         }
         pipeline_version(pipeline_version() + 1L)
         output$suppr_gates_status <- renderUI({
@@ -847,7 +891,7 @@ demixage_server <- function(id, pipeline, pipeline_version) {
       p <- pipeline()
       tryCatch({
         executer_avec_progression("Chargement et nettoyage des contrôles…", function() {
-          p$charger_et_nettoyer()
+          p$charger_et_nettoyer() # Applique TOUTES les gates de self$gates aux contrôles, produisant self$flow.control (les contrôles nettoyés, prêts pour l'extraction de spectres)
         }, bouton_id = ns("btn_charger_nettoyer"), label_repos = "Lancer charger_et_nettoyer()")
         pipeline_version(pipeline_version() + 1L)
         output$nettoyage_status <- renderUI({
@@ -863,6 +907,9 @@ demixage_server <- function(id, pipeline, pipeline_version) {
     })
     
     # ── Réinitialisation des gates ───────────────────────────────────────────
+    # Action destructive (suppression de fichiers sur le disque + vidage de
+    # self$gates) : confirmée par une boîte de dialogue modale avant exécution
+    # réelle (btn_confirm_reset_gates), plutôt qu'exécutée directement au clic.
     observeEvent(input$btn_reset_gates, {
       req(length(input$reset_dossiers) > 0 || isTRUE(input$reset_vider_gates))
       showModal(modalDialog(
@@ -883,7 +930,7 @@ demixage_server <- function(id, pipeline, pipeline_version) {
       p <- pipeline()
       tryCatch({
         req(p$dossier_racine)
-        actions <- character(0)
+        actions <- character(0) # Accumule un message par action réellement effectuée, pour un résumé final précis (plutôt qu'un simple "terminé" générique)
         
         for (nom_dossier in input$reset_dossiers) {
           chemin_dossier <- file.path(p$dossier_racine, nom_dossier)
@@ -917,6 +964,9 @@ demixage_server <- function(id, pipeline, pipeline_version) {
     
     # Se rafraîchit : au changement de dossier choisi, après une réinitialisation,
     # après la création d'une nouvelle gate, ou via le bouton "Rafraîchir la liste"
+    # (input$btn_rafraichir_figures est lu sans être utilisé : sa seule fonction
+    # ici est de servir de dépendance réactive, pour permettre à l'utilisateur de
+    # forcer un nouveau scan du dossier sans changer aucun autre paramètre).
     fichiers_figures_gate <- reactive({
       input$btn_rafraichir_figures
       pipeline_version()
@@ -933,7 +983,7 @@ demixage_server <- function(id, pipeline, pipeline_version) {
       if (length(fichiers) == 0) {
         return(p("Aucune figure .jpg trouvée dans ce dossier.", style = "font-size:12px; color:#999; margin-top:25px;"))
       }
-      selectInput(ns("gate_figure_fichier"), "Figure", choices = setNames(fichiers, basename(fichiers)))
+      selectInput(ns("gate_figure_fichier"), "Figure", choices = setNames(fichiers, basename(fichiers))) # Affiche le nom court (basename) à l'utilisateur, tout en gardant le chemin complet comme valeur réelle du sélecteur
     })
     
     output$gate_figure_zone <- renderUI({
@@ -950,7 +1000,7 @@ demixage_server <- function(id, pipeline, pipeline_version) {
     output$gate_figure_img <- renderImage({
       req(input$gate_figure_fichier)
       list(src = input$gate_figure_fichier, contentType = "image/jpeg", width = "100%", alt = basename(input$gate_figure_fichier))
-    }, deleteFile = FALSE)
+    }, deleteFile = FALSE) # deleteFile=FALSE : le fichier affiché est une figure PERMANENTE générée par AutoSpectral sur le disque, pas un fichier temporaire à nettoyer après affichage
     
     # ── Aperçu des figures d'extraction des spectres (.jpg / .pdf) ───────────
     fichiers_figures_spectra <- reactive({
@@ -1003,14 +1053,14 @@ demixage_server <- function(id, pipeline, pipeline_version) {
       content = function(file) file.copy(input$spectra_figure_fichier, file)
     )
     
-    # ── 4. extraire_fluorophore_spectre() ────────────────────────────────────
+    # ── 4. extraire_spectre_fluorophore() ────────────────────────────────────
     observeEvent(input$btn_extract_spectra, {
       req(pipeline())
       p <- pipeline()
       tryCatch({
         executer_avec_progression("Extraction des spectres de fluorophores…", function() {
-          p$extraire_fluorophore_spectre()
-        }, bouton_id = ns("btn_extract_spectra"), label_repos = "Lancer extraire_fluorophore_spectre()")
+          p$extraire_spectre_fluorophore()
+        }, bouton_id = ns("btn_extract_spectra"), label_repos = "Lancer extraire_spectre_fluorophore()")
         pipeline_version(pipeline_version() + 1L)
         output$spectra_status <- renderUI({
           div(class = "alert alert-success", style = "font-size:12px; padding:8px;",
@@ -1095,7 +1145,7 @@ demixage_server <- function(id, pipeline, pipeline_version) {
       pipeline_version()
       noms <- tryCatch(names(pipeline()$af_spectra), error = function(e) NULL)
       if (is.null(noms) || length(noms) == 0) {
-        textInput(ns("unmix_tissue_name"), "tissue_name (optionnel)", value = "")
+        textInput(ns("unmix_tissue_name"), "tissue_name (optionnel)", value = "") # Aucune AF extraite pour l'instant : champ libre optionnel, plutôt qu'un menu vide
       } else {
         selectInput(ns("unmix_tissue_name"), "tissue_name", choices = c("(aucun)", noms))
       }
@@ -1114,14 +1164,14 @@ demixage_server <- function(id, pipeline, pipeline_version) {
       p <- pipeline()
       
       tissue <- if (is.null(input$unmix_tissue_name) || input$unmix_tissue_name %in% c("", "(aucun)")) {
-        NULL
+        NULL # Pas d'AF sélectionnée : le démixage se fait sans correction d'autofluorescence spécifique à un tissu
       } else {
         input$unmix_tissue_name
       }
       
       tryCatch({
         executer_avec_progression(
-          if (input$unmix_cible == "fichier") "Démixage du fichier en cours…" else "Démixage du dossier en cours (peut prendre du temps)…",
+          if (input$unmix_cible == "fichier") "Démixage du fichier en cours…" else "Démixage du dossier en cours (peut prendre du temps)…", # Message différent selon la cible : démixer un dossier entier peut prendre bien plus longtemps qu'un seul fichier
           function() {
             if (input$unmix_cible == "fichier") {
               req(input$unmix_fichier_choisi)
@@ -1164,7 +1214,7 @@ demixage_server <- function(id, pipeline, pipeline_version) {
       req(nzchar(input$unmix_dossier_resultats))
       tryCatch({
         executer_avec_progression("Chargement des fichiers unmixés en mémoire…", function() {
-          p$charger_fcs_unmixes(dossier = input$unmix_dossier_resultats)
+          p$charger_fcs_unmixes(dossier = input$unmix_dossier_resultats) # Lit les .fcs déjà démixés depuis ce sous-dossier du disque et peuple self$echantillons_traites — étape distincte du démixage lui-même (unmix_fcs/unmix_folder écrivent sur le disque, ne mettent pas à jour la mémoire automatiquement)
         }, bouton_id = ns("btn_charger_unmixes"), label_repos = "Lancer charger_fcs_unmixes()")
         pipeline_version(pipeline_version() + 1L)
         output$charger_unmixes_status <- renderUI({
@@ -1231,7 +1281,7 @@ demixage_server <- function(id, pipeline, pipeline_version) {
           NULL
         })
         req(p_gg)
-        plotly::ggplotly(p_gg)
+        plotly::ggplotly(p_gg) # visualiser_unmixing() renvoie un objet ggplot2 (densité raster) ; conversion en plotly pour bénéficier du zoom/survol interactif dans cet onglet uniquement (les autres modules affichent directement en ggplot2/base R)
       })
     })
     

@@ -25,7 +25,7 @@ analyse_ui <- function(id) {
       }
       .analyse-instr b { color:#0077b6; }
     ")),
-
+    
     tabsetPanel(
       id = ns("tabs_analyse"),
       
@@ -42,9 +42,6 @@ analyse_ui <- function(id) {
                  wellPanel(
                    h4("Nouveau gate"),
                    textInput(ns("nom_gate"), "Nom du gate :", placeholder = "ex: Lymphocytes, CD4+..."),
-                   
-                   selectInput(ns("type_gate"), "Type de gate :",
-                               choices = c("Polygone (tracé libre)" = "polygon", "Rectangle (bornes numériques)" = "rectangle")),
                    
                    uiOutput(ns("ui_gate_parent")),
                    div(class = "analyse-instr", icon("sitemap"),
@@ -63,38 +60,18 @@ analyse_ui <- function(id) {
                        " Le gating se fait sur des données transformées (Arcsinh) : ajustez le cofacteur pour bien séparer les populations sur les canaux choisis."),
                    
                    hr(),
-                   conditionalPanel(
-                     condition = paste0("input['", ns("type_gate"), "'] == 'polygon'"),
-                     div(class = "analyse-instr", icon("hand-pointer"),
-                         " Cliquez sur le graphique pour ajouter des sommets. ",
-                         tags$b("Double-clic"), " pour fermer le polygone."),
-                     br(),
-                     fluidRow(
-                       column(6, actionButton(ns("btn_undo_sommet_gate"),
-                                              tagList(icon("undo"), " Annuler sommet"),
-                                              class = "btn-default btn-sm", style = "width:100%;")),
-                       column(6, actionButton(ns("btn_reset_gate_dessin"),
-                                              tagList(icon("eraser"), " Effacer"),
-                                              class = "btn-default btn-sm", style = "width:100%;"))
-                     )
-                   ),
-                   conditionalPanel(
-                     condition = paste0("input['", ns("type_gate"), "'] == 'rectangle'"),
-                     div(class = "analyse-instr", icon("info-circle"),
-                         " Le rectangle prévisualisé sur le graphique se met à jour en direct selon les bornes ci-dessous."),
-                     fluidRow(
-                       column(6, numericInput(ns("rect_xmin"), "X min :", value = 0)),
-                       column(6, numericInput(ns("rect_xmax"), "X max :", value = 1))
-                     ),
-                     fluidRow(
-                       column(6, numericInput(ns("rect_ymin"), "Y min :", value = 0)),
-                       column(6, numericInput(ns("rect_ymax"), "Y max :", value = 1))
-                     )
-                   ),
-                   
-                   hr(),
-                   actionButton(ns("btn_creer_gate"), tagList(icon("check-circle"), " Créer le gate"),
-                                class = "btn-success", style = "width:100%; font-weight:bold;")
+                   div(class = "analyse-instr", icon("hand-pointer"),
+                       " Cliquez sur le graphique pour ajouter des sommets. ",
+                       tags$b("Double-clic"), " pour fermer le polygone."),
+                   br(),
+                   fluidRow(
+                     column(6, actionButton(ns("btn_undo_sommet_gate"),
+                                            tagList(icon("undo"), " Annuler sommet"),
+                                            class = "btn-default btn-sm", style = "width:100%;")),
+                     column(6, actionButton(ns("btn_reset_gate_dessin"),
+                                            tagList(icon("eraser"), " Effacer"),
+                                            class = "btn-default btn-sm", style = "width:100%;"))
+                   )
                  )
           ),
           
@@ -104,7 +81,10 @@ analyse_ui <- function(id) {
           column(width = 6,
                  box(title = tagList(icon("draw-polygon"), " Dessin interactif"), width = NULL,
                      status = "info", solidHeader = TRUE,
-                     plotlyOutput(ns("plot_gate_dessin_analyse"), height = "520px")
+                     plotlyOutput(ns("plot_gate_dessin_analyse"), height = "520px"),
+                     br(),
+                     actionButton(ns("btn_creer_gate"), tagList(icon("check-circle"), " Créer le gate"),
+                                  class = "btn-success", style = "width:100%; font-weight:bold;")
                  )
           ),
           
@@ -332,7 +312,7 @@ analyse_server <- function(id, pipeline, pipeline_version) {
     # sélectionnée par le gate parent — gating hiérarchique).
     obtenir_source_gating <- function(p, parent) {
       if (is.null(parent) || identical(parent, "AUCUN") || nchar(parent) == 0) {
-        p$get_derniere_source()
+        p$obtenir_derniere_source()
       } else {
         tryCatch(p$resoudre_population_gate(parent), error = function(e) list())
       }
@@ -342,8 +322,12 @@ analyse_server <- function(id, pipeline, pipeline_version) {
       gates_trigger()
       p <- carrot_obj()
       noms <- names(p$gates_personnalisees)
-      selectInput(ns("gate_parent_select"), "Population parente :",
-                  choices = c("Population totale (aucun parent)" = "AUCUN", noms))
+      choix <- c("Population totale (aucun parent)" = "AUCUN", noms)
+      
+      actuel <- input$gate_parent_select
+      sel <- if (!is.null(actuel) && actuel %in% unname(choix)) actuel else "AUCUN"
+      
+      selectInput(ns("gate_parent_select"), "Population parente :", choices = choix, selected = sel)
     })
     
     output$ui_echantillon_ref_gating <- renderUI({
@@ -354,7 +338,11 @@ analyse_server <- function(id, pipeline, pipeline_version) {
         return(div(class = "alert alert-warning", style = "font-size:12px; padding:8px;",
                    icon("exclamation-triangle"), " Aucune cellule disponible pour cette population parente."))
       }
-      selectInput(ns("echantillon_ref_gating"), "Échantillon (référence pour le tracé) :", choices = names(src))
+      
+      actuel <- input$echantillon_ref_gating
+      sel <- if (!is.null(actuel) && actuel %in% names(src)) actuel else names(src)[1]
+      
+      selectInput(ns("echantillon_ref_gating"), "Échantillon (référence pour le tracé) :", choices = names(src), selected = sel)
     })
     
     output$ui_canal_x_gating <- renderUI({
@@ -363,8 +351,16 @@ analyse_server <- function(id, pipeline, pipeline_version) {
       req(length(src) > 0, input$echantillon_ref_gating %in% names(src))
       fcs_ref <- src[[input$echantillon_ref_gating]]
       cols    <- flowCore::colnames(fcs_ref)
-      choix   <- stats::setNames(cols, vapply(cols, function(c) p$get_label(fcs_ref, c), character(1))) # Affiche "canal | marqueur" dans le menu, valeur = nom technique du canal
-      selectInput(ns("canal_x_gating"), "Canal X :", choices = choix, selected = cols[1])
+      choix   <- stats::setNames(cols, vapply(cols, function(c) p$obtenir_label(fcs_ref, c), character(1))) # Affiche "canal | marqueur" dans le menu, valeur = nom technique du canal
+      
+      # Préserve le canal actuellement sélectionné s'il est toujours valide,
+      # plutôt que de revenir systématiquement au premier canal à chaque
+      # reconstruction de ce sélecteur (il dépend de carrot_obj(), donc de
+      # pipeline_version(), qui change à la moindre action ailleurs dans l'app).
+      actuel <- input$canal_x_gating
+      sel <- if (!is.null(actuel) && actuel %in% cols) actuel else cols[1]
+      
+      selectInput(ns("canal_x_gating"), "Canal X :", choices = choix, selected = sel)
     })
     
     output$ui_canal_y_gating <- renderUI({
@@ -373,8 +369,13 @@ analyse_server <- function(id, pipeline, pipeline_version) {
       req(length(src) > 0, input$echantillon_ref_gating %in% names(src))
       fcs_ref <- src[[input$echantillon_ref_gating]]
       cols    <- flowCore::colnames(fcs_ref)
-      choix   <- stats::setNames(cols, vapply(cols, function(c) p$get_label(fcs_ref, c), character(1)))
-      selectInput(ns("canal_y_gating"), "Canal Y :", choices = choix, selected = cols[min(2, length(cols))])
+      choix   <- stats::setNames(cols, vapply(cols, function(c) p$obtenir_label(fcs_ref, c), character(1)))
+      
+      # Même préservation de sélection que pour l'axe X ci-dessus.
+      actuel <- input$canal_y_gating
+      sel <- if (!is.null(actuel) && actuel %in% cols) actuel else cols[min(2, length(cols))]
+      
+      selectInput(ns("canal_y_gating"), "Canal Y :", choices = choix, selected = sel)
     })
     
     # Le gate "actif" (préchargé au changement d'échantillon, ciblé à
@@ -458,7 +459,7 @@ analyse_server <- function(id, pipeline, pipeline_version) {
     #    recharge sa forme (modifiable) ;
     #  - sinon, le canevas repart vide pour un nouveau tracé.
     observeEvent(list(input$echantillon_ref_gating, input$canal_x_gating, input$canal_y_gating,
-                      input$gate_parent_select, input$type_gate, input$cofacteur_gating, input$nom_gate), {
+                      input$gate_parent_select, input$cofacteur_gating, input$nom_gate), {
                         p   <- carrot_obj()
                         nom <- input$echantillon_ref_gating
                         req(nom)
@@ -472,8 +473,8 @@ analyse_server <- function(id, pipeline, pipeline_version) {
       p   <- carrot_obj()
       src <- obtenir_source_gating(p, input$gate_parent_select)
       fcs_ref <- src[[input$echantillon_ref_gating]]
-      lbl_x <- p$get_label(fcs_ref, input$canal_x_gating) # Combine canal technique et marqueur biologique (ex: "PE-A | CD3"), cohérent avec le reste de l'application
-      lbl_y <- p$get_label(fcs_ref, input$canal_y_gating)
+      lbl_x <- p$obtenir_label(fcs_ref, input$canal_x_gating) # Combine canal technique et marqueur biologique (ex: "PE-A | CD3"), cohérent avec le reste de l'application
+      lbl_y <- p$obtenir_label(fcs_ref, input$canal_y_gating)
       
       lim_x <- range(df$X, na.rm = TRUE)
       lim_y <- range(df$Y, na.rm = TRUE)
@@ -499,18 +500,6 @@ analyse_server <- function(id, pipeline, pipeline_version) {
       soms_init  <- calculer_soms_preload_gate_analyse(p, input$echantillon_ref_gating)
       trace_init <- construire_trace_et_shapes_gate_analyse(soms_init, df)
       
-      # Aperçu du rectangle en direct si ce type est sélectionné
-      shapes_init <- trace_init$shapes
-      if (identical(input$type_gate, "rectangle") &&
-          !is.null(input$rect_xmin) && !is.null(input$rect_xmax) &&
-          !is.null(input$rect_ymin) && !is.null(input$rect_ymax)) {
-        shapes_init <- list(list(type = "rect",
-                                 x0 = input$rect_xmin, x1 = input$rect_xmax,
-                                 y0 = input$rect_ymin, y1 = input$rect_ymax,
-                                 line = list(color = "#e65100", width = 2),
-                                 fillcolor = "rgba(230,101,0,0.15)"))
-      }
-      
       plt %>%
         add_trace(x = trace_init$x, y = trace_init$y, type = "scatter", mode = "lines+markers",
                   name = "Gate en cours",
@@ -526,16 +515,15 @@ analyse_server <- function(id, pipeline, pipeline_version) {
           yaxis  = list(title = lbl_y),
           legend = list(orientation = "h", y = -0.15),
           margin = list(b = 60),
-          shapes = shapes_init
+          shapes = trace_init$shapes
         ) %>%
         config(displayModeBar = TRUE, editable = TRUE,
                modeBarButtonsToRemove = list("lasso2d", "select2d"),
                displaylogo = FALSE, doubleClick = FALSE)
     })
     
-    # Ajout de sommet (clic), uniquement en mode polygone
+    # Ajout de sommet (clic) pour tracer le polygone
     observeEvent(event_data("plotly_click", source = ns("plot_gate_dessin_analyse")), {
-      req(identical(input$type_gate, "polygon"))
       ev <- event_data("plotly_click", source = ns("plot_gate_dessin_analyse"))
       req(ev)
       soms <- sommets_gate_rv()
@@ -584,19 +572,6 @@ analyse_server <- function(id, pipeline, pipeline_version) {
       if (modifie) sommets_gate_rv(soms)
     }, ignoreInit = TRUE)
     
-    # Rafraîchit l'aperçu du rectangle en direct quand les bornes numériques changent
-    observeEvent(list(input$rect_xmin, input$rect_xmax, input$rect_ymin, input$rect_ymax), {
-      req(identical(input$type_gate, "rectangle"))
-      proxy <- plotlyProxy(ns("plot_gate_dessin_analyse"), session)
-      plotlyProxyInvoke(proxy, "relayout", list(shapes = list(list(
-        type = "rect",
-        x0 = input$rect_xmin, x1 = input$rect_xmax,
-        y0 = input$rect_ymin, y1 = input$rect_ymax,
-        line = list(color = "#e65100", width = 2),
-        fillcolor = "rgba(230,101,0,0.15)"
-      ))))
-    }, ignoreInit = TRUE)
-    
     observeEvent(input$btn_creer_gate, {
       nom <- trimws(input$nom_gate %||% "")
       if (nchar(nom) == 0) {
@@ -617,26 +592,15 @@ analyse_server <- function(id, pipeline, pipeline_version) {
       premiere_creation <- is.null(p$gates_personnalisees[[nom]]) || length(p$gates_personnalisees[[nom]]$formes) == 0
       
       tryCatch({
-        if (identical(input$type_gate, "polygon")) {
-          soms <- sommets_gate_rv()
-          if (length(soms) < 3) stop("Tracez au moins 3 sommets pour définir un polygone.")
-          xs <- sapply(soms, `[[`, "x")
-          ys <- sapply(soms, `[[`, "y")
-          idx_hull <- grDevices::chull(xs, ys)
-          mat_poly <- cbind(xs[idx_hull], ys[idx_hull])
-          p$creer_gate(nom_gate = nom, type = "polygon", axes = c(cx, cy), points = mat_poly,
-                       gate_parent = parent, cofacteur = input$cofacteur_gating,
-                       nom_echantillon = input$echantillon_ref_gating)
-        } else {
-          req(input$rect_xmin, input$rect_xmax, input$rect_ymin, input$rect_ymax)
-          if (input$rect_xmin >= input$rect_xmax || input$rect_ymin >= input$rect_ymax) {
-            stop("Les bornes minimales doivent être strictement inférieures aux bornes maximales.")
-          }
-          p$creer_gate(nom_gate = nom, type = "rectangle", axes = c(cx, cy),
-                       points = c(input$rect_xmin, input$rect_xmax, input$rect_ymin, input$rect_ymax),
-                       gate_parent = parent, cofacteur = input$cofacteur_gating,
-                       nom_echantillon = input$echantillon_ref_gating)
-        }
+        soms <- sommets_gate_rv()
+        if (length(soms) < 3) stop("Tracez au moins 3 sommets pour définir un polygone.")
+        xs <- sapply(soms, `[[`, "x")
+        ys <- sapply(soms, `[[`, "y")
+        idx_hull <- grDevices::chull(xs, ys)
+        mat_poly <- cbind(xs[idx_hull], ys[idx_hull])
+        p$creer_gate(nom_gate = nom, type = "polygon", axes = c(cx, cy), points = mat_poly,
+                     gate_parent = parent, cofacteur = input$cofacteur_gating,
+                     nom_echantillon = input$echantillon_ref_gating)
         pipeline(p)
         gates_trigger(gates_trigger() + 1L)
         
@@ -711,6 +675,7 @@ analyse_server <- function(id, pipeline, pipeline_version) {
     })
     
     # ════════════════════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════════════════════
     # ONGLET PCA
     # ════════════════════════════════════════════════════════════════════════
     
@@ -725,22 +690,30 @@ analyse_server <- function(id, pipeline, pipeline_version) {
       selectInput(ns("gate_select_pca"), "Gate à analyser :", choices = noms)
     })
     
+    # Liste des canaux de fluorescence disponibles pour CE gate précis (dépend
+    # de la population réellement résolue, y compris à travers une éventuelle
+    # chaîne de gates parents) — pas la liste brute de tous les canaux connus
+    # du pipeline, qui pourrait inclure des canaux absents de cette sous-population.
     output$ui_canaux_select_pca <- renderUI({
       p <- carrot_obj()
       req(input$gate_select_pca)
       pop <- tryCatch(p$resoudre_population_gate(input$gate_select_pca), error = function(e) list())
       req(length(pop) > 0)
-      cols <- flowCore::colnames(pop[[1]])
+      cols <- flowCore::colnames(pop[[1]]) # Se base sur le premier échantillon de la population résolue : suppose un panel identique entre échantillons (cas standard d'une même cohorte)
       fluo <- cols[!grepl("FSC|SSC|Time", cols, ignore.case = TRUE)]
       selectizeInput(ns("canaux_select_pca"), "Canaux à utiliser (vide = tous) :",
-                     choices = fluo, multiple = TRUE)
+                     choices = fluo, multiple = TRUE) # Champ laissé vide = tous les canaux de fluorescence (voir p$projection_PCA(), canaux=NULL déclenche ce comportement par défaut côté pipeline)
     })
     
+    # Lance le calcul : extrait/transforme/poole la population du gate (voir
+    # p$extraire_donnees_gate() dans pipeline_cytometrie.R), puis calcule la PCA
+    # via stats::prcomp(). Le résultat est archivé dans p$analyses_pca, indexé
+    # par nom de gate (un calcul par gate, écrasé si relancé).
     observeEvent(input$btn_lancer_pca, {
       p <- carrot_obj()
       req(input$gate_select_pca)
       canaux    <- if (length(input$canaux_select_pca) == 0) NULL else input$canaux_select_pca
-      max_cells <- if (is.null(input$pca_max_cells) || is.na(input$pca_max_cells)) NULL else input$pca_max_cells
+      max_cells <- if (is.null(input$pca_max_cells) || is.na(input$pca_max_cells)) NULL else input$pca_max_cells # Champ numérique vide -> NA côté Shiny -> converti en NULL (aucun sous-échantillonnage), la PCA étant peu coûteuse même sur beaucoup de cellules
       
       withProgress(message = "Calcul de la PCA...", value = 0.4, {
         tryCatch({
@@ -755,6 +728,11 @@ analyse_server <- function(id, pipeline, pipeline_version) {
       })
     })
     
+    # Projection sur les 2 premières composantes principales, colorée par
+    # échantillon d'origine (pas d'option "colorer par marqueur/métacluster"
+    # ici, contrairement à UMAP/t-SNE ci-dessous — la PCA sert surtout à
+    # repérer un éventuel effet lot/échantillon avant de passer à une
+    # projection non linéaire plus fine).
     output$plot_pca <- renderPlotly({
       pca_trigger()
       p <- carrot_obj()
@@ -764,13 +742,17 @@ analyse_server <- function(id, pipeline, pipeline_version) {
       
       df <- as.data.frame(res$embedding)
       df$Echantillon <- res$echantillon_origine
-      noms_axes <- colnames(res$embedding)
+      noms_axes <- colnames(res$embedding) # "PC1", "PC2"... (noms générés nativement par prcomp())
       
       plot_ly(df, x = df[[1]], y = df[[2]], color = ~Echantillon,
               type = "scatter", mode = "markers", marker = list(size = 3, opacity = 0.6)) %>%
         layout(xaxis = list(title = noms_axes[1]), yaxis = list(title = noms_axes[2]))
     })
     
+    # Liste, pour chaque composante conservée, le % de variance totale
+    # qu'elle explique — indicateur clé pour juger si 2 composantes suffisent
+    # à représenter fidèlement la population, ou si une part importante de
+    # variance reste hors de la projection affichée.
     output$ui_variance_pca <- renderUI({
       pca_trigger()
       p <- carrot_obj()
@@ -831,6 +813,10 @@ analyse_server <- function(id, pipeline, pipeline_version) {
       })
     })
     
+    # Menu "Colorer par" : toujours "Échantillon" + un choix par marqueur/canal
+    # utilisé dans le calcul, et en plus "Métacluster" si un clustering FlowSOM
+    # a déjà été calculé pour ce même gate (voir plot_umap ci-dessous pour la
+    # vérification de compatibilité entre les deux résultats).
     output$ui_couleur_umap <- renderUI({
       umap_trigger(); cluster_trigger()
       p <- carrot_obj()
@@ -845,6 +831,14 @@ analyse_server <- function(id, pipeline, pipeline_version) {
       selectInput(ns("couleur_umap"), "Colorer par :", choices = choix)
     })
     
+    # 3 branches selon le mode de coloration choisi : par échantillon d'origine
+    # (traçabilité, repérer un effet lot), par métacluster (nécessite un
+    # clustering déjà calculé avec le MÊME nombre de cellules que cette UMAP,
+    # sinon impossible d'aligner les deux résultats ligne à ligne — voir
+    # p$creer_clusters(reutiliser_donnees_de=) dans pipeline_cytometrie.R pour
+    # la façon recommandée de garantir cet alignement), ou par expression d'un
+    # marqueur donné (res$expression, la matrice transformée poolée conservée
+    # depuis le calcul de la projection).
     output$plot_umap <- renderPlotly({
       umap_trigger()
       p <- carrot_obj()
@@ -870,9 +864,9 @@ analyse_server <- function(id, pipeline, pipeline_version) {
                 type = "scatter", mode = "markers", marker = list(size = 3, opacity = 0.6)) %>%
           layout(xaxis = list(title = noms_axes[1]), yaxis = list(title = noms_axes[2]))
       } else {
-        req(choix_couleur %in% colnames(res$expression))
+        req(choix_couleur %in% colnames(res$expression)) # Sécurité : le canal choisi doit bien exister dans la matrice d'expression conservée (peut ne plus correspondre si l'utilisateur a changé de gate entre-temps)
         df$Marqueur <- res$expression[, choix_couleur]
-        plot_ly(df, x = df[[1]], y = df[[2]], color = ~Marqueur, colors = PALETTE_DENSITE,
+        plot_ly(df, x = df[[1]], y = df[[2]], color = ~Marqueur, colors = PALETTE_DENSITE, # Réutilise la même palette pseudo-spectrale que le reste de l'application (utils.R), pour une cohérence visuelle même en dehors des figures de densité
                 type = "scatter", mode = "markers", marker = list(size = 3, opacity = 0.6)) %>%
           layout(xaxis = list(title = noms_axes[1]), yaxis = list(title = noms_axes[2]))
       }
@@ -881,6 +875,10 @@ analyse_server <- function(id, pipeline, pipeline_version) {
     # ════════════════════════════════════════════════════════════════════════
     # ONGLET t-SNE
     # ════════════════════════════════════════════════════════════════════════
+    # Structure et logique de coloration IDENTIQUES à l'onglet UMAP ci-dessus
+    # (voir ses commentaires pour le détail des 3 branches de coloration et de
+    # la vérification d'alignement avec un clustering FlowSOM) — seul l'appel
+    # au pipeline change (p$projection_tSNE() au lieu de p$projection_UMAP()).
     
     output$ui_gate_select_tsne <- renderUI({
       gates_trigger()
@@ -1010,6 +1008,11 @@ analyse_server <- function(id, pipeline, pipeline_version) {
                      choices = fluo, multiple = TRUE)
     })
     
+    # Lance le clustering FlowSOM : soit sur une extraction indépendante
+    # (nouveau sous-échantillonnage, propre à cet appel), soit en réutilisant
+    # exactement les cellules d'une UMAP/t-SNE déjà calculée pour ce gate (voir
+    # ui_reutiliser_donnees_cluster ci-dessus), ce qui garantit un alignement
+    # parfait pour la superposition métacluster-sur-projection plus bas.
     observeEvent(input$btn_lancer_cluster, {
       p <- carrot_obj()
       req(input$gate_select_cluster)
@@ -1088,6 +1091,8 @@ analyse_server <- function(id, pipeline, pipeline_version) {
       }))
     })
     
+    # Enregistre le nom personnalisé de chaque métacluster (un champ texte par
+    # métacluster, généré dynamiquement ci-dessus) dans le pipeline.
     observeEvent(input$btn_enregistrer_annotations, {
       p <- carrot_obj()
       req(input$gate_select_cluster)
@@ -1205,12 +1210,16 @@ analyse_server <- function(id, pipeline, pipeline_version) {
       cols <- flowCore::colnames(pop[[1]])
       fluo <- cols[!grepl("FSC|SSC|Time", cols, ignore.case = TRUE)]
       fcs_ref <- pop[[1]]
-      choix <- stats::setNames(fluo, vapply(fluo, function(c) p$get_label(fcs_ref, c), character(1)))
+      choix <- stats::setNames(fluo, vapply(fluo, function(c) p$obtenir_label(fcs_ref, c), character(1)))
       selectInput(ns("canal_comparaison"), "Canal :", choices = choix)
     })
     
     resultat_comparaison_rv <- reactiveVal(NULL)
     
+    # Lance la comparaison statistique entre groupes (Wilcoxon si 2 groupes,
+    # Kruskal-Wallis si 3 ou plus — voir p$comparer_groupes() dans
+    # pipeline_cytometrie.R pour le détail), soit sur le % du gate par rapport
+    # à sa population parente, soit sur la MFI d'un canal choisi.
     observeEvent(input$btn_lancer_comparaison, {
       p <- carrot_obj()
       req(input$gate_select_comparaison, input$comparaison_variable)
@@ -1226,6 +1235,9 @@ analyse_server <- function(id, pipeline, pipeline_version) {
       })
     })
     
+    # Résumé textuel : méthode statistique utilisée (déterminée automatiquement
+    # côté pipeline selon le nombre de groupes), p-value, et mise en évidence
+    # visuelle si le résultat est significatif au seuil usuel de 5%.
     output$ui_resultat_comparaison <- renderUI({
       res <- resultat_comparaison_rv()
       req(!is.null(res))
@@ -1238,6 +1250,10 @@ analyse_server <- function(id, pipeline, pipeline_version) {
       )
     })
     
+    # Boxplot avec points individuels superposés (un point par échantillon,
+    # étiqueté au survol) : montre à la fois la tendance par groupe et la
+    # dispersion réelle des échantillons individuels, utile avec les petits
+    # effectifs par groupe typiques d'une cohorte de cytométrie.
     output$plot_comparaison_groupes <- renderPlotly({
       res <- resultat_comparaison_rv()
       req(!is.null(res))
@@ -1245,7 +1261,7 @@ analyse_server <- function(id, pipeline, pipeline_version) {
       df <- res$donnees
       lbl_y <- if (identical(res$variable, "MFI")) paste0("MFI (", res$canal, ")") else "% du parent"
       
-      plot_ly(df, x = ~groupe, y = ~valeur, type = "box", boxpoints = "all", jitter = 0.4,
+      plot_ly(df, x = ~groupe, y = ~valeur, type = "box", boxpoints = "all", jitter = 0.4, # boxpoints="all" + jitter : affiche TOUS les points individuels (pas seulement les valeurs aberrantes), légèrement dispersés horizontalement pour éviter qu'ils ne se superposent
               pointpos = 0, marker = list(color = "#0077b6"), text = ~echantillon, hoverinfo = "text+y") %>%
         layout(xaxis = list(title = "Groupe"), yaxis = list(title = lbl_y))
     })

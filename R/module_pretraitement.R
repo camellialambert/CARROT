@@ -449,7 +449,7 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
       if (choix == "flowai"  && length(p$post_flowAI)  > 0) return(p$post_flowAI)
       # "brutes" (ou repli) : on ne remonte JAMAIS au-delà de la source d'entrée
       # du gating débris (bordures > PeacoQC/flowAI > compensées/démixées).
-      # Utiliser p$get_derniere_source() ici serait incorrect : une fois qu'un
+      # Utiliser p$obtenir_derniere_source() ici serait incorrect : une fois qu'un
       # gate de débris existe déjà pour au moins un échantillon, cette méthode
       # renvoie post_debris lui-même (résultat du filtrage), ce qui bouclerait
       # sur sa propre sortie et n'afficherait plus que les événements déjà
@@ -466,7 +466,7 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
     
     output$ui_canaux_bordures <- renderUI({
       p <- carrot_obj()
-      src <- p$get_derniere_source()
+      src <- p$obtenir_derniere_source()
       req(length(src) > 0)
       cols <- flowCore::colnames(src[[1]])
       selectInput(ns("canaux_bordures_sel"), "Canaux :", choices = cols,
@@ -699,8 +699,8 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
       p_obj <- carrot_obj()
       src   <- obtenir_source(p_obj, input$source_debris %||% "brutes")
       fcs   <- src[[input$sel_ech_debris]]
-      lbl_x <- p_obj$get_label(fcs, input$canal_x_debris)
-      lbl_y <- p_obj$get_label(fcs, input$canal_y_debris)
+      lbl_x <- p_obj$obtenir_label(fcs, input$canal_x_debris)
+      lbl_y <- p_obj$obtenir_label(fcs, input$canal_y_debris)
       
       # Densité par binning raster (rapide, indépendant du nombre d'événements affichés).
       # Rendue en petits ronds colorés par densité (mode "scatter" classique, même famille
@@ -776,7 +776,20 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
     observeEvent(event_data("plotly_relayout", source = ns("plot_gate_dessin")), {
       ev   <- event_data("plotly_relayout", source = ns("plot_gate_dessin"))
       req(ev)
-      soms_maj <- appliquer_deplacement_shapes(ev, sommets_rv())
+      
+      # Sécurité : si sommets_rv() n'a pas (encore) été synchronisé avec la
+      # forme réellement affichée (ex. juste après un changement d'échantillon,
+      # décalage de timing réactif), on la recharge avant d'appliquer le
+      # déplacement — sinon le glissé d'un gate déjà enregistré n'aurait
+      # silencieusement aucun effet tant qu'un enregistrement n'a pas forcé un
+      # nouveau rendu complet.
+      soms_actuels <- sommets_rv()
+      if (length(soms_actuels) == 0) {
+        p <- carrot_obj()
+        soms_actuels <- calculer_soms_preload_debris(p, input$sel_ech_debris, input$canal_x_debris, input$canal_y_debris)
+      }
+      
+      soms_maj <- appliquer_deplacement_shapes(ev, soms_actuels)
       if (!is.null(soms_maj)) sommets_rv(soms_maj)
     }, ignoreInit = TRUE)
     
@@ -1093,8 +1106,8 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
       etape <- input$etape_doublet %||% "FSC"
       src   <- obtenir_source_doublet(p_obj, etape)
       fcs   <- src[[input$sel_ech_doublet]]
-      lbl_x <- p_obj$get_label(fcs, attr(df, "canal_x"))
-      lbl_y <- p_obj$get_label(fcs, attr(df, "canal_y"))
+      lbl_x <- p_obj$obtenir_label(fcs, attr(df, "canal_x"))
+      lbl_y <- p_obj$obtenir_label(fcs, attr(df, "canal_y"))
       
       # Densité par binning raster (rapide, indépendant du nombre d'événements affichés).
       # Rendue en petits ronds colorés par densité (mode "scatter" classique, même famille
@@ -1167,7 +1180,19 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
     observeEvent(event_data("plotly_relayout", source = ns("plot_gate_doublet_dessin")), {
       ev   <- event_data("plotly_relayout", source = ns("plot_gate_doublet_dessin"))
       req(ev)
-      soms_maj <- appliquer_deplacement_shapes(ev, sommets_doublet_rv())
+      
+      # Sécurité : recharge la forme déjà enregistrée si sommets_doublet_rv()
+      # n'a pas encore été synchronisée (voir même commentaire dans le
+      # gestionnaire équivalent des débris).
+      soms_actuels <- sommets_doublet_rv()
+      if (length(soms_actuels) == 0) {
+        p     <- carrot_obj()
+        etape <- input$etape_doublet %||% "FSC"
+        axe   <- input$axe_doublet %||% "H_A"
+        soms_actuels <- calculer_soms_preload_doublet(p, etape, axe, input$sel_ech_doublet)
+      }
+      
+      soms_maj <- appliquer_deplacement_shapes(ev, soms_actuels)
       if (!is.null(soms_maj)) sommets_doublet_rv(soms_maj)
     }, ignoreInit = TRUE)
     
@@ -1535,8 +1560,8 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
       
       p_obj <- carrot_obj()
       fcs   <- p_obj$post_transformation[[input$sel_ech_viabilite]]
-      lbl_x <- p_obj$get_label(fcs, attr(df, "canal_x"))
-      lbl_y <- p_obj$get_label(fcs, attr(df, "canal_y"))
+      lbl_x <- p_obj$obtenir_label(fcs, attr(df, "canal_x"))
+      lbl_y <- p_obj$obtenir_label(fcs, attr(df, "canal_y"))
       
       # Densité par binning raster (rapide, indépendant du nombre d'événements affichés).
       # Rendue en petits ronds colorés par densité (mode "scatter" classique, même famille
@@ -1609,7 +1634,17 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
     observeEvent(event_data("plotly_relayout", source = ns("plot_gate_viabilite_dessin")), {
       ev   <- event_data("plotly_relayout", source = ns("plot_gate_viabilite_dessin"))
       req(ev)
-      soms_maj <- appliquer_deplacement_shapes(ev, sommets_viabilite_rv())
+      
+      # Sécurité : recharge la forme déjà enregistrée si sommets_viabilite_rv()
+      # n'a pas encore été synchronisée (voir même commentaire dans le
+      # gestionnaire équivalent des débris).
+      soms_actuels <- sommets_viabilite_rv()
+      if (length(soms_actuels) == 0) {
+        p <- carrot_obj()
+        soms_actuels <- calculer_soms_preload_viabilite(p, input$sel_ech_viabilite, input$canal_viabilite)
+      }
+      
+      soms_maj <- appliquer_deplacement_shapes(ev, soms_actuels)
       if (!is.null(soms_maj)) sommets_viabilite_rv(soms_maj)
     }, ignoreInit = TRUE)
     
@@ -1696,12 +1731,24 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
     # RÉSUMÉ CUMULATIF — construction commune (DÉBRIS + DOUBLETS)
     # ════════════════════════════════════════════════════════════════════════
     
+    # Reconstruit, pour un échantillon donné, la chaîne complète des étapes de
+    # prétraitement qu'il a traversées, dans l'ORDRE réel du pipeline
+    # (compensées -> PeacoQC/flowAI -> bordures -> gates de débris nommés,
+    # empilés dans l'ordre de création -> doublets FSC -> doublets SSC ->
+    # viabilité), en ne retenant que les étapes réellement effectuées pour CET
+    # échantillon (une étape absente est simplement omise, pas affichée à 0).
+    # Chaque étape mémorise son propre effectif (n) ET l'effectif de référence
+    # (ref) par rapport auquel calculer son pourcentage de conservation — cette
+    # référence est toujours l'étape immédiatement précédente dans la chaîne
+    # réellement traversée, pas la population totale d'origine (sinon un
+    # pourcentage élevé à une étape tardive masquerait des pertes déjà
+    # subies aux étapes précédentes).
     construire_recap <- function(p, nom) {
       etapes <- list()
       
       if (!is.null(p$echantillons_traites[[nom]])) {
         n <- nrow(flowCore::exprs(p$echantillons_traites[[nom]]))
-        etapes[["Compensées"]] <- list(n = n, ref = n)
+        etapes[["Compensées"]] <- list(n = n, ref = n) # Point de départ : sa propre référence est lui-même (100%), puisqu'aucune étape antérieure n'existe
       }
       ref <- etapes[["Compensées"]]$n %||% NA
       
@@ -1711,7 +1758,7 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
       }
       if (!is.null(p$post_flowAI[[nom]])) {
         n <- nrow(flowCore::exprs(p$post_flowAI[[nom]]))
-        etapes[["flowAI"]] <- list(n = n, ref = ref)
+        etapes[["flowAI"]] <- list(n = n, ref = ref) # PeacoQC et flowAI utilisent la MÊME référence (Compensées) : ce sont deux méthodes de QC alternatives, potentiellement appliquées toutes les deux indépendamment, pas chaînées l'une à l'autre
       }
       if (!is.null(p$post_retrait_bordures[[nom]])) {
         n <- nrow(flowCore::exprs(p$post_retrait_bordures[[nom]]))
@@ -1719,11 +1766,11 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
       }
       
       # Gates de débris nommés (empilés)
-      ref_gate <- if (length(etapes) > 0) etapes[[length(etapes)]]$n else ref
-      for (nm_gate in names(p$gates_history)) {
+      ref_gate <- if (length(etapes) > 0) etapes[[length(etapes)]]$n else ref # Repart de la DERNIÈRE étape déjà enregistrée (quelle qu'elle soit) : à partir d'ici, chaque étape est chaînée séquentiellement à la précédente, pas toutes à la même référence d'origine
+      for (nm_gate in names(p$gates_history)) { # Parcourt les gates de débris DANS L'ORDRE DE CRÉATION (l'ordre des noms dans la liste), pour respecter l'ordre réel d'application successive
         infos <- p$gates_history[[nm_gate]][[nom]]
         if (!is.null(infos)) {
-          etapes[[nm_gate]] <- list(n = infos$n_apres, ref = infos$n_avant)
+          etapes[[nm_gate]] <- list(n = infos$n_apres, ref = infos$n_avant) # n_avant/n_apres déjà mémorisés lors de la création du gate (voir appliquer_gate_nomme() dans pipeline_cytometrie.R) : évite de devoir relire le flowFrame juste pour compter les lignes
           ref_gate <- infos$n_apres
         }
       }
@@ -1736,20 +1783,24 @@ pretraitement_server <- function(id, pipeline, pipeline_version) {
       }
       if (!is.null(p$post_doublets_SSC[[nom]])) {
         n <- nrow(flowCore::exprs(p$post_doublets_SSC[[nom]]))
-        etapes[["Doublets SSC"]] <- list(n = n, ref = ref_gate)
+        etapes[["Doublets SSC"]] <- list(n = n, ref = ref_gate) # Chaîné après FSC (pas après les débris directement) : SSC s'applique sur le résultat déjà filtré par FSC quand les deux sont utilisés
         ref_gate <- n
       }
       
       # Viabilité, chaînée à la suite des doublets/débris
       if (!is.null(p$post_viabilite[[nom]])) {
         n <- nrow(flowCore::exprs(p$post_viabilite[[nom]]))
-        etapes[["Viabilité"]] <- list(n = n, ref = ref_gate)
+        etapes[["Viabilité"]] <- list(n = n, ref = ref_gate) # ref_gate pointe ici vers la DERNIÈRE étape de doublets/débris réellement effectuée, quelle qu'elle soit (FSC seul, SSC seul, les deux, ou aucun)
         ref_gate <- n
       }
       
       etapes
     }
     
+    # Transforme la liste d'étapes (construire_recap()) en affichage HTML : une
+    # ligne par étape, avec effectif et pourcentage de conservation par rapport
+    # à l'étape précédente, coloré selon le même code couleur d'alerte que le
+    # reste de l'application (vert ≥90%, orange ≥70%, rouge <70%).
     rendre_recap <- function(etapes, nom) {
       if (length(etapes) == 0) {
         return(div(class = "alert alert-warning", style = "font-size:12px; padding:8px;",

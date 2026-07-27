@@ -48,7 +48,7 @@ compensation_ui <- function(id) {
                  wellPanel(
                    h4("Choix des paramètres", style = "margin-top:0;"),
                    numericInput(ns("cofacteur"), "Cofacteur Arcsinh",
-                                value = 600, min = 1, step = 50),
+                                value = 400, min = 1, step = 50),
                    hr(),
                    uiOutput(ns("ui_trans_file")),
                    uiOutput(ns("ui_trans_cx")),
@@ -433,11 +433,11 @@ compensation_server <- function(id, pipeline, pipeline_version) {
     output$ui_trans_file <- renderUI({
       p <- carrot_obj()
       if (a_des_controles(p)) {
-        choix <- names(p$tubes_monomarques)
+        choix <- names(p$tubes_monomarques) # Priorité aux tubes contrôles : c'est sur eux que la transformation sera visualisée en premier lieu (avant application à toute la cohorte)
         label <- "Tube à visualiser :"
       } else {
         req(length(p$echantillons) > 0)
-        choix <- names(p$echantillons)
+        choix <- names(p$echantillons) # Pas de contrôles : on visualise directement sur les échantillons biologiques
         label <- "Échantillon à visualiser :"
       }
       selectInput(ns("trans_file_sel"), label, choices = choix)
@@ -445,7 +445,7 @@ compensation_server <- function(id, pipeline, pipeline_version) {
     
     output$ui_trans_cx <- renderUI({
       p <- carrot_obj()
-      choices <- get_canaux_filtres(p)
+      choices <- get_canaux_filtres(p) # utils.R : tous les canaux de fluorescence (exclut FSC/SSC/Time)
       req(length(choices) > 0)
       selectInput(ns("trans_cx"), "Axe X :", choices = choices)
     })
@@ -455,18 +455,21 @@ compensation_server <- function(id, pipeline, pipeline_version) {
       choices <- get_canaux_filtres(p)
       req(length(choices) > 0)
       selectInput(ns("trans_cy"), "Axe Y :", choices = choices,
-                  selected = choices[min(2, length(choices))])
+                  selected = choices[min(2, length(choices))]) # Deuxième canal disponible par défaut (différent de l'axe X), sécurisé par min() si un seul canal existe
     })
     
+    # Applique la transformation Arcsinh à TOUTE la cohorte (contrôles ET
+    # échantillons) en une seule fois, avec le cofacteur choisi.
     observeEvent(input$btn_apply_trans, {
       req(input$cofacteur)
       p <- carrot_obj()
       withProgress(message = "Transformation en cours...", value = 0.5, {
-        p$transformer_fcs(cofacteur = input$cofacteur)
+        p$transformer_fcs(cofacteur = input$cofacteur) # Peuple p$monomarques_trans et p$trans_list (liste de transformation réutilisable ensuite sur les échantillons)
         trans_done(trans_done() + 1L)
       })
     })
     
+    # Indicateur simple : la transformation a-t-elle déjà été appliquée au moins une fois ?
     output$ui_trans_status <- renderUI({
       trans_done()
       p <- pipeline()
@@ -479,6 +482,11 @@ compensation_server <- function(id, pipeline, pipeline_version) {
       }
     })
     
+    # Aperçu de densité (biplot canal X vs canal Y) sur les données transformées,
+    # pour aider à choisir un cofacteur qui sépare bien les populations avant de
+    # passer au gating. Rendu en base R (raster::rasterFromXYZ + plot()), comme
+    # référence stylistique reprise ensuite dans TOUTE l'application pour les
+    # figures de densité statiques (voir calculer_densite_raster() dans utils.R).
     output$plot_transformation <- renderPlot({
       trans_done()
       req(input$trans_file_sel, input$trans_cx, input$trans_cy)
@@ -487,9 +495,9 @@ compensation_server <- function(id, pipeline, pipeline_version) {
       
       # récupération du FCS transformé
       fcs_t <- if (!is.null(p$monomarques_trans) && input$trans_file_sel %in% names(p$monomarques_trans)) {
-        p$monomarques_trans[[input$trans_file_sel]]
+        p$monomarques_trans[[input$trans_file_sel]] # Cas contrôle : déjà transformé et stocké lors de transformer_fcs()
       } else if (!is.null(p$trans_list) && input$trans_file_sel %in% names(p$echantillons)) {
-        flowCore::transform(p$echantillons[[input$trans_file_sel]], p$trans_list)
+        flowCore::transform(p$echantillons[[input$trans_file_sel]], p$trans_list) # Cas échantillon : transformé à la volée avec la même trans_list (pas stocké en permanence, pour éviter de dupliquer toute la cohorte transformée en mémoire)
       } else {
         NULL
       }
@@ -531,10 +539,10 @@ compensation_server <- function(id, pipeline, pipeline_version) {
         )
       
       # création du raster
-      r <- raster::rasterFromXYZ(df_binned[, c("x", "y", "density")])
+      r <- raster::rasterFromXYZ(df_binned[, c("x", "y", "density")]) # Convertit la grille déjà binée en objet raster, uniquement pour bénéficier de son rendu plot() natif (rapide, pas de dépendance à ggplot2 ici)
       
       # ---- PALETTE CARROT ----
-      cols <- c("darkblue", "blue", "cyan", "greenyellow", "yellow", "darkorange", "red")
+      cols <- c("darkblue", "blue", "cyan", "greenyellow", "yellow", "darkorange", "red") # Même palette que PALETTE_DENSITE (utils.R), dupliquée ici volontairement (ce plot est en base R, pas en ggplot2/plotly, donc n'importe pas directement la constante partagée)
       
       # affichage instantané
       plot(
@@ -547,53 +555,68 @@ compensation_server <- function(id, pipeline, pipeline_version) {
     })
     
     
-    # ========================================================================
-    # SECTION 2 — GATING INTERACTIF
-    # ========================================================================
-    
     # ════════════════════════════════════════════════════════════════════════
     # SECTION 2 — GATING INTERACTIF (VERSION SHAPES DÉPLAÇABLES)
     # ════════════════════════════════════════════════════════════════════════
+    # Gating des tubes monomarqués : définit, pour chaque canal, les bornes des
+    # populations négative et positive (par glisser-déposer sur le graphique
+    # interactif), utilisées ensuite pour calculer la matrice de spillover
+    # (self$calculer_spillover(), déclenché une fois tous les gates validés).
     
     # ── Bornes réactives (source de vérité) ───────────────────────────────────
+    # Valeurs par défaut génériques ; réellement utilisées seulement tant que
+    # l'utilisateur n'a pas encore ajusté le canal en cours (voir la synchronisation
+    # avec les numericInput ci-dessous, via set_bornes()).
     rv_neg_min <- reactiveVal(0)
     rv_neg_max <- reactiveVal(2)
     rv_pos_min <- reactiveVal(4)
     rv_pos_max <- reactiveVal(8)
     
     # ── Gates validés ─────────────────────────────────────────────────────────
-    gates_valides <- reactiveVal(list())
+    gates_valides <- reactiveVal(list()) # nom_canal -> bornes validées (liste), alimentée par btn_apply_gate
     
-    # Flag anti-boucle pour updateNumericInput
+    # Flag anti-boucle pour updateNumericInput : évite qu'une mise à jour
+    # programmatique des champs numériques (via set_bornes()) ne redéclenche
+    # elle-même un observeEvent sur ces mêmes champs, qui rappellerait set_bornes()
+    # indéfiniment.
     .prog_update <- reactiveVal(FALSE)
     
     # ── Helpers réactifs ──────────────────────────────────────────────────────
     
+    # La transformation a-t-elle été appliquée ? (dépend de trans_done() ET
+    # pipeline_version(), pour aussi réagir à un changement de pipeline externe)
     trans_disponibles <- reactive({
       trans_done(); pipeline_version()
       p <- pipeline()
       !is.null(p$monomarques_trans) && length(p$monomarques_trans) > 0
     })
     
+    # Liste des canaux ayant un tube monomarqué associé (renseigné à l'import),
+    # seuls candidats valables pour le gating de compensation.
     canaux_monomarques <- reactive({
       pipeline_version()
       p <- pipeline()
       if (is.null(p$chemins_monomarques)) return(character(0))
       df <- p$chemins_monomarques
-      cx <- df$canal[df$type == "Monomarque"]
-      cx[!is.na(cx) & nchar(trimws(cx)) > 0]
+      cx <- df$canal[df$type == "Monomarque"] # Exclut le tube Unstained (pas de canal associé, il sert de référence négative commune, pas de gate propre)
+      cx[!is.na(cx) & nchar(trimws(cx)) > 0] # Écarte les lignes où le canal n'a pas été renseigné à l'import
     })
     
+    # Un tube Unstained a-t-il été fourni ? Conditionne l'option "utiliser
+    # l'Unstained comme référence négative" (plutôt que le tube monomarqué
+    # lui-même, moins fiable pour estimer la population négative).
     has_unstained <- reactive({
       trans_done(); pipeline_version()
       "TUBE_UNSTAINED" %in% names(pipeline()$monomarques_trans)
     })
     
     utiliser_unstained_rv <- reactive({
-      if (has_unstained()) isTRUE(input$use_unstained) else FALSE
+      if (has_unstained()) isTRUE(input$use_unstained) else FALSE # Ignore le choix utilisateur si aucun Unstained n'est disponible (évite une incohérence si l'option était cochée avant qu'un Unstained ne soit retiré)
     })
     
-    # Synchronisation rv + numericInput
+    # Met à jour à la fois les reactiveVal (source de vérité pour le graphique)
+    # et les numericInput visibles (pour rester synchronisés visuellement),
+    # en s'entourant du flag .prog_update pour éviter toute boucle réactive.
     set_bornes <- function(n1, n2, p1, p2) {
       .prog_update(TRUE)
       rv_neg_min(n1); rv_neg_max(n2)
@@ -619,9 +642,17 @@ compensation_server <- function(id, pipeline, pipeline_version) {
         if (cx %in% names(gv)) paste0("✔ ", cx) else cx)
       names(labels) <- canaux
       
+      # Préserve le canal actuellement sélectionné s'il est toujours valide,
+      # plutôt que de revenir systématiquement au premier canal à chaque
+      # reconstruction de ce sélecteur (par ex. juste après avoir validé un
+      # gate) — sans quoi l'utilisateur se retrouverait renvoyé sur le
+      # premier canal après chaque nouveau gate défini.
+      actuel <- input$gate_canal_sel
+      sel <- if (!is.null(actuel) && actuel %in% canaux) actuel else canaux[1]
+      
       selectInput(ns("gate_canal_sel"),
                   label = tagList(icon("tag"), " Canal :"),
-                  choices = setNames(canaux, labels))
+                  choices = setNames(canaux, labels), selected = sel)
     })
     
     output$ui_gate_unstained_info <- renderUI({
@@ -639,7 +670,7 @@ compensation_server <- function(id, pipeline, pipeline_version) {
       checkboxInput(ns("use_unstained"),
                     label = tagList(icon("vial"),
                                     " Utiliser l'Unstained comme référence négative"),
-                    value = TRUE)
+                    value = TRUE) # Cochée par défaut dès qu'un Unstained existe : c'est la référence négative recommandée (plus fiable que le tube monomarqué lui-même, qui contient un mélange positif/négatif)
     })
     
     output$ui_gate_plot_placeholder <- renderUI({
@@ -650,6 +681,8 @@ compensation_server <- function(id, pipeline, pipeline_version) {
     })
     
     # ── Changement de canal → recharge bornes sauvegardées ───────────────────
+    # Si ce canal a déjà un gate validé, précharge ses bornes (permet de revenir
+    # ajuster un canal déjà traité) ; sinon, repart des valeurs par défaut.
     observeEvent(input$gate_canal_sel, {
       req(trans_disponibles())
       cx <- input$gate_canal_sel
@@ -666,6 +699,9 @@ compensation_server <- function(id, pipeline, pipeline_version) {
     }, ignoreInit = TRUE)
     
     # ── Saisie clavier → rv ───────────────────────────────────────────────────
+    # Répercute une saisie manuelle dans les champs numériques vers les
+    # reactiveVal (source de vérité pour le graphique) — sauf si la mise à jour
+    # vient elle-même de set_bornes() (flag .prog_update), pour éviter la boucle.
     observeEvent(input$gate_neg_min, {
       if (.prog_update()) return()
       rv_neg_min(input$gate_neg_min)
@@ -690,6 +726,11 @@ compensation_server <- function(id, pipeline, pipeline_version) {
     # GRAPHIQUE PLOTLY — SHAPES DÉPLAÇABLES
     # ════════════════════════════════════════════════════════════════════════
     
+    # Affiche les 2 courbes de densité 1D (négatif/positif) superposées, avec 4
+    # lignes verticales déplaçables (shapes plotly) représentant les 2 bornes de
+    # chaque population. L'utilisateur ajuste les bornes soit en glissant ces
+    # lignes à la souris, soit via les numericInput (les deux restent synchronisés
+    # dans les deux sens, voir les observeEvent ci-dessus/ci-dessous).
     output$plot_gate_interactive <- renderPlotly({
       req(trans_disponibles(), input$gate_canal_sel)
       trans_done()
@@ -703,7 +744,7 @@ compensation_server <- function(id, pipeline, pipeline_version) {
       canal <- input$gate_canal_sel
       
       use_u    <- utiliser_unstained_rv()
-      tube_neg <- if (use_u && has_unstained()) "TUBE_UNSTAINED" else canal
+      tube_neg <- if (use_u && has_unstained()) "TUBE_UNSTAINED" else canal # Référence négative : Unstained si disponible et coché, sinon le tube monomarqué lui-même sert de sa propre référence négative
       
       fcs_pos  <- p$monomarques_trans[[canal]]
       fcs_neg  <- p$monomarques_trans[[tube_neg]]
@@ -711,12 +752,12 @@ compensation_server <- function(id, pipeline, pipeline_version) {
       vals_pos <- flowCore::exprs(fcs_pos)[, canal]
       vals_neg <- flowCore::exprs(fcs_neg)[, canal]
       
-      dens_pos <- density(vals_pos)
+      dens_pos <- density(vals_pos) # Estimation de densité par noyau (stats::density), pas le binning raster utilisé ailleurs : ici la figure est 1D (une seule variable), pas un biplot 2D
       dens_neg <- density(vals_neg)
-      y_max    <- max(c(dens_pos$y, dens_neg$y)) * 1.15
+      y_max    <- max(c(dens_pos$y, dens_neg$y)) * 1.15 # Non utilisé pour fixer les limites de l'axe Y (plotly les calcule automatiquement) — conservé pour référence/calculs futurs éventuels
       
       # SHAPES DÉPLAÇABLES — VERSION PRO
-      shapes <- list(
+      shapes <- list( # 4 lignes verticales : 2 bornes négatives (bleu) + 2 bornes positives (rouge). yref="paper" : la ligne s'étend sur toute la hauteur du graphique quelle que soit l'échelle Y des données
         list(type="line", x0=n_min, x1=n_min, y0=0, y1=1, yref="paper",
              line=list(color="#0077b6", width=3)),
         list(type="line", x0=n_max, x1=n_max, y0=0, y1=1, yref="paper",
@@ -735,32 +776,37 @@ compensation_server <- function(id, pipeline, pipeline_version) {
           shapes = shapes, # Vos shapes dynamiques
           dragmode = "pan"
         ) %>%
-        config(editable = TRUE)
+        config(editable = TRUE) # editable=TRUE rend TOUTES les shapes du graphique déplaçables à la souris (inclut shapePosition, voir doc plotly.js) — c'est ce qui permet de glisser les 4 lignes de bornes
       
       # OBLIGATOIRE : enregistrer l’événement
-      event_register(p, "plotly_relayout")
+      event_register(p, "plotly_relayout") # Second appel à event_register (redondant avec celui dans la chaîne ci-dessus) : conservé par prudence, sans effet néfaste
     })
     
     
     # ── Capture du déplacement des shapes ─────────────────────────────────────
+    # Chaque glissé d'une ligne verticale déclenche un événement plotly_relayout
+    # contenant les nouvelles coordonnées ("shapes[N].x0"/"x1") de la shape N
+    # déplacée. On identifie ici quelle ligne (0 à 3, dans l'ordre neg_min,
+    # neg_max, pos_min, pos_max défini dans la liste "shapes" ci-dessus) a
+    # bougé, et on répercute uniquement les valeurs qui ont réellement changé.
     observeEvent(event_data("plotly_relayout", source = ns("plot_gate_interactive")), {
       
       ev <- event_data("plotly_relayout", source = ns("plot_gate_interactive"))
       
-      print("Event reçu :")
+      print("Event reçu :") # NOTE : résidu de débogage (affiche chaque événement de glissé dans la console R) — sans impact sur le fonctionnement, mais à retirer si l'on veut une console de production silencieuse
       print(ev)
       
       req(ev)
       
       changed <- FALSE
       for (nm in names(ev)) {
-        if (grepl("^shapes\\[([0-9]+)\\]\\.x0$", nm)) {
+        if (grepl("^shapes\\[([0-9]+)\\]\\.x0$", nm)) { # Ne regarde que les clés "x0" (position de départ de la ligne) : pour une ligne verticale, x0 et x1 sont toujours identiques, donc x0 seul suffit à connaître la nouvelle position
           idx <- as.integer(gsub("^shapes\\[([0-9]+)\\]\\.x0$", "\\1", nm))
           new_val <- ev[[nm]]
           
           # Mise à jour des valeurs réactives selon l'index
-          switch(as.character(idx),
-                 "0" = if(!isTRUE(all.equal(rv_neg_min(), new_val))) { rv_neg_min(new_val); changed <<- TRUE },
+          switch(as.character(idx), # L'index correspond à la position dans la liste "shapes" définie dans plot_gate_interactive() : 0=neg_min, 1=neg_max, 2=pos_min, 3=pos_max
+                 "0" = if(!isTRUE(all.equal(rv_neg_min(), new_val))) { rv_neg_min(new_val); changed <<- TRUE }, # all.equal() plutôt que == : évite de déclencher une mise à jour pour un écart d'arrondi flottant négligeable
                  "1" = if(!isTRUE(all.equal(rv_neg_max(), new_val))) { rv_neg_max(new_val); changed <<- TRUE },
                  "2" = if(!isTRUE(all.equal(rv_pos_min(), new_val))) { rv_pos_min(new_val); changed <<- TRUE },
                  "3" = if(!isTRUE(all.equal(rv_pos_max(), new_val))) { rv_pos_max(new_val); changed <<- TRUE }
@@ -768,7 +814,7 @@ compensation_server <- function(id, pipeline, pipeline_version) {
         }
       }
       
-      if (changed) {
+      if (changed) { # Ne met à jour les numericInput que si au moins une valeur a réellement changé (évite des updateNumericInput inutiles à chaque relayout, même ceux sans rapport avec un glissé de ligne, ex: un simple zoom)
         updateNumericInput(session, "gate_neg_min", value = rv_neg_min())
         updateNumericInput(session, "gate_neg_max", value = rv_neg_max())
         updateNumericInput(session, "gate_pos_min", value = rv_pos_min())
@@ -781,6 +827,10 @@ compensation_server <- function(id, pipeline, pipeline_version) {
     # VALIDATION DU GATE
     # ════════════════════════════════════════════════════════════════════════
     
+    # Enregistre définitivement les bornes actuelles pour ce canal : calcule
+    # médianes/statistiques via p$definir_et_extraire() (utilisées ensuite pour
+    # le calcul de la matrice de spillover) et archive les bornes dans
+    # gates_valides() pour pouvoir les recharger si l'utilisateur revient sur ce canal.
     observeEvent(input$btn_apply_gate, {
       req(trans_disponibles(), input$gate_canal_sel)
       
@@ -803,8 +853,8 @@ compensation_server <- function(id, pipeline, pipeline_version) {
       withProgress(message = paste("Extraction gate :", canal), value = 0.5, {
         tryCatch({
           canaux_presents <- names(p$monomarques_trans)
-          canaux_fluo     <- canaux_presents[canaux_presents != "TUBE_UNSTAINED"]
-          if (is.null(p$canaux) || !canal %in% p$canaux) p$canaux <- canaux_fluo
+          canaux_fluo     <- canaux_presents[canaux_presents != "TUBE_UNSTAINED"] # Exclut l'Unstained de la liste des canaux de fluorescence à compenser (ce n'est pas un canal, c'est un tube de référence)
+          if (is.null(p$canaux) || !canal %in% p$canaux) p$canaux <- canaux_fluo # Initialise/complète p$canaux si besoin, pour que la matrice de spillover finale couvre bien tous les canaux disponibles
           
           p$definir_et_extraire(
             nom_canal               = canal,
@@ -814,7 +864,7 @@ compensation_server <- function(id, pipeline, pipeline_version) {
           )
           
           gv <- gates_valides()
-          gv[[canal]] <- list(neg = lim_n, pos = lim_p, use_unstained = use_u)
+          gv[[canal]] <- list(neg = lim_n, pos = lim_p, use_unstained = use_u) # Archive localement (pas encore dans le pipeline) pour permettre le rechargement lors d'un retour sur ce canal
           gates_valides(gv)
           
           showNotification(paste0("✔ Gate validé : ", canal),
@@ -872,12 +922,18 @@ compensation_server <- function(id, pipeline, pipeline_version) {
       }))
     })
     
-    # Boutons "Modifier"
+    # Boutons "Modifier" : un actionButton par canal (créé dynamiquement dans
+    # ui_gates_recap ci-dessus), chacun devant ramener le sélecteur de canal sur
+    # LE canal qui lui correspond. local() est indispensable ici : sans lui,
+    # tous les observeEvent créés dans cette boucle partageraient la même
+    # variable "cx" (celle de la dernière itération) au moment de leur
+    # déclenchement, un piège classique de la portée lexicale en R — chaque
+    # bouton ramènerait alors sur le dernier canal, peu importe lequel est cliqué.
     observe({
       canaux <- canaux_monomarques()
       for (cx in canaux) {
         local({
-          cl <- cx
+          cl <- cx # Copie locale, propre à cette itération, capturée par la fermeture de l'observeEvent ci-dessous
           observeEvent(input[[paste0("edit_gate_", make.names(cl))]], {
             updateSelectInput(session, "gate_canal_sel", selected = cl)
           }, ignoreInit = TRUE, ignoreNULL = TRUE)
@@ -885,7 +941,7 @@ compensation_server <- function(id, pipeline, pipeline_version) {
       }
     })
     
-    # Statut
+    # Statut : nombre de gates validés sur le total de canaux, avec message de félicitation si tous sont complets
     output$ui_gate_status_canal <- renderUI({
       gv      <- gates_valides()
       canaux  <- canaux_monomarques()
@@ -996,7 +1052,6 @@ compensation_server <- function(id, pipeline, pipeline_version) {
     })
     
     # ── Personnalisation dynamique de l'affichage (ordre des canaux + transposition) ──
-    # ── Personnalisation dynamique de l'affichage (ordre des canaux + transposition) ──
     ordre_canaux_rv <- reactiveVal(NULL)    # ordre courant d'affichage des canaux
     transpose_rv    <- reactiveVal(FALSE)   # inversion lignes / colonnes
     
@@ -1031,6 +1086,8 @@ compensation_server <- function(id, pipeline, pipeline_version) {
       canaux_reels <- rownames(p$S_matrix)
       
       # Sécurité : On s'assure qu'on ne traite pas un vecteur vide ou incomplet pendant un drag
+      # (le plugin drag_drop de selectize peut émettre des états intermédiaires
+      # incomplets pendant le geste de glissé, avant l'état final stabilisé)
       if (length(input$select_ordre_canaux) == length(canaux_reels) && 
           setequal(input$select_ordre_canaux, canaux_reels)) {
         ordre_canaux_rv(input$select_ordre_canaux)
@@ -1051,7 +1108,11 @@ compensation_server <- function(id, pipeline, pipeline_version) {
       transpose_rv(!transpose_rv())
     })
     
-    # Matrice réellement affichée à l'écran
+    # Matrice réellement affichée à l'écran : priorité à une matrice spécifique
+    # à cet échantillon si elle a été individuellement ajustée/enregistrée
+    # (p$S_matrices_par_echantillon), sinon repli sur la matrice générale de la
+    # cohorte (p$S_matrix) — puis application de l'ordre des canaux et de la
+    # transposition choisis par l'utilisateur, purement pour l'affichage.
     mat_affichee <- reactive({
       spillover_trigger()
       pipeline_version()
@@ -1094,29 +1155,32 @@ compensation_server <- function(id, pipeline, pipeline_version) {
           scrollCollapse = TRUE,
           paging = FALSE       # Désactive explicitement la pagination
         )
-      ) %>% formatStyle(
+      ) %>% formatStyle( # Code couleur d'alerte visuelle par cellule : vert (<5%, acceptable), jaune (5-10%), orange (10-20%), rouge (>20%, spillover important à vérifier)
         columns = colnames(mat_display),
         backgroundColor = styleInterval(c(5, 10, 20), c('#d1e7dd', '#fff3cd', '#f8d7da', '#e2c6c6'))
       )
     })
     
     # ── Export de la matrice affichée (PNG / PDF) ───────────────────────────
+    # Reconstruit la matrice sous forme de heatmap ggplot2 (mêmes seuils de
+    # couleur que le tableau DT ci-dessus), pour un export imprimable/partageable
+    # indépendant de l'interface Shiny.
     generer_plot_matrice <- function(mat, titre = "Matrice de Spillover (%)") {
-      df <- as.data.frame(as.table(mat))
+      df <- as.data.frame(as.table(mat)) # as.table() puis as.data.frame() : transforme la matrice en format "long" (une ligne par cellule), format attendu par ggplot2::geom_tile()
       colnames(df) <- c("Ligne", "Colonne", "Valeur")
-      df$Ligne     <- factor(df$Ligne,   levels = rev(rownames(mat)))
+      df$Ligne     <- factor(df$Ligne,   levels = rev(rownames(mat))) # rev() : préserve l'ordre visuel attendu d'une matrice (première ligne en haut), car ggplot2 trace les niveaux de facteur de bas en haut par défaut sur l'axe Y
       df$Colonne   <- factor(df$Colonne, levels = colnames(mat))
       df$categorie <- cut(df$Valeur, breaks = c(-Inf, 5, 10, 20, Inf),
-                          labels = c('#d1e7dd', '#fff3cd', '#f8d7da', '#e2c6c6'))
+                          labels = c('#d1e7dd', '#fff3cd', '#f8d7da', '#e2c6c6')) # Mêmes seuils/couleurs que le tableau DT interactif (styleInterval ci-dessus), dupliqués ici volontairement (ggplot2 et DT n'ont pas de mécanisme de style partagé)
       
       ggplot(df, aes(x = Colonne, y = Ligne)) +
         geom_tile(aes(fill = categorie), color = "white") +
-        scale_fill_identity() +
+        scale_fill_identity() + # Les couleurs sont déjà des codes hexadécimaux littéraux dans "categorie" : scale_fill_identity() les utilise telles quelles, sans réinterprétation par une échelle de couleur ggplot2
         geom_text(aes(label = sprintf("%.2f", Valeur)), size = 3.2) +
         labs(title = titre, x = "Canal secondaire (colonne)", y = "Canal principal (ligne)") +
         theme_minimal(base_size = 12) +
         theme(
-          axis.text.x = element_text(angle = 45, hjust = 1),
+          axis.text.x = element_text(angle = 45, hjust = 1), # Incline les noms de canaux (souvent longs) pour éviter qu'ils ne se chevauchent sur l'axe X
           panel.grid  = element_blank(),
           plot.title  = element_text(face = "bold")
         )
@@ -1125,7 +1189,7 @@ compensation_server <- function(id, pipeline, pipeline_version) {
     output$dl_matrix_png <- downloadHandler(
       filename = function() {
         paste0("matrice_spillover_", gsub("[^a-zA-Z0-9_]", "_", input$sel_echantillon), "_",
-               format(Sys.time(), "%Y%m%d_%H%M%S"), ".png")
+               format(Sys.time(), "%Y%m%d_%H%M%S"), ".png") # Horodatage dans le nom de fichier : évite d'écraser un export précédent si l'utilisateur télécharge plusieurs versions successives de la matrice
       },
       content = function(file) {
         ggsave(file, plot = generer_plot_matrice(mat_affichee()), width = 8, height = 6, dpi = 300, bg = "white")
@@ -1151,11 +1215,15 @@ compensation_server <- function(id, pipeline, pipeline_version) {
     })
     
     # ── Historique undo/redo par échantillon ────────────────────────────────
-    # Chaque entrée est une copie de la matrice (en fraction, pas en %)
+    # Chaque entrée est une copie de la matrice (en fraction, pas en %), avec le
+    # nom de l'échantillon concerné (une même pile sert à tous les échantillons,
+    # distingués par ce champ) :
     historique      <- reactiveVal(list())   # pile des états passés
     historique_redo <- reactiveVal(list())   # pile des états annulés (pour redo)
     
-    # Capture l'état courant de la matrice de l'échantillon sélectionné
+    # Capture l'état courant de la matrice de l'échantillon sélectionné : sa
+    # matrice spécifique si elle a déjà été individuellement modifiée, sinon la
+    # matrice générale de la cohorte (voir aussi mat_affichee() plus haut, même logique).
     capturer_etat <- function(p, nom_ech) {
       mat <- if (!is.null(p$S_matrices_par_echantillon[[nom_ech]])) {
         p$S_matrices_par_echantillon[[nom_ech]]
@@ -1173,6 +1241,15 @@ compensation_server <- function(id, pipeline, pipeline_version) {
       ordre_actuel <- ordre_canaux_rv()
       p <- pipeline()
       req(!is.null(p$S_matrix), input$sel_echantillon)
+      
+      # Sauvegarde l'état AVANT modification dans la pile d'historique, pour que
+      # le bouton "Annuler" puisse effectivement y revenir. Sans cette ligne, la
+      # pile d'historique ne se remplissait jamais lors d'une édition directe
+      # (elle n'était alimentée que côté "Rétablir" après un premier "Annuler"),
+      # rendant le bouton "Annuler" inopérant sur la toute première modification.
+      etat_avant_edit <- capturer_etat(p, input$sel_echantillon)
+      historique(c(historique(), list(list(echantillon = input$sel_echantillon, matrice = etat_avant_edit))))
+      historique_redo(list()) # Une nouvelle modification invalide la pile de "rétablir" existante (comportement standard d'un historique undo/redo : on ne peut pas "rétablir" une branche différente de l'historique)
       
       # Identifier les canaux modifiés grâce au nom (et non à l'index brut)
       # info$row et info$col sont basés sur les lignes/colonnes affichées
@@ -1202,7 +1279,8 @@ compensation_server <- function(id, pipeline, pipeline_version) {
       spillover_trigger(spillover_trigger() + 1)
     })
     
-    # Annuler (undo)
+    # Annuler (undo) : dépile le dernier état enregistré, sauvegarde l'état
+    # actuel dans la pile "redo" pour pouvoir y revenir, puis restaure la matrice.
     observeEvent(input$btn_undo_spillover, {
       hist <- historique()
       if (length(hist) == 0) {
@@ -1227,7 +1305,7 @@ compensation_server <- function(id, pipeline, pipeline_version) {
       showNotification("✔ Modification annulée.", type = "message")
     })
     
-    # Rétablir (redo)
+    # Rétablir (redo) : symétrique de "Annuler" ci-dessus
     observeEvent(input$btn_redo_spillover, {
       redo <- historique_redo()
       if (length(redo) == 0) {
@@ -1251,7 +1329,10 @@ compensation_server <- function(id, pipeline, pipeline_version) {
       showNotification("✔ Modification rétablie.", type = "message")
     })
     
-    # Bouton de validation finale
+    # Bouton de validation finale — actuellement purement informatif : la
+    # matrice est déjà appliquée en temps réel dans le pipeline à chaque
+    # modification (voir dt_spillover_matrix_cell_edit ci-dessus), ce bouton ne
+    # déclenche donc aucune action supplémentaire sur les données elles-mêmes.
     observeEvent(input$btn_save_spillover, {
       showModal(modalDialog(
         title = "Succès",
@@ -1369,7 +1450,7 @@ compensation_server <- function(id, pipeline, pipeline_version) {
       canaux_fluo <- all_cols[!grepl("FSC|SSC|Time", all_cols, ignore.case = TRUE)]
       req(length(canaux_fluo) > 0)
       
-      choices_list <- setNames(canaux_fluo, sapply(canaux_fluo, function(c) p$get_label(fcs, c)))
+      choices_list <- setNames(canaux_fluo, sapply(canaux_fluo, function(c) p$obtenir_label(fcs, c)))
       
       updateSelectInput(session, "canal_x", choices = choices_list)
       updateSelectInput(session, "canal_y", choices = choices_list,
@@ -1500,6 +1581,12 @@ compensation_server <- function(id, pipeline, pipeline_version) {
     })
     
     # 5. Observateur : branche les renderPlot sur les outputs créés dynamiquement
+    # (mode "Vue d'ensemble" : autant d'output$biplot_N que de paires de canaux,
+    # créés à la volée puisque leur nombre dépend du panel de l'échantillon —
+    # local() est ici aussi indispensable, pour la même raison que dans la
+    # boucle des boutons "Modifier" de gates plus haut : sans lui, tous les
+    # renderPlot créés dans cette boucle partageraient la même variable "i" de
+    # la dernière itération.)
     observe({
       res <- res_biplots()
       req(!is.null(res))
@@ -1539,6 +1626,9 @@ compensation_server <- function(id, pipeline, pipeline_version) {
     # SECTION EXPORT
     # ════════════════════════════════════════════════════════════════════════
     
+    # Reconstruit la liste des échantillons exportables à chaque nouvelle
+    # compensation, tout en préservant la sélection actuelle de l'utilisateur
+    # si elle reste valide (sinon, tout re-sélectionner par défaut).
     observeEvent(comp_trigger(), {
       p <- pipeline()
       noms <- names(p$echantillons_traites)
@@ -1585,6 +1675,11 @@ compensation_server <- function(id, pipeline, pipeline_version) {
                      style = "width:100%; font-weight:bold;")
     })
     
+    # Un seul fichier sélectionné -> export .fcs direct ; plusieurs -> archive
+    # .zip. Dans les deux cas, la matrice de spillover (spécifique à
+    # l'échantillon si elle existe, sinon la matrice générale) est injectée dans
+    # les métadonnées du FCS exporté ($SPILLOVER), pour que le fichier reste
+    # exploitable et auto-documenté dans un autre logiciel de cytométrie.
     output$dl_fcs <- downloadHandler(
       filename = function() {
         if (length(input$sel_export_fcs) == 1) {
@@ -1611,7 +1706,7 @@ compensation_server <- function(id, pipeline, pipeline_version) {
           # Export multiple → ZIP
           tmp_dir <- tempfile()
           dir.create(tmp_dir)
-          on.exit(unlink(tmp_dir, recursive = TRUE))
+          on.exit(unlink(tmp_dir, recursive = TRUE)) # Nettoie le dossier temporaire une fois le téléchargement généré, qu'il y ait eu erreur ou non
           
           withProgress(message = "Préparation des fichiers FCS...", value = 0, {
             for (i in seq_along(noms_sel)) {
@@ -1634,13 +1729,18 @@ compensation_server <- function(id, pipeline, pipeline_version) {
           })
           
           fichiers <- list.files(tmp_dir, full.names = TRUE)
-          zip::zip(zipfile = file, files = fichiers, mode = "cherry-pick")
+          zip::zip(zipfile = file, files = fichiers, mode = "cherry-pick") # mode="cherry-pick" : n'archive que les fichiers listés explicitement (pas leur chemin de dossier parent), pour un zip plat contenant directement les .fcs
         }
       },
       contentType = "application/octet-stream"
     )
     
     # ── Bouton téléchargement RDS ────────────────────────────────────────────
+    # Session RDS : sérialise tous les paramètres et résultats de la compensation
+    # (transformation, matrice(s) de spillover, gates, figures de contrôle),
+    # pour pouvoir reprendre le travail plus tard ou l'archiver indépendamment
+    # de l'application (voir aussi les exports RDS équivalents des autres
+    # modules : prétraitement, QC).
     output$ui_download_rds <- renderUI({
       p <- pipeline()
       # On désactive si rien n'a encore été fait
@@ -1659,8 +1759,8 @@ compensation_server <- function(id, pipeline, pipeline_version) {
     output$dl_rds <- downloadHandler(
       filename = function() {
         nm <- trimws(input$rds_filename)
-        if (nchar(nm) == 0) nm <- "Compensation_Session_Complete.rds"
-        if (!grepl("\\.rds$", nm, ignore.case = TRUE)) nm <- paste0(nm, ".rds")
+        if (nchar(nm) == 0) nm <- "Compensation_Session_Complete.rds" # Repli si l'utilisateur vide le champ de nom de fichier
+        if (!grepl("\\.rds$", nm, ignore.case = TRUE)) nm <- paste0(nm, ".rds") # Garantit l'extension .rds même si l'utilisateur ne l'a pas tapée explicitement
         nm
       },
       content = function(file) {
