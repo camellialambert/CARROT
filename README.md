@@ -24,10 +24,6 @@ docker run -dp 80:3838 --rm camellialambert/carrot
 * Accédez à l'application via votre navigateur habituel, à l'adresse **http://localhost/**
 * N'oubliez pas d'arrêter le conteneur une fois terminé (`docker stop <ID_du_conteneur>`, trouvable via `docker ps`)
 
-```bash
-docker run -dp 80:3838 --rm -v /chemin/vers/vos/donnees:/data camellialambert/carrot
-```
-
 ---
 
 ## Fonctionnalités
