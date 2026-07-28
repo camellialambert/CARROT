@@ -37,7 +37,7 @@ docker run -dp 80:3838 --rm camellialambert/carrot
 | **Prétraitement** | Retrait des débris, doublets et cellules mortes, gating interactif par échantillon |
 | **Analyses avancées** | Gating hiérarchique, projections UMAP / t-SNE / PCA, clustering non supervisé ([FlowSOM](https://github.com/saeyslab/FlowSOM)), comparaisons statistiques entre groupes |
 
-Guide d'utilisation de l'interface dans "guide_utilisateur.pdf"
+Guide d'utilisation de l'interface dans **"guide_utilisateur.pdf"**
 
 ---
 
@@ -47,7 +47,7 @@ R / Shiny · flowCore · AutoSpectral · PeacoQC · flowAI · FlowSOM · uwot ·
 
 ---
 
-## Auteure
+## Auteurs
 
 Camellia Lambert — stage M2 Bioinformatique - Ingénierie de Plateformes (Université Paris Cité), Institut Cochin
 Encadrée par Benjamin Saintpierre (plateforme BIOINFORMAT'IC) et Muriel Andrieu (plateforme CYBIO)
