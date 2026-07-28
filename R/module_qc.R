@@ -100,7 +100,7 @@ qc_ui <- function(id) {
                      status = "warning", solidHeader = TRUE,
                      plotOutput(ns("plot_peacoqc"), width = "100%", height = "550px") # Figure "maison" (densité raster + points exclus en rouge), générée par p$visualiser_peacoqc() — distincte du rapport natif ci-dessous
                  ),
-                 box(title = tagList(icon("image"), " Rapport diagnostique natif PeacoQC"), width = NULL,
+                 box(title = tagList(icon("image"), " Rapport PeacoQC"), width = NULL,
                      status = "warning", solidHeader = TRUE, collapsible = TRUE, collapsed = FALSE,
                      uiOutput(ns("ui_plot_peacoqc_natif")) # Image PNG générée DIRECTEMENT par le package PeacoQC lui-même (une figure par canal, montrant les bins retirés) — complémentaire de la figure "maison" ci-dessus
                  )

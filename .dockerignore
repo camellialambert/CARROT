@@ -1,0 +1,10 @@
+# Ne pas copier ces éléments dans l'image Docker (inutiles, volumineux, ou sensibles)
+.git
+.gitignore
+.Rproj.user
+.Rhistory
+.RData
+*.fcs
+*.Rproj
+README.md
+data/

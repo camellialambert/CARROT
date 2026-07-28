@@ -5,9 +5,9 @@ library(tools)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # UI — Module d'import : point d'entrée de toute l'application. 3 onglets :
-#   1. Importation           : type de cytomètre, fichiers contrôles/échantillons
+#   1. Importation : type de cytomètre, fichiers contrôles/échantillons
 #   2. Configuration Marqueurs : annotation canal -> marqueur biologique
-#   3. Groupes d'Échantillons  : assignation échantillon -> groupe/condition
+#   3. Groupes d'Échantillons : assignation échantillon -> groupe/condition
 #      (lue ensuite par le module Analyses pour les comparaisons statistiques)
 # ══════════════════════════════════════════════════════════════════════════════
 
