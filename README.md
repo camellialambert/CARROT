@@ -1,28 +1,28 @@
 # CARROT
 **C**ytometry **A**nalysis and **R**eporting with **R**-based **O**pen-source **T**ools
 
-CARROT est un pipeline complet d'analyse de cytométrie en flux. Il permet de traiter des données de cytométrie conventionnelle et spectrale, les étapes pouvant être réalisées sont :  import, compensation, unmixing spectral, contrôle qualité (PeacoQC, flowAI), prétraitement (retrait des débris, doublets et cellules mortes) et analyses avancées (gating, PCA, UMAP, tSNE).
-On y retrouve une combinaison de méthodes automatiques et de méthodes manuelles.
-L'outil est accompagné d'une interface Shiny pour une utilisation plus simple.
+CARROT is a complete flow cytometry analysis pipeline. It supports both conventional and spectral cytometry data, and includes the following steps: import, compensation, spectral unmixing, quality control (PeacoQC, flowAI), preprocessing (removal of debris, doublets, and dead cells), and advanced analyses (gating, PCA, UMAP, t‑SNE).  
+It combines automated methods with manual, user‑driven procedures.
+The tool comes with a Shiny interface for easier use.
 
-CARROT a été développé à l'**Institut Cochin** (collaboration entre les plateformes BIOINFORMAT'IC et CYBIO), avec le soutien de l'**Association Française de Cytométrie (AFC)**.
+CARROT was developed at Institut Cochin (a collaboration between the BIOINFORMAT’IC and CYBIO platforms), with support from the **Association Française de Cytométrie (AFC)**.
 
 ---
 
 ## Installation
 
-Installation possible uniquement via Docker pour le moment.
+Installation is currently only available via Docker.
 
-* Installez Docker : https://docs.docker.com/get-docker/
-* Puis lancez (sous Windows, utilisez l'invite de commandes) :
+* Install Docker: https://docs.docker.com/get-docker/
+* Then run (on Windows, use the command prompt):
 
 ```bash
 docker pull camellialambert/carrot
 docker run -dp 80:3838 --rm camellialambert/carrot
 ```
 
-* Accédez à l'application via votre navigateur habituel, à l'adresse **http://localhost/**
-* N'oubliez pas d'arrêter le conteneur une fois terminé (`docker stop <ID_du_conteneur>`, trouvable via `docker ps`)
+* Access the application through your usual web browser at **http://localhost/**
+* Don’t forget to stop the container when finished (docker stop <container_ID>, which you can find via docker ps)
 
 ---
 
@@ -30,14 +30,14 @@ docker run -dp 80:3838 --rm camellialambert/carrot
 
 | Étape | Description |
 |---|---|
-| **Importation** | Chargement de fichiers FCS (cytomètre conventionnel ou spectral), annotation des marqueurs, gestion des groupes/conditions |
-| **Compensation** | Gating manuel sur tubes monomarqués, calcul et édition interactive de la matrice de spillover |
-| **Unmixing** | Démixage spectral via [AutoSpectral](https://github.com/DrCytometer/AutoSpectral) |
-| **Contrôle qualité** | Détection des anomalies d'acquisition avec [PeacoQC](https://github.com/saeyslab/PeacoQC) et [flowAI](https://bioconductor.org/packages/flowAI/) |
-| **Prétraitement** | Retrait des débris, doublets et cellules mortes, gating interactif par échantillon |
-| **Analyses avancées** | Gating hiérarchique, projections UMAP / t-SNE / PCA, clustering non supervisé ([FlowSOM](https://github.com/saeyslab/FlowSOM)), comparaisons statistiques entre groupes |
+| **Import** | Loading FCS files (conventional or spectral cytometers), marker annotation, management of groups/conditions |
+| **Compensation** | Manual gating on single‑stained tubes, computation and interactive editing of the spillover matrix |
+| **Unmixing** | Spectral demixing using [AutoSpectral](https://github.com/DrCytometer/AutoSpectral) |
+| **Quality control** | Detection of acquisition anomalies with [PeacoQC](https://github.com/saeyslab/PeacoQC) and [flowAI](https://bioconductor.org/packages/flowAI/) |
+| **Preprocessing** | Removal of debris, doublets, and dead cells; interactive gating per sample |
+| **Analyses avancées** | Hierarchical gating, UMAP / t‑SNE / PCA projections, unsupervised clustering ([FlowSOM](https://github.com/saeyslab/FlowSOM)), statistical comparisons between groups |
 
-Guide d'utilisation de l'interface dans **"guide_utilisateur.pdf"**
+A user guide for the interface is available in **guide_utilisateur.pdf**.
 
 ---
 
@@ -47,7 +47,7 @@ R / Shiny · flowCore · AutoSpectral · PeacoQC · flowAI · FlowSOM · uwot ·
 
 ---
 
-## Auteurs
+## Authors
 
-Camellia Lambert — stage M2 Bioinformatique - Ingénierie de Plateformes (Université Paris Cité), Institut Cochin
-Encadrée par Benjamin Saintpierre (plateforme BIOINFORMAT'IC) et Muriel Andrieu (plateforme CYBIO)
+Camellia Lambert — Master’s internship in Bioinformatics – Platforms Engineering (Université Paris Cité), Institut Cochin
+Supervised by Benjamin Saintpierre (BIOINFORMAT’IC platform) and Muriel Andrieu (CYBIO platform)
