@@ -1,0 +1,255 @@
+---
+title: "Guide utilisateur — CARROT"
+subtitle: "Cytometry Analysis and Reporting with R-based Open-source Tools"
+author: "Camellia Lambert — Plateformes BIOINFORMAT'IC"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+  word_document:
+    toc: true
+    toc_depth: 3
+lang: fr
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, eval = FALSE)
+```
+
+\newpage
+
+# Introduction
+
+CARROT est accompagné d'une interface Shiny et permet de faire des analyses de données cytométriques. L'ensemble du pipeline depuis l'import des fichiers FCS bruts jusqu'aux analyses statistiques avancées est réalisable. L'application est organisée en **6 onglets**, à parcourir dans l'ordre pour un traitement complet :
+
+1. **Importation** — chargement des fichiers (monomarqués, unstained et échantillons), annotation des marqueurs, groupes d'échantillons
+2. **Compensation** — correction du chevauchement spectral (cytométrie conventionnelle)
+3. **Unmixing** — démixage spectral via AutoSpectral (cytométrie spectrale)
+4. **Quality Control** — détection des anomalies d'acquisition (PeacoQC, flowAI)
+5. **Prétraitement** — retrait des débris, doublets, cellules mortes
+6. **Analyses** — gating hiérarchique, projections dimensionnelles, clustering, statistiques
+
+**Note technique** : selon le type de cytomètre (conventionnel ou spectral), certaines étapes sont interchangeables. Un cytomètre **conventionnel** utilise l'onglet **Compensation** ; un cytomètre **spectral** utilise l'onglet **Unmixing** à la place. Si vos données sont déjà compensées/démixées avant import, ces deux onglets peuvent être sautés entièrement.
+
+\newpage
+
+# Onglet 1 — Importation
+
+## Sous-onglet "1. Importation"
+
+C'est le point de départ obligatoire de toute session CARROT.
+
+### Choix du cytomètre et état des données
+
+- **Technologie** (menu déroulant) : *Conventionnel* ou *Spectral* — détermine si l'onglet Compensation ou l'onglet Unmixing sera utilisé ensuite.
+- **Données déjà compensées/démixées ?** (Oui/Non) : répondez *Oui* si vos fichiers FCS ont déjà été traités en amont (par un autre logiciel, ou lors d'une acquisition déjà corrigée). Dans ce cas, les onglets Compensation/Unmixing deviennent optionnels et vous pouvez passer directement au Contrôle Qualité ou au Prétraitement.
+
+### Chargement des fichiers
+
+- **Tubes Monomarqués / Unstained** (optionnel) : les tubes contrôles utilisés pour calculer la compensation ou configurer le démixage. À ignorer si vous avez répondu *Oui* ci-dessus.
+- **Échantillons Biologiques** (obligatoire) : vos fichiers FCS d'intérêt.
+- **Bouton "Initialiser l'objet"** : crée (ou réinitialise entièrement) le pipeline d'analyse et charge tous les fichiers FCS en mémoire. **À cliquer après chaque changement de fichiers importés.**
+
+### Tableaux d'annotation
+
+- **Onglet "Contrôles"** : pour chaque tube monomarqué, indiquez le **canal** d'acquisition (en cytométrie conventionnelle — un champ texte avec autocomplétion propose les canaux connus) et le **type** (Monomarque ou Unstained, via un menu déroulant). En spectral, seul le type est demandé.
+- **Onglet "Échantillons"** : tableau récapitulatif (nom, fichier, nombre d'événements, expérience, cytomètre, poids, date). 
+
+## Sous-onglet "2. Configuration Marqueurs"
+
+Tableau croisé **échantillons × canaux**, pré-rempli automatiquement à partir des métadonnées des fichiers FCS (si vos fichiers ont été correctement annotés à l'acquisition). Double-cliquez sur une cellule pour corriger manuellement un marqueur mal détecté ou absent.
+
+- **Bouton "Enregistrer la configuration"** : valide le dictionnaire canal → marqueur, utilisé ensuite pour l'affichage de tous les libellés d'axes dans toute l'application (format `"canal | marqueur"`, ex : `"PE-A | CD3"`).
+
+## Sous-onglet "3. Groupes d'Échantillons"
+
+Permet d'assigner chaque échantillon à un groupe ou une condition (ex : *Contrôle*, *Traité*, *J0*, *J7*...) — utilisé plus tard dans l'onglet Analyses pour les comparaisons statistiques.
+
+- **"Créer un nouveau groupe"** : champ texte + bouton "Ajouter le groupe".
+- **Menus déroulants d'assignation** : un menu par échantillon (choix du groupe ou "Non assigné").
+- **Bouton "Enregistrer l'assignation"** : valide les choix — **c'est ce bouton qui rend les groupes visibles dans l'onglet Analyses**, pas la simple sélection dans les menus.
+- **Tableau "Résumé de la Cohorte"** : liste chaque groupe avec ses échantillons et leur effectif.
+
+\newpage
+
+# Onglet 2 — Compensation
+
+*(cytométrie conventionnelle uniquement)*
+
+## Transformation
+
+Avant tout gating, les données doivent être transformées (Arcsinh) pour une meilleure séparation visuelle des populations.
+
+- **Sélecteur de fichier/canaux X-Y** : choix du tube et des deux canaux à visualiser.
+- **Cofacteur** : paramètre de la transformation Arcsinh — augmentez-le si les populations positives/négatives se chevauchent trop visuellement, diminuez-le si la séparation est excessive.
+- **Bouton "Appliquer la transformation"** : applique le cofacteur choisi à **toute la cohorte** (contrôles et échantillons), en une seule fois.
+- Le graphique de densité en dessous permet de vérifier visuellement l'effet du cofacteur avant de continuer.
+
+## Gating interactif (bornes négatives/positives)
+
+Pour chaque canal, on définit les bornes des populations négatives et positives, qui serviront à calculer la matrice de spillover.
+
+- **Sélecteur de canal** : les canaux déjà validés apparaissent avec une coche ✔.
+- **Case "Utiliser l'Unstained comme référence négative"** : cochée par défaut si un tube Unstained est disponible (recommandé — plus fiable que d'utiliser le tube monomarqué lui-même comme sa propre référence négative).
+- **Graphique interactif** : deux courbes de densité (négatif/positif) superposées, avec **4 lignes verticales déplaçables à la souris** représentant les bornes. Vous pouvez aussi ajuster les valeurs directement via les champs numériques.
+- **Bouton "Valider ce gate"** : enregistre les bornes actuelles pour ce canal et calcule les médianes nécessaires au spillover.
+
+## Matrice de spillover
+
+- **Sélecteur d'échantillon** : la matrice peut être ajustée par échantillon individuellement.
+- **Tableau éditable** : chaque cellule est modifiable (double-clic) pour corriger manuellement une valeur de compensation, exprimée en pourcentage. Code couleur : vert (\<5%, acceptable), jaune (5-10%), orange (10-20%), rouge (\>20%, à vérifier). La diagonale à 100% n'est pas modifiable par sécurité.
+- **Glisser-déposer des colonnes** : réorganisez librement l'ordre d'affichage des canaux.
+- **Bouton "Inverser l'ordre"** et **"Transposer"** : options d'affichage supplémentaires.
+- **Boutons "Annuler" / "Rétablir"** : historique des modifications manuelles, par échantillon.
+- **Export PNG/PDF** : télécharge la matrice affichée.
+
+## Comparaison des médianes et biplots
+
+Tableaux et graphiques biplot avant/après compensation, avec calcul du pourcentage de spillover résiduel par paire de canaux. Cela permet de vérifier visuellement que la compensation corrige bien le chevauchement spectral sans le sur-corriger. Dès que la matrice de spillover est modifiée, les biplots sont automatiquement ajustés.
+
+## Export
+
+- **Téléchargement FCS** : un ou plusieurs fichiers compensés (au format `.fcs` ou `.zip` selon la sélection), avec la matrice de spillover injectée dans les métadonnées.
+- **Téléchargement RDS** : sauvegarde complète de la session de compensation (transformation, matrice(s), gates, figures), pour reprendre le travail plus tard.
+
+\newpage
+
+# Onglet 3 — Unmixing
+
+*(cytométrie spectrale uniquement, via le package AutoSpectral)*
+
+Cet onglet suit un flux séquentiel en plusieurs étapes, à parcourir dans l'ordre :
+En amont, AutoSpectral a besoin que les échantillons contrôles (monomarqués, unstained) et les échantillons soient dans des dossiers séparés pour fonctionner correctement.
+
+1. **Configuration** : paramètres généraux d'AutoSpectral pour la cohorte. L'utilisateur précise le dossier racine, c'est à dire là où seront stockés tous les résultats générés par AutoSpectral.
+2. **Génération du fichier de contrôle** (`fcs_control_file.csv`) : associe chaque fichier monomarqué/unstained à son fluorophore. Un tableau éditable permet de corriger les associations devinées automatiquement à partir des noms de fichiers. L'édition correcte de ce fichier est primordial pour que le démixage se fasse correctement. L'utilisateur peut s'aider du fichier "fluorophore_database.csv" pour trouver la correspondance fluorophore <-> channel selon le cytomètre.
+3. **Vérification du fichier de contrôle** : `verifier_asp()` contrôle la cohérence du fichier CSV et le nombre d'événements par contrôle (seuils d'alerte configurables). Cet onglet permet de comprendre les potentielles erreurs du fichier contrôle et de pouvoir ainsi le corriger correctement.
+4. **Définition des gates** : sélection des cellules sur chaque contrôle monomarqué, par balayage manuel, densité, ou ajustement fin (landmarks/density/tune). Landmarks est plutôt utilisé pour les cellules et billes tandis que density est utilisé uniquement pour les billes. Le tune gate sert à choisir les paramètres définitifs de ses gates : il est recommandé de commencer par faire des tune gates pour identifier quels sont les paramètres qui permettront de correctement sélectionner les cellules, puis de réaliser le landmark ou density gate avec les bons paramètres. Pour qu'AutoSpectral fonctionne, il a besoin de landmarks et/ou density gates uniquement.
+5. **Extraction des spectres** (`extraire_spectre_fluorophore()`) : calcule le spectre de référence de chaque fluorophore à partir des cellules gatées.
+6. **Unmixing** : applique la déconvolution spectrale à tous les échantillons de la cohorte.
+7. **Contrôle qualité de l'unmixing** : chargement des fichiers demixés et visualisation biplot des résultats, avec choix libre des canaux/marqueurs.
+
+**Astuce** : chaque étape affiche un bouton d'action dédié (ex : *"Lancer verifier_asp()"*) — les étapes doivent être exécutées dans l'ordre, chacune dépendant du résultat de la précédente.
+
+\newpage
+
+# Onglet 4 — Quality Control
+
+Deux algorithmes indépendants de détection d'anomalies d'acquisition (instabilités de débit/signal au cours du temps), chacun dans son propre sous-onglet. Vous pouvez utiliser l'un, l'autre, ou les deux.
+
+## PeacoQC
+
+- **Méthode de détection des anomalies** : *All* (recommandé, combine IT + MAD), *Isolation Tree (IT)* seul, ou *MAD* seul.
+- **Paramètres avancés** : cellules minimales par bin, nombre maximal de bins, pas glissant, multiplicateur MAD, limite IT, bins consécutifs tolérés, retrait des valeurs nulles/négatives, forçage IT, fraction de retrait des pics.
+- **Bouton "Réinitialiser les valeurs par défaut"** : revient aux réglages recommandés.
+- **Bouton "Appliquer PeacoQC"** : exécute l'algorithme sur toute la cohorte.
+- **Visualisation** : figure de densité (Temps vs FSC) avec les événements exclus en rouge, **plus** le rapport diagnostique natif généré directement par le package PeacoQC (une image par canal, montrant les bins retirés).
+- **Résumé** : taux de conservation par échantillon, coloré (vert ≥90%, orange ≥70%, rouge \<70%).
+
+## flowAI
+
+- **Critères évalués** : *Flow Rate* (débit), *Flow Signal* (stabilité du signal), *Flow Margin* (saturation du détecteur) — combinables (`all`, ou une/plusieurs combinaisons).
+- **Paramètres avancés** par critère : fraction de seconde, seuil alpha, décomposition tendance/cycle (Flow Rate) ; nombre de points de changement, valeur de pénalité, canaux exclus (Flow Signal) ; gestion des valeurs négatives, côté de la plage dynamique, canaux exclus (Flow Margin).
+- **Bouton "Appliquer flowAI"**.
+- **Visualisation** + **rapport natif téléchargeable** (`.zip` contenant HTML/TXT/PNG).
+
+## Export
+
+- **Sélection des sources** (PeacoQC et/ou flowAI) et des échantillons à inclure.
+- **Téléchargement FCS** (`.zip`) et **résumé PDF** regroupant toutes les figures et les paramètres utilisés pour chaque échantillon.
+
+\newpage
+
+# Onglet 5 — Prétraitement
+
+Trois étapes séquentielles de nettoyage cellulaire, chacune avec un gating interactif **par échantillon**.
+
+## Principe commun aux 3 étapes
+
+Pour réaliser un gate, cliquez sur des points du nuage cellulaire, puis déplacez les sommets du gate si nécessaire et enregistrez le gate.
+
+- **Premier enregistrement** : le gate tracé s'applique par défaut à **tous les échantillons** de la cohorte.
+- **Ajustements suivants** : en changeant d'échantillon, la forme déjà enregistrée est **préchargée** et modifiable (déplacement des sommets à la souris) ; ré-enregistrer ne modifie **que** l'échantillon actuellement affiché, sans toucher aux autres. Pour que les ajustements fonctionnent correctement, il est recommandé d'enregistrer le gate initial de l'échantillon sur lequel on veut travailler puis d'aller sur un autre échantillon et de revenir à celui d'intérêt pour pouvoir ajuster la forme du gate. Si vous ne faites pas cela, la forme du gate initiale disparait au déplacement d'un sommet du gate et la forme que vous formerez ne sera pas correctement enregistrée (vous le verrez via la figure résultat en dessous du dessin interactif)
+- Chaque étape affiche un **résumé cumulatif** : effectif et pourcentage de conservation par rapport à l'étape précédente.
+
+## Débris
+
+Gating polygonal (FSC vs SSC typiquement) pour exclure les débris cellulaires et petites particules.
+
+## Doublets
+
+Retrait des agrégats cellulaires (deux cellules détectées comme une seule), sur les axes Hauteur, Aire ou profondeur (Width) du FSC et/ou du SSC.
+
+- **Deux méthodes disponibles** : gating manuel (tracé polygonal, comme pour les débris), ou détection **automatique/statistique** (basée sur un seuil MAD).
+
+## Viabilité
+
+Retrait des cellules mortes, à partir d'un marqueur de viabilité. Une détection automatique du canal de viabilité est faite via l'annotation du markeur en "Live Dead" mais vous pouvez sélectionner le bon marqueur si erreur ou si non détecté. 
+
+- **Transformation Arcsinh préalable obligatoire** sur le canal de viabilité (cofacteur ajustable), avant de pouvoir tracer le gate.
+
+## Export
+
+- **Téléchargement FCS** par étape (débris, doublets, viabilité) et par échantillon, au format `.zip`.
+- **Sauvegarde RDS** de la session complète de prétraitement.
+
+\newpage
+
+# Onglet 6 — Analyses
+
+## Gating
+
+Création de gates personnalisés, sur les canaux de votre choix, avec possibilité de **gating hiérarchique** (un gate défini à l'intérieur d'un autre, pour cibler une sous-population).
+
+- **Nom du gate**, **Population parente** (aucune, ou un gate déjà créé), **Échantillon de référence** pour le tracé.
+- **Canaux X/Y** : n'importe quel canal disponible, affiché avec son marqueur (`"canal | marqueur"`).
+- **Cofacteur (Arcsinh)** : le gating se fait sur des données transformées — ajustez-le pour bien séparer les populations sur les canaux choisis.
+- **Tracé polygonal interactif** : cliquez pour ajouter des sommets, double-cliquez pour fermer le polygone. Les sommets sont déplaçables individuellement une fois le gate créé.
+- **Comme en Prétraitement** : premier enregistrement = tous les échantillons ; ajustements suivants = échantillon affiché uniquement.
+- **Tableau des gates créés** : axes, type, parent — avec suppression (en cascade sur les gates enfants) et résumé chiffré (effectif, % du parent) par échantillon.
+
+## PCA
+
+Analyse en composantes principales sur la population d'un gate. Paramètres : canaux utilisés, nombre de composantes, centrage/réduction, sous-échantillonnage, cofacteur. Affiche la projection (colorée par échantillon) et le pourcentage de variance expliquée par composante.
+
+## UMAP
+
+Projection non linéaire. Paramètres : `n_neighbors`, `min_dist`, métrique de distance, sous-échantillonnage (recommandé au-delà de quelques dizaines de milliers de cellules), cofacteur. La projection peut être colorée par **échantillon**, par **marqueur** (expression d'un canal), ou par **métacluster** (si un clustering FlowSOM a été calculé pour le même gate).
+
+## t-SNE
+
+Même principe et mêmes options de coloration que l'UMAP. Paramètres propres : perplexité, theta (Barnes-Hut), nombre d'itérations.
+
+## Clustering (FlowSOM)
+
+Clustering non supervisé. Paramètres : dimensions de la grille SOM, nombre de métaclusters, canaux utilisés.
+
+- **Option "Cellules à utiliser"** : extraction indépendante (nouveau sous-échantillonnage), ou **réutilisation des cellules d'une UMAP/t-SNE déjà calculée** pour ce même gate — recommandé si vous voulez ensuite superposer les métaclusters sur cette projection, car cela garantit un alignement cellule-à-cellule parfait entre les deux résultats.
+- **Répartition des métaclusters** : histogramme des effectifs.
+- **Heatmap d'expression médiane par métacluster** : identifie quels marqueurs caractérisent chaque métacluster (valeurs z-scorées par canal pour comparabilité).
+- **Annotation manuelle** : un champ texte par métacluster pour lui donner un nom biologique (ex : *"Lymphocytes T CD4+"*) une fois son identité déterminée — ce nom est ensuite repris partout (heatmap, légendes).
+- **Projection colorée par métacluster** : superpose les métaclusters sur une UMAP ou un t-SNE existant pour ce gate.
+
+## Comparaison Groupes
+
+Statistiques comparatives entre les groupes/conditions définis dans l'onglet Importation.
+
+- **Résumé des groupes existants** (lecture seule — l'assignation se fait dans l'onglet Importation).
+- **Variable à comparer** : pourcentage du gate par rapport à sa population parente, ou MFI (intensité médiane) d'un canal choisi.
+- **Test statistique** : choisi automatiquement selon le nombre de groupes — test de Wilcoxon-Mann-Whitney pour 2 groupes, Kruskal-Wallis pour 3 groupes ou plus (tests non paramétriques, adaptés aux petits effectifs typiques d'une cohorte de cytométrie).
+- **Résultat** : méthode utilisée, p-value (mise en évidence si \<0,05), et un boxplot avec tous les points individuels superposés (un point = un échantillon).
+
+\newpage
+
+# Bonnes pratiques générales
+
+- **Ordre recommandé** : Importation → Compensation *ou* Unmixing → Quality Control → Prétraitement → Analyses.
+- **Sauvegardez régulièrement** vos sessions au format RDS (disponibles à plusieurs étapes du pipeline) pour pouvoir reprendre votre travail sans tout recalculer.
+- **Le cofacteur de transformation Arcsinh** revient à plusieurs endroits de l'application (Compensation, Prétraitement/Viabilité, Analyses/Gating) — il peut être ajusté indépendamment à chaque endroit selon le canal et le contexte.
+- **Les renommages d'échantillons** (onglet Importation) sont répercutés automatiquement dans tout le pipeline, à tout moment — pas besoin de tout réinitialiser après un renommage.
