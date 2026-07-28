@@ -26,9 +26,9 @@ docker run -dp 80:3838 --rm camellialambert/carrot
 
 ---
 
-## Fonctionnalités
+## Features
 
-| Étape | Description |
+| Step | Description |
 |---|---|
 | **Import** | Loading FCS files (conventional or spectral cytometers), marker annotation, management of groups/conditions |
 | **Compensation** | Manual gating on single‑stained tubes, computation and interactive editing of the spillover matrix |
