@@ -43,6 +43,7 @@ demixage_ui <- function(id) {
           column(
             width = 12,
             box(title = tagList(icon("folder-open"), " Dossiers"), width = NULL, status = "primary", solidHeader = TRUE,
+                uiOutput(ns("avertissement_data_non_monte")), # Message explicite si /data n'est pas monté (voir server) : évite de naviguer sans le savoir dans un dossier temporaire sans rapport
                 fluidRow(
                   column(4,
                          h5("Dossier racine (sorties AutoSpectral)", style = "margin-top:0;"),
@@ -408,22 +409,42 @@ demixage_server <- function(id, pipeline, pipeline_version) {
     # shinyDirChoose() par bouton de sélection de dossier.
     #
     # IMPORTANT (déploiement Docker) : cette navigation parcourt le système de
-    # fichiers de LA MACHINE QUI EXÉCUTE R (donc le conteneur, une fois
+    # fichiers de la machine qui exécute R (donc le conteneur, une fois
     # dockerisé) — jamais l'ordinateur de l'utilisateur directement. Sans
     # montage explicite, aucun dossier de l'utilisateur n'est donc visible ici.
-    # La racine "Données (Docker)" ci-dessous pointe vers /data : montez-y un
-    # dossier de votre machine au lancement du conteneur pour le rendre visible
-    # dans ce sélecteur, ex :
+    # /data doit être monté au lancement du conteneur, ex :
     #   docker run -dp 80:3838 --rm -v /chemin/vers/vos/donnees:/data camellialambert/carrot
-    # Elle apparaît toujours dans la liste (même si /data n'existe pas encore
-    # dans le conteneur), contrairement à un dossier détecté automatiquement
-    # par getVolumes() dont la présence dépend de l'OS et du montage réel.
-    racine_docker <- if (dir.exists("/data")) "/data" else tempdir() # Repli sur un dossier valide si /data n'a pas été monté, pour éviter une erreur shinyFiles au démarrage
-    volumes <- c("Données (Docker)" = racine_docker, Home = path.expand("~"), shinyFiles::getVolumes()())
+    #
+    # /data_mounte est volontairement EXPLICITE (pas de repli silencieux vers
+    # tempdir()) : un repli silencieux, précédemment utilisé ici, a conduit un
+    # utilisateur à naviguer sans le savoir dans le dossier temporaire de la
+    # session R — où atterrissent, entre autres, les copies renommées (0.fcs,
+    # 1.fcs...) des fichiers déjà uploadés via l'onglet Importation — au lieu
+    # de comprendre immédiatement que /data n'était pas monté.
+    data_mounte <- dir.exists("/data")
+    volumes <- if (data_mounte) {
+      c("Données (Docker)" = "/data", Home = path.expand("~"), shinyFiles::getVolumes()())
+    } else {
+      c(Home = path.expand("~"), shinyFiles::getVolumes()())
+    }
     
     shinyFiles::shinyDirChoose(input, "dir_root", roots = volumes, session = session)
     shinyFiles::shinyDirChoose(input, "dir_monomarques", roots = volumes, session = session)
     shinyFiles::shinyDirChoose(input, "dir_echantillons", roots = volumes, session = session)
+    
+    # Avertissement explicite si /data n'est pas monté : sans lui, l'utilisateur
+    # navigue dans "Home"/racine du conteneur sans trouver ses propres fichiers,
+    # et peut se retrouver par erreur dans un dossier temporaire de session (où
+    # atterrissent, entre autres, les copies renommées des fichiers déjà
+    # uploadés via l'onglet Importation) en pensant naviguer dans ses données.
+    output$avertissement_data_non_monte <- renderUI({
+      if (data_mounte) return(NULL)
+      div(class = "alert alert-warning", style = "font-size:12px; padding:8px; margin-bottom:10px;",
+          icon("triangle-exclamation"),
+          " Aucun dossier de données n'est monté dans ce conteneur : vous ne pourrez naviguer que dans les dossiers internes au conteneur, pas dans ceux de votre ordinateur. ",
+          "Relancez le conteneur avec un montage de volume, par exemple : ",
+          tags$code("docker run -dp 80:3838 --rm -v /chemin/vers/vos/donnees:/data camellialambert/carrot"))
+    })
     
     # ── Bannière : échantillons déjà démixés à l'import ────────────────────────
     output$banniere_deja_traite <- renderUI({
@@ -451,11 +472,6 @@ demixage_server <- function(id, pipeline, pipeline_version) {
       file.path(pipeline()$dossier_racine, "fcs_control_file.csv")
     })
     
-    # Lecture robuste au séparateur : AutoSpectral écrit toujours en virgule,
-    # mais si ce fichier a été ouvert/réenregistré dans Excel (notamment en
-    # français), il peut revenir en point-virgule et casser la lecture
-    # standard. On essaie les deux séparateurs et on garde celui qui donne
-    # le plus de colonnes.
     lire_csv_robuste <- function(chemin) {
       if (!file.exists(chemin)) {
         stop("Fichier introuvable : ", chemin)
@@ -475,18 +491,6 @@ demixage_server <- function(id, pipeline, pipeline_version) {
       if (n_pointvirgule > n_virgule) d_pointvirgule else d_virgule # Le séparateur qui donne le PLUS de colonnes est presque toujours le bon (un séparateur incorrect fait tenir toute la ligne dans une seule colonne)
     }
     
-    # Affiche une barre de progression ET désactive/anime le bouton pendant
-    # l'exécution d'un traitement long. Les fonctions AutoSpectral appelées ici
-    # sont synchrones et ne renvoient aucune information d'avancement réelle :
-    # l'indicateur signale donc qu'un traitement est en cours (et son message),
-    # pas un pourcentage exact. Le changement du bouton (désactivé + spinner)
-    # est le signal le plus visible et le plus fiable, la barre de progression
-    # (style "old", pleine largeur en haut de page) vient en complément.
-    #
-    # PATTERN RÉPÉTÉ DANS TOUT CE FICHIER : chaque action AutoSpectral suit la
-    # même structure observeEvent(bouton) -> tryCatch(executer_avec_progression(...))
-    # -> statut vert (succès) ou rouge (erreur) affiché dans un uiOutput dédié.
-    # Ce commentaire unique vaut pour toutes les occurrences suivantes.
     executer_avec_progression <- function(message, fn, bouton_id = NULL, label_repos = NULL, icone_repos = "play") {
       if (!is.null(bouton_id)) {
         shinyjs::disable(bouton_id)
@@ -554,7 +558,7 @@ demixage_server <- function(id, pipeline, pipeline_version) {
       p$chemins_monomarques <- data.frame(
         chemin = fichiers,
         type   = "Monomarque",
-        canal  = NA_character_, # Pas de canal à cette étape (spectral) : ce champ existe dans la structure de données pour compatibilité avec le mode Conventionnel, mais n'est pas exploité par AutoSpectral
+        canal  = NA_character_, 
         stringsAsFactors = FALSE
       )
       pipeline_version(pipeline_version() + 1L)
@@ -571,9 +575,7 @@ demixage_server <- function(id, pipeline, pipeline_version) {
       }
     })
     
-    # Désignation du fichier "Unstained" parmi les fichiers détectés (aucun
-    # n'est présélectionné par défaut : voir l'observeEvent ci-dessous, qui ne
-    # marque un fichier comme Unstained qu'après un choix explicite ici).
+    # Désignation du fichier "Unstained" 
     output$unstained_picker <- renderUI({
       fichiers <- fichiers_monomarques()
       req(length(fichiers) > 0)
