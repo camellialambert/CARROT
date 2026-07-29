@@ -484,9 +484,14 @@ compensation_server <- function(id, pipeline, pipeline_version) {
     
     # Aperçu de densité (biplot canal X vs canal Y) sur les données transformées,
     # pour aider à choisir un cofacteur qui sépare bien les populations avant de
-    # passer au gating. Rendu en base R (raster::rasterFromXYZ + plot()), comme
-    # référence stylistique reprise ensuite dans TOUTE l'application pour les
-    # figures de densité statiques (voir calculer_densite_raster() dans utils.R).
+    # passer au gating. Rendu en base R via image() (graphics), qui affiche
+    # directement une matrice sous forme de grille colorée : aucune dépendance
+    # externe requise (contrairement à raster::rasterFromXYZ(), qui s'appuie sur
+    # le package terra et sa chaîne GDAL/PROJ/GEOS — une dépendance lourde et
+    # fragile pour une seule figure, source d'échecs de compilation selon les
+    # versions de GDAL disponibles sur le système. image() fait exactement le
+    # même travail (afficher une grille XY colorée par valeur Z) en s'appuyant
+    # uniquement sur le package graphics, toujours disponible avec R).
     output$plot_transformation <- renderPlot({
       trans_done()
       req(input$trans_file_sel, input$trans_cx, input$trans_cy)
@@ -510,7 +515,7 @@ compensation_server <- function(id, pipeline, pipeline_version) {
         y = flowCore::exprs(fcs_t)[, input$trans_cy]
       )
       
-      # ---- DENSITÉ → RASTER ----
+      # ---- DENSITÉ PAR BINNING 2D ----
       
       # grille 300x300 (ajuste si tu veux)
       nx <- 300
@@ -538,15 +543,21 @@ compensation_server <- function(id, pipeline, pipeline_version) {
           y = y_centers[as.integer(y_bin)]
         )
       
-      # création du raster
-      r <- raster::rasterFromXYZ(df_binned[, c("x", "y", "density")]) # Convertit la grille déjà binée en objet raster, uniquement pour bénéficier de son rendu plot() natif (rapide, pas de dépendance à ggplot2 ici)
+      # ---- RECONSTRUCTION DE LA GRILLE (matrice x/y/density) ----
+      # image() attend une matrice [longueur(x) x longueur(y)] indexée par
+      # position de bin, pas un data.frame long — on la reconstruit ici
+      # directement, sans passer par un objet raster.
+      z_mat <- matrix(NA_real_, nrow = length(x_centers), ncol = length(y_centers))
+      idx_x <- match(df_binned$x, x_centers)
+      idx_y <- match(df_binned$y, y_centers)
+      z_mat[cbind(idx_x, idx_y)] <- df_binned$density
       
       # ---- PALETTE CARROT ----
       cols <- c("darkblue", "blue", "cyan", "greenyellow", "yellow", "darkorange", "red") # Même palette que PALETTE_DENSITE (utils.R), dupliquée ici volontairement (ce plot est en base R, pas en ggplot2/plotly, donc n'importe pas directement la constante partagée)
       
-      # affichage instantané
-      plot(
-        r,
+      # affichage instantané (image() : fonction de base, aucune dépendance externe)
+      image(
+        x_centers, y_centers, z_mat,
         col = cols,
         main = paste("Densité", input$trans_cx, "vs", input$trans_cy),
         xlab = input$trans_cx,
