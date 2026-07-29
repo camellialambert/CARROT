@@ -59,4 +59,5 @@ R / Shiny · flowCore · AutoSpectral · PeacoQC · flowAI · FlowSOM · uwot ·
 ## Authors
 
 Camellia Lambert — Master’s internship in Bioinformatics – Platforms Engineering (Université Paris Cité), Institut Cochin
+
 Supervised by Benjamin Saintpierre (BIOINFORMAT’IC platform) and Muriel Andrieu (CYBIO platform)
