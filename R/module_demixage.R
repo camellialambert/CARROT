@@ -1048,13 +1048,17 @@ demixage_server <- function(id, pipeline, pipeline_version) {
       }
       chemin_dossier <- file.path(pipeline()$dossier_racine, input$gate_figure_dossier)
       if (!dir.exists(chemin_dossier)) return(character(0))
-      list.files(chemin_dossier, pattern = "\\.(jpg|jpeg)$", full.names = TRUE, ignore.case = TRUE)
+      # .pdf ajouté : "figure_gate_tuning" contient des PDF (contrairement à
+      # "figure_gate", qui ne contient que des .jpg) — sans ce format dans le
+      # filtre, ce dossier apparaissait toujours vide malgré des figures bien
+      # présentes sur le disque.
+      list.files(chemin_dossier, pattern = "\\.(jpg|jpeg|pdf)$", full.names = TRUE, ignore.case = TRUE)
     })
     
     output$gate_figure_fichier_ui <- renderUI({
       fichiers <- fichiers_figures_gate()
       if (length(fichiers) == 0) {
-        return(p("Aucune figure .jpg trouvée dans ce dossier.", style = "font-size:12px; color:#999; margin-top:25px;"))
+        return(p("Aucune figure trouvée dans ce dossier.", style = "font-size:12px; color:#999; margin-top:25px;"))
       }
       selectInput(ns("gate_figure_fichier"), "Figure", choices = setNames(fichiers, basename(fichiers))) # Affiche le nom court (basename) à l'utilisateur, tout en gardant le chemin complet comme valeur réelle du sélecteur
     })
@@ -1067,13 +1071,30 @@ demixage_server <- function(id, pipeline, pipeline_version) {
                    input$gate_figure_dossier, "\"."))
       }
       req(input$gate_figure_fichier)
-      imageOutput(ns("gate_figure_img"), height = "auto")
+      # Un PDF ne peut pas être affiché via imageOutput/renderImage (prévu pour
+      # des rasters JPEG/PNG) : on propose son téléchargement à la place, comme
+      # déjà fait pour les figures de spectres ci-dessous.
+      if (grepl("\\.pdf$", input$gate_figure_fichier, ignore.case = TRUE)) {
+        div(
+          div(class = "alert alert-info", style = "font-size:12px; padding:8px;",
+              icon("file-pdf"), " Fichier PDF — la prévisualisation inline n'est pas disponible, téléchargez-le pour l'ouvrir."),
+          downloadButton(ns("dl_gate_figure_pdf"), "Télécharger le PDF", class = "btn-primary")
+        )
+      } else {
+        imageOutput(ns("gate_figure_img"), height = "auto")
+      }
     })
     
     output$gate_figure_img <- renderImage({
       req(input$gate_figure_fichier)
+      req(!grepl("\\.pdf$", input$gate_figure_fichier, ignore.case = TRUE)) # Sécurité : ne tente jamais de rendre un PDF comme une image (voir la branche PDF de gate_figure_zone ci-dessus, qui masque de toute façon cet output dans ce cas)
       list(src = input$gate_figure_fichier, contentType = "image/jpeg", width = "100%", alt = basename(input$gate_figure_fichier))
     }, deleteFile = FALSE) # deleteFile=FALSE : le fichier affiché est une figure PERMANENTE générée par AutoSpectral sur le disque, pas un fichier temporaire à nettoyer après affichage
+    
+    output$dl_gate_figure_pdf <- downloadHandler(
+      filename = function() basename(req(input$gate_figure_fichier)),
+      content = function(file) file.copy(input$gate_figure_fichier, file)
+    )
     
     # ── Aperçu des figures d'extraction des spectres (.jpg / .pdf) ───────────
     fichiers_figures_spectra <- reactive({
