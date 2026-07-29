@@ -4,11 +4,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxml2-dev \
     libssl-dev \
     libcurl4-openssl-dev \
-    libgdal-dev \
-    libgeos-dev \
-    libproj-dev \
-    libsqlite3-dev \
-    libudunits2-dev \
     libglpk-dev \
     libgsl-dev \
     zlib1g-dev \
@@ -22,12 +17,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     gfortran \
     git \
-    gdal-bin \
-    proj-bin \
     && rm -rf /var/lib/apt/lists/*
 
 RUN R -e "install.packages(c('BiocManager', 'remotes'), repos = 'https://cloud.r-project.org')"
-
 
 RUN R -e "install.packages(c( \
     'shiny', 'shinydashboard', 'shinyjs', 'shinyFiles', 'DT', 'plotly', 'ggplot2' \
@@ -40,12 +32,6 @@ RUN R -e "install.packages(c( \
 RUN R -e "install.packages(c( \
     'uwot', 'Rtsne' \
   ), repos = 'https://cloud.r-project.org')"
-
-RUN R -e "install.packages('terra', repos = 'https://cloud.r-project.org'); \
-          if (!requireNamespace('terra', quietly = TRUE)) stop('ÉCHEC : terra ne s est pas installé.')"
-
-RUN R -e "install.packages('raster', repos = 'https://cloud.r-project.org'); \
-          if (!requireNamespace('raster', quietly = TRUE)) stop('ÉCHEC : raster ne s est pas installé.')"
 
 RUN R -e "BiocManager::install('flowCore', update = FALSE, ask = FALSE); \
           if (!requireNamespace('flowCore', quietly = TRUE)) stop('ÉCHEC : flowCore ne s est pas installé.')"
