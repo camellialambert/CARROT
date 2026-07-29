@@ -409,11 +409,13 @@ demixage_server <- function(id, pipeline, pipeline_version) {
     # shinyDirChoose() par bouton de sélection de dossier.
     #
     # IMPORTANT (déploiement Docker) : cette navigation parcourt le système de
-    # fichiers de la machine qui exécute R (donc le conteneur, une fois
+    # fichiers de LA MACHINE QUI EXÉCUTE R (donc le conteneur, une fois
     # dockerisé) — jamais l'ordinateur de l'utilisateur directement. Sans
     # montage explicite, aucun dossier de l'utilisateur n'est donc visible ici.
     # /data doit être monté au lancement du conteneur, ex :
-    #   docker run -dp 80:3838 --rm -v /chemin/vers/vos/donnees:/data camellialambert/carrot
+    # /data doit être monté au lancement du conteneur — via le lanceur fourni
+    # (Lancer_CARROT.sh / Lancer_CARROT.bat), qui monte automatiquement le
+    # dossier personnel de l'utilisateur ($HOME / %USERPROFILE%) dans /data.
     #
     # /data_mounte est volontairement EXPLICITE (pas de repli silencieux vers
     # tempdir()) : un repli silencieux, précédemment utilisé ici, a conduit un
@@ -442,8 +444,7 @@ demixage_server <- function(id, pipeline, pipeline_version) {
       div(class = "alert alert-warning", style = "font-size:12px; padding:8px; margin-bottom:10px;",
           icon("triangle-exclamation"),
           " Aucun dossier de données n'est monté dans ce conteneur : vous ne pourrez naviguer que dans les dossiers internes au conteneur, pas dans ceux de votre ordinateur. ",
-          "Relancez le conteneur avec un montage de volume, par exemple : ",
-          tags$code("docker run -dp 80:3838 --rm -v /chemin/vers/vos/donnees:/data camellialambert/carrot"))
+          "Relancez CARROT via le lanceur fourni (Lancer_CARROT.sh sur Linux/macOS, ou Lancer_CARROT.bat sur Windows), qui monte automatiquement votre dossier personnel.")
     })
     
     # ── Bannière : échantillons déjà démixés à l'import ────────────────────────
@@ -472,6 +473,11 @@ demixage_server <- function(id, pipeline, pipeline_version) {
       file.path(pipeline()$dossier_racine, "fcs_control_file.csv")
     })
     
+    # Lecture robuste au séparateur : AutoSpectral écrit toujours en virgule,
+    # mais si ce fichier a été ouvert/réenregistré dans Excel (notamment en
+    # français), il peut revenir en point-virgule et casser la lecture
+    # standard. On essaie les deux séparateurs et on garde celui qui donne
+    # le plus de colonnes.
     lire_csv_robuste <- function(chemin) {
       if (!file.exists(chemin)) {
         stop("Fichier introuvable : ", chemin)
@@ -491,6 +497,18 @@ demixage_server <- function(id, pipeline, pipeline_version) {
       if (n_pointvirgule > n_virgule) d_pointvirgule else d_virgule # Le séparateur qui donne le PLUS de colonnes est presque toujours le bon (un séparateur incorrect fait tenir toute la ligne dans une seule colonne)
     }
     
+    # Affiche une barre de progression ET désactive/anime le bouton pendant
+    # l'exécution d'un traitement long. Les fonctions AutoSpectral appelées ici
+    # sont synchrones et ne renvoient aucune information d'avancement réelle :
+    # l'indicateur signale donc qu'un traitement est en cours (et son message),
+    # pas un pourcentage exact. Le changement du bouton (désactivé + spinner)
+    # est le signal le plus visible et le plus fiable, la barre de progression
+    # (style "old", pleine largeur en haut de page) vient en complément.
+    #
+    # PATTERN RÉPÉTÉ DANS TOUT CE FICHIER : chaque action AutoSpectral suit la
+    # même structure observeEvent(bouton) -> tryCatch(executer_avec_progression(...))
+    # -> statut vert (succès) ou rouge (erreur) affiché dans un uiOutput dédié.
+    # Ce commentaire unique vaut pour toutes les occurrences suivantes.
     executer_avec_progression <- function(message, fn, bouton_id = NULL, label_repos = NULL, icone_repos = "play") {
       if (!is.null(bouton_id)) {
         shinyjs::disable(bouton_id)
@@ -513,6 +531,24 @@ demixage_server <- function(id, pipeline, pipeline_version) {
     }
     
     # ── Dossier racine ──────────────────────────────────────────────────────
+    # Vérifie que l'utilisateur système exécutant R peut réellement ÉCRIRE dans
+    # un dossier (pas seulement le lire) : tente de créer puis supprimer un
+    # petit fichier test. Utilisée pour détecter IMMÉDIATEMENT, dès la
+    # sélection du dossier racine, un problème de permissions — au lieu de ne
+    # le découvrir que plus tard via l'erreur cryptique "cannot open the
+    # connection" au moment de lancer_asp() (AutoSpectral a besoin d'écrire
+    # fcs_control_file.csv, des figures, et les fichiers unmixés directement
+    # dans ce dossier).
+    verifier_acces_ecriture <- function(dossier) {
+      fichier_test <- file.path(dossier, paste0(".carrot_test_ecriture_", as.integer(Sys.time())))
+      ok <- tryCatch({
+        writeLines("test", fichier_test)
+        file.remove(fichier_test)
+        TRUE
+      }, error = function(e) FALSE, warning = function(w) FALSE)
+      ok
+    }
+    
     observeEvent(input$dir_root, {
       req(pipeline())
       if (is.integer(input$dir_root)) return(invisible(NULL)) # shinyDirChoose renvoie un entier (pas une liste de chemin) tant que l'utilisateur n'a rien sélectionné : sécurité contre le déclenchement initial vide
@@ -520,6 +556,17 @@ demixage_server <- function(id, pipeline, pipeline_version) {
       req(length(chemin_choisi) > 0)
       if (!dir.exists(chemin_choisi)) {
         showNotification("Le dossier racine sélectionné n'existe pas.", type = "error")
+        return(invisible(NULL))
+      }
+      if (!verifier_acces_ecriture(chemin_choisi)) {
+        showNotification(
+          paste0("Ce dossier n'est pas accessible en écriture depuis le conteneur (permissions). ",
+                 "AutoSpectral a besoin d'y écrire ses résultats. Relancez le conteneur Docker avec ",
+                 "un montage qui donne les droits d'écriture, par exemple : ",
+                 "docker run ... --user $(id -u):$(id -g) -v /votre/dossier:/data ..., ",
+                 "ou assurez-vous que le dossier monté appartient à un utilisateur accessible en écriture."),
+          type = "error", duration = 15
+        )
         return(invisible(NULL))
       }
       p <- pipeline()
@@ -558,7 +605,7 @@ demixage_server <- function(id, pipeline, pipeline_version) {
       p$chemins_monomarques <- data.frame(
         chemin = fichiers,
         type   = "Monomarque",
-        canal  = NA_character_, 
+        canal  = NA_character_, # Pas de canal à cette étape (spectral) : ce champ existe dans la structure de données pour compatibilité avec le mode Conventionnel, mais n'est pas exploité par AutoSpectral
         stringsAsFactors = FALSE
       )
       pipeline_version(pipeline_version() + 1L)
@@ -575,7 +622,9 @@ demixage_server <- function(id, pipeline, pipeline_version) {
       }
     })
     
-    # Désignation du fichier "Unstained" 
+    # Désignation du fichier "Unstained" parmi les fichiers détectés (aucun
+    # n'est présélectionné par défaut : voir l'observeEvent ci-dessous, qui ne
+    # marque un fichier comme Unstained qu'après un choix explicite ici).
     output$unstained_picker <- renderUI({
       fichiers <- fichiers_monomarques()
       req(length(fichiers) > 0)
@@ -647,9 +696,18 @@ demixage_server <- function(id, pipeline, pipeline_version) {
               icon("check-circle"), " Fichier de contrôle AutoSpectral généré avec succès.")
         })
       }, error = function(e) {
+        # Repli explicatif : si l'erreur ressemble à un problème d'écriture
+        # (cas typique : "cannot open the connection" quand AutoSpectral tente
+        # d'écrire dans le dossier racine), on ajoute une piste de diagnostic
+        # au message brut de R, qui seul ne mentionne jamais explicitement les
+        # permissions.
+        indice_permissions <- grepl("cannot open|permission denied|read-only", e$message, ignore.case = TRUE)
         output$asp_status <- renderUI({
           div(class = "alert alert-danger", style = "font-size:12px; padding:8px;",
-              icon("times-circle"), " Erreur : ", e$message)
+              icon("times-circle"), " Erreur : ", e$message,
+              if (indice_permissions) tags$p(tags$b("Piste probable : "),
+                                             "le dossier racine n'est pas accessible en écriture depuis le conteneur. ",
+                                             "Vérifiez les permissions du dossier monté (voir le message affiché lors de la sélection du dossier racine).") else NULL)
         })
       })
     })
