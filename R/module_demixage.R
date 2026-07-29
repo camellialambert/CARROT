@@ -404,9 +404,22 @@ demixage_server <- function(id, pipeline, pipeline_version) {
     ns <- session$ns
     
     # shinyFiles nécessite un enregistrement explicite des "racines" de
-    # navigation (Home + tous les volumes/disques détectés sur la machine
-    # serveur) et un shinyDirChoose() par bouton de sélection de dossier.
-    volumes <- c(Home = path.expand("~"), shinyFiles::getVolumes()())
+    # navigation (Home + tous les volumes/disques détectés) et un
+    # shinyDirChoose() par bouton de sélection de dossier.
+    #
+    # IMPORTANT (déploiement Docker) : cette navigation parcourt le système de
+    # fichiers de LA MACHINE QUI EXÉCUTE R (donc le conteneur, une fois
+    # dockerisé) — jamais l'ordinateur de l'utilisateur directement. Sans
+    # montage explicite, aucun dossier de l'utilisateur n'est donc visible ici.
+    # La racine "Données (Docker)" ci-dessous pointe vers /data : montez-y un
+    # dossier de votre machine au lancement du conteneur pour le rendre visible
+    # dans ce sélecteur, ex :
+    #   docker run -dp 80:3838 --rm -v /chemin/vers/vos/donnees:/data camellialambert/carrot
+    # Elle apparaît toujours dans la liste (même si /data n'existe pas encore
+    # dans le conteneur), contrairement à un dossier détecté automatiquement
+    # par getVolumes() dont la présence dépend de l'OS et du montage réel.
+    racine_docker <- if (dir.exists("/data")) "/data" else tempdir() # Repli sur un dossier valide si /data n'a pas été monté, pour éviter une erreur shinyFiles au démarrage
+    volumes <- c("Données (Docker)" = racine_docker, Home = path.expand("~"), shinyFiles::getVolumes()())
     
     shinyFiles::shinyDirChoose(input, "dir_root", roots = volumes, session = session)
     shinyFiles::shinyDirChoose(input, "dir_monomarques", roots = volumes, session = session)
