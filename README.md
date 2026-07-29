@@ -17,13 +17,22 @@ Installation is currently only available via Docker.
 * Then run (on Windows, use the command prompt):
 
 ```bash
-docker pull camellialambert/carrot
-docker run -dp 80:3838 --rm camellialambert/carrot
+docker pull --platform linux/amd64 camellialambert/carrot
+docker run --platform linux/amd64 -dp 80:3838 --rm camellialambert/carrot
 ```
 
 * Access the application through your usual web browser at **http://localhost/**
-* Don’t forget to stop the container when finished (docker stop <container_ID>, which you can find via docker ps)
+* Don’t forget to stop the container when finished: 
 
+```bash
+docker stop <container_ID>
+```
+
+You can find the container ID with:
+
+```bash
+docker ps
+```
 ---
 
 ## Features
