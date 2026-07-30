@@ -57,7 +57,7 @@ pretraitement_ui <- function(id) {
                    h4("Source des données"),
                    radioButtons(ns("source_debris"), NULL,
                                 choices = c(
-                                  "Compensées (brutes)" = "brutes",
+                                  "Brutes" = "brutes",
                                   "Après PeacoQC"       = "peacoqc",
                                   "Après flowAI"        = "flowai"
                                 ),

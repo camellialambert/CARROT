@@ -14,24 +14,42 @@ CARROT was developed at Institut Cochin (a collaboration between the BIOINFORMAT
 Installation is currently only available via Docker.
 
 * Install Docker: https://docs.docker.com/get-docker/
-* Then run (on Windows, use the command prompt):
+* Then, perform on your terminal :
 
 ```bash
 docker pull --platform linux/amd64 camellialambert/carrot
 docker run --platform linux/amd64 -dp 80:3838 --rm camellialambert/carrot
 ```
-
-* Access the application through your usual web browser at **http://localhost/**
-* Don’t forget to stop the container when finished: 
+**For macOS / Linux (Ubuntu, Debian, etc) Users**
+* Download "Lancer_CARROT.sh"
+* Go to the path where this file is on your terminal :
 
 ```bash
-docker stop <container_ID>
+cd /chemin/vers/CARROT
 ```
 
-You can find the container ID with:
+* Then run on your terminal : 
 
 ```bash
-docker ps
+chmod +x Lancer_CARROT.sh
+./Lancer_CARROT.sh
+```
+
+* On your usual browser access to CARROT at **http://localhost/**
+* Once you are finished, close CARROT with :
+
+```bash
+docker stop carrot
+```
+
+**For Windows Users**
+
+* Download "Lancer_CARROT.bat" and double-click on the file
+* This will open a new window and CARROT will automatically open on your usual browser at **http://localhost/**
+* Once you are finished, close CARROT by closing the window or with :
+
+```bash
+docker stop carrot
 ```
 ---
 
