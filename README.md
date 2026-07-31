@@ -19,7 +19,7 @@ CARROT was developed at Institut Cochin (a collaboration between the BIOINFORMAT
 Installation via Docker.
 
 * **macOS** : Docker Desktop — https://docs.docker.com/desktop/setup/install/mac-install/
-* **Linux** : Docker Engine (inclut Docker Compose) — https://docs.docker.com/engine/install/
+* **Linux** : Docker Engine — https://docs.docker.com/engine/install/
 
 --> If you don't need the Unmixing tab:
 * Just run:
