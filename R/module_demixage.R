@@ -444,7 +444,7 @@ demixage_server <- function(id, pipeline, pipeline_version) {
       div(class = "alert alert-warning", style = "font-size:12px; padding:8px; margin-bottom:10px;",
           icon("triangle-exclamation"),
           " Aucun dossier de données n'est monté dans ce conteneur : vous ne pourrez naviguer que dans les dossiers internes au conteneur, pas dans ceux de votre ordinateur. ",
-          "Relancez CARROT via le lanceur fourni (Lancer_CARROT.sh sur Linux/macOS, ou Lancer_CARROT.bat sur Windows), qui monte automatiquement votre dossier personnel.")
+          "Suivre la procédure sur le README pour utiliser correctement AutoSpectral")
     })
     
     # ── Bannière : échantillons déjà démixés à l'import ────────────────────────
