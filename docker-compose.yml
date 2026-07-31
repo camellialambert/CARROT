@@ -1,0 +1,30 @@
+services:
+  carrot:
+    # Construction LOCALE de l'image, depuis le Dockerfile de ce dossier
+    # (utile pour tester vos changements de code avant de publier sur Docker
+    # Hub). Une fois satisfaite du résultat, vous pourrez remplacer ce bloc
+    # "build:" par "image: camellialambert/carrot" pour utiliser la version
+    # déjà publiée à la place (plus rapide, pas de reconstruction).
+    build:
+      context: .
+
+    # Nécessaire sur Mac Apple Silicon (M1/M2/M3) : l'image est construite pour
+    # amd64 (x86_64), donc exécutée via émulation. Sans effet sur Linux/Windows
+    # ou Mac Intel (déjà nativement amd64).
+    platform: linux/amd64
+
+    container_name: carrot
+
+    ports:
+      - "${PORT_HOTE:-80}:3838" # Port exposé sur votre machine (modifiable via .env) -> port interne fixe du conteneur (3838, ne pas changer)
+
+    volumes:
+      # ── LE VOLUME : le cœur du principe machine réelle / machine virtuelle ──
+      # Partie GAUCHE (avant les ":")  = chemin sur VOTRE machine réelle
+      # Partie DROITE (après les ":")  = chemin correspondant DANS le conteneur
+      # Tout ce que vous mettez à gauche devient visible/modifiable à droite,
+      # et réciproquement : AutoSpectral écrit dans /data (à droite), donc ça
+      # apparaît directement dans votre vrai dossier (à gauche).
+      - "${DOSSIER_DONNEES}:/data"
+
+    restart: unless-stopped # Redémarre automatiquement le conteneur si Docker (ou la machine) redémarre
