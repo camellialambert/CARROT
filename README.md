@@ -18,8 +18,6 @@ CARROT was developed at Institut Cochin (a collaboration between the BIOINFORMAT
 
 Installation via Docker.
 
-* Installer Docker
-
 * **macOS** : Docker Desktop — https://docs.docker.com/desktop/setup/install/mac-install/
 * **Linux** : Docker Engine (inclut Docker Compose) — https://docs.docker.com/engine/install/
 
