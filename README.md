@@ -1,4 +1,9 @@
 # CARROT
+
+<p align="center">
+  <img src="logo_CARROT.png" width="220" alt="CARROT logo">
+</p>
+
 **C**ytometry **A**nalysis and **R**eporting with **R**-based **O**pen-source **T**ools
 
 CARROT is a complete flow cytometry analysis pipeline. It supports both conventional and spectral cytometry data, and includes the following steps: import, compensation, spectral unmixing, quality control (PeacoQC, flowAI), preprocessing (removal of debris, doublets, and dead cells), and advanced analyses (gating, PCA, UMAP, t‑SNE).  
@@ -9,30 +14,45 @@ CARROT was developed at Institut Cochin (a collaboration between the BIOINFORMAT
 
 ---
 
-## Installation
+## Installation (Linux / Mac)
 
-Installation is currently only available via Docker.
+Installation via Docker.
 
-* Install Docker: https://docs.docker.com/get-docker/
-* Then, perform on your terminal :
+* Installer Docker
 
+* **macOS** : Docker Desktop — https://docs.docker.com/desktop/setup/install/mac-install/
+* **Linux** : Docker Engine (inclut Docker Compose) — https://docs.docker.com/engine/install/
+
+--> If you don't need the Unmixing tab:
+* Just run:
+  
 ```bash
-docker pull --platform linux/amd64 camellialambert/carrot
-docker run --platform linux/amd64 -dp 80:3838 --rm camellialambert/carrot
+docker pull camellialambert/carrot
+docker run -dp 80:3838 --rm --platform linux/amd64 --name carrot camellialambert/carrot
 ```
-**For macOS / Linux (Ubuntu, Debian, etc) Users**
-* Download "Lancer_CARROT.sh"
-* Go to the path where this file is on your terminal :
+* On your usual browser access to CARROT at **http://localhost/**
+* Once you are finished, close CARROT with :
 
 ```bash
-cd /chemin/vers/CARROT
+docker stop carrot
+```
+  
+--> If you need the Unmixing tab (AutoSpectral):
+
+AutoSpectral needs direct access to a real folder on your computer, to read your FCS files and write its results there. Add a single option to the same command, pointing to that folder:
+
+```bash
+docker run -dp 80:3838 --rm --platform linux/amd64 --name carrot \
+  -v "/path/to/your/data/folder:/data" \
+  camellialambert/carrot
 ```
 
-* Then run on your terminal : 
+**Example:**
 
 ```bash
-chmod +x Lancer_CARROT.sh
-./Lancer_CARROT.sh
+docker run -dp 80:3838 --rm --platform linux/amd64 --name carrot \
+  -v "/home/Desktop/Spectral_Data:/data" \
+  camellialambert/carrot
 ```
 
 * On your usual browser access to CARROT at **http://localhost/**
@@ -41,17 +61,6 @@ chmod +x Lancer_CARROT.sh
 ```bash
 docker stop carrot
 ```
-
-**For Windows Users**
-
-* Download "Lancer_CARROT.bat" and double-click on the file
-* This will open a new window and CARROT will automatically open on your usual browser at **http://localhost/**
-* Once you are finished, close CARROT by closing the window or with :
-
-```bash
-docker stop carrot
-```
----
 
 ## Features
 
