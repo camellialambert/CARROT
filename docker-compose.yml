@@ -1,12 +1,14 @@
 services:
   carrot:
-    # Construction LOCALE de l'image, depuis le Dockerfile de ce dossier
-    # (utile pour tester vos changements de code avant de publier sur Docker
-    # Hub). Une fois satisfaite du résultat, vous pourrez remplacer ce bloc
-    # "build:" par "image: camellialambert/carrot" pour utiliser la version
-    # déjà publiée à la place (plus rapide, pas de reconstruction).
+    # Construction LOCALE de l'image, depuis le Dockerfile de ce dossier.
+    # "image:" ci-dessous donne un NOM explicite au résultat de cette
+    # construction (au lieu du nom automatique "carrot-carrot" que Compose
+    # utiliserait sinon) : ça permet de faire directement
+    # "docker push camellialambert/carrot" après un "docker compose build",
+    # sans étape de renommage manuel.
     build:
       context: .
+    image: camellialambert/carrot
 
     # Nécessaire sur Mac Apple Silicon (M1/M2/M3) : l'image est construite pour
     # amd64 (x86_64), donc exécutée via émulation. Sans effet sur Linux/Windows
